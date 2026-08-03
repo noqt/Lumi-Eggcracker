@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lumi-nutcracker"
+version = "0.1.0"
+description = "A local Linux kill switch for explicitly selected AI and agent workloads"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{name = "Skylark.AI"}]
+dependencies = []
+keywords = ["ai", "agents", "cgroups", "kill-switch", "linux"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Systems Administration",
+]
+
+[project.scripts]
+nutcracker = "lumi_nutcracker.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
