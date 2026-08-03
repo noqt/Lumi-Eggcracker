@@ -70,7 +70,7 @@ def stop_canary(canary: subprocess.Popen[bytes]) -> None:
 def generated(path: Path, prompt: str) -> bool:
     if not path.is_file() or path.is_symlink():
         return False
-    marker = f"\n> {prompt}\n".encode("utf-8")
+    marker = f"\n> {prompt}\n".encode()
     output = path.read_bytes()
     position = output.find(marker)
     # llama-cli writes its startup banner before the prompt.  Requiring text
