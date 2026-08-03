@@ -67,12 +67,20 @@ def stop_canary(canary: subprocess.Popen[bytes]) -> None:
         canary.wait(timeout=3)
 
 
-def generated(path: Path) -> bool:
-    return path.is_file() and not path.is_symlink() and path.stat().st_size >= 32
+def generated(path: Path, prompt: str) -> bool:
+    if not path.is_file() or path.is_symlink():
+        return False
+    marker = f"\n> {prompt}\n".encode("utf-8")
+    output = path.read_bytes()
+    position = output.find(marker)
+    # llama-cli writes its startup banner before the prompt.  Requiring text
+    # after the echoed prompt proves model output, rather than merely output
+    # from loading the binary or model metadata.
+    return position >= 0 and len(output) - (position + len(marker)) >= 32
 
 
 def one_smoke(*, runner: Path, model: Path, provenance: dict[str, Any], index: int) -> dict[str, Any]:
-    prompt = "Explain one safe property of a Linux cgroup in a concise paragraph."
+    prompt = "Explain one safe property of a Linux cgroup in one sentence."
     with tempfile.TemporaryDirectory(prefix="lumi-eggcracker-ai-smoke-", dir="/tmp") as raw:
         root = Path(raw)
         output, diagnostics, receipt_path = root / "generated.txt", root / "runner.stderr", root / "receipt.json"
@@ -88,12 +96,17 @@ def one_smoke(*, runner: Path, model: Path, provenance: dict[str, Any], index: i
         started: dict[str, Any] | None = None
         contained = False
         try:
-            runner_argv = [str(runner), "-m", str(model), "-p", prompt, "-n", "4096", "--no-display-prompt", "--seed", "1234"]
+            runner_argv = [
+                "/usr/bin/stdbuf", "-o0", "-e0", str(runner), "-m", str(model),
+                "-p", prompt, "-n", "512", "-t", "12", "-tb", "12", "-c", "512",
+                "--simple-io", "--single-turn", "--no-warmup", "--no-display-prompt",
+                "--seed", "1234",
+            ]
             started = call(["start", "--name", name, "--max-pids", "64", "--", "/usr/bin/python3", str(WORKER), "--stdout", str(output), "--stderr", str(diagnostics), "--", *runner_argv])
-            deadline = time.monotonic() + 90
-            while time.monotonic() < deadline and not generated(output):
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline and not generated(output, prompt):
                 time.sleep(0.05)
-            if not generated(output):
+            if not generated(output, prompt):
                 raise RuntimeError("real AI workload did not produce 32 bytes of generated output")
             status = call(["status", "--name", name])
             if status.get("state") != "RUNNING":

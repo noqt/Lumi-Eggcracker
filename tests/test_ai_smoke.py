@@ -48,10 +48,12 @@ class AiSmokeTests(unittest.TestCase):
     def test_generated_output_requires_visible_content(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             output = Path(raw) / "generated.txt"
-            output.write_bytes(b"x" * 31)
-            self.assertFalse(smoke.generated(output))
-            output.write_bytes(b"x" * 32)
-            self.assertTrue(smoke.generated(output))
+            prompt = "test prompt"
+            output.write_bytes(b"startup output\n> test prompt\n" + b"x" * 31)
+            self.assertFalse(smoke.generated(output, prompt))
+            output.write_bytes(b"startup output\n> test prompt\n" + b"x" * 32)
+            self.assertTrue(smoke.generated(output, prompt))
+            self.assertFalse(smoke.generated(output, "other prompt"))
 
     def test_prepare_script_keeps_external_asset_inputs_pinned(self) -> None:
         self.assertEqual("b10240", prepare.LLAMA_TAG)
