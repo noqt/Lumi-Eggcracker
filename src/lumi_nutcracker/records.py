@@ -11,7 +11,6 @@ from typing import Any
 from .containment import CgroupIdentity, EmptyProof
 from .jsonio import JsonInputError, canonical_bytes, load_regular_json
 
-
 RUN_SCHEMA = "lumi-nutcracker.run.v1"
 RECEIPT_SCHEMA = "lumi-nutcracker.receipt.v1"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")

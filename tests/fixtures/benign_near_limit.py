@@ -6,7 +6,6 @@ import os
 import sys
 import time
 
-
 children = max(0, int(sys.argv[1]) - 2)
 pids: list[int] = []
 for _ in range(children):

@@ -7,7 +7,6 @@ import signal
 import sys
 import time
 
-
 mode = sys.argv[1] if len(sys.argv) == 2 else "fork"
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 end = time.monotonic() + 30

@@ -9,7 +9,6 @@ from typing import Any
 
 from .jsonio import JsonInputError
 
-
 MAX_FRAME = 32 * 1024
 SOCKET_PATH = "/run/lumi-nutcracker/control.sock"
 

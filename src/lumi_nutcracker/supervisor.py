@@ -18,10 +18,23 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .containment import capture_identity, kill_path, pids_max_event, validate_identity, verify_empty
+from .containment import (
+    capture_identity,
+    kill_path,
+    pids_max_event,
+    validate_identity,
+    verify_empty,
+)
 from .jsonio import JsonInputError, load_regular_json
-from .records import RUN_SCHEMA, identity_from_run, load_run, make_receipt, record_path, validate_run, write_atomic
-
+from .records import (
+    RUN_SCHEMA,
+    identity_from_run,
+    load_run,
+    make_receipt,
+    record_path,
+    validate_run,
+    write_atomic,
+)
 
 MAX_FRAME = 32 * 1024
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -174,7 +187,7 @@ class Supervisor:
             cleanup = self._cleanup(record["unit"])
             event_id = os.urandom(12).hex()
             receipt = make_receipt(record=record, trigger=trigger, trigger_ns=observed, kill_started_ns=kill_started, kill_complete_ns=kill_completed, empty_ns=empty_ns, proof=proof, version=__version__, source_commit=self.policy["source_commit"], cleanup=cleanup, event_id=event_id)
-            receipt["receipt_written_utc"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+            receipt["receipt_written_utc"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
             try:
                 self.operations.append("durable-receipt")
                 write_atomic(self._receipt_path(event_id), receipt)
@@ -209,7 +222,7 @@ class Supervisor:
                 if pids_max_event(identity) > baseline:
                     self._contain(record, "PID_LIMIT", time.monotonic_ns())
                     return
-        except Exception:
+        except Exception:  # noqa: BLE001 - any watcher failure must fail closed
             # A lost watcher must not leave an active owned workload running.
             try:
                 self._contain(record, "SUPERVISOR_RESTART_FAIL_CLOSED", time.monotonic_ns())

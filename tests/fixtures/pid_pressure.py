@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import time
 
-
 end = time.monotonic() + 20
 while time.monotonic() < end:
     try:

@@ -6,7 +6,6 @@ import argparse
 import json
 from pathlib import Path
 
-
 REQUIRED = {"manifest.json", "native-matrix.json", "ai-smoke.json", "install-cycle.json", "report.md", "SHA256SUMS"}
 
 

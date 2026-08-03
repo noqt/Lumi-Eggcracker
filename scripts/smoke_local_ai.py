@@ -6,9 +6,9 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import signal
 import subprocess
-import secrets
 import tempfile
 import time
 from pathlib import Path

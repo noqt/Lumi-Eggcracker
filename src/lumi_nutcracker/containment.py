@@ -11,7 +11,6 @@ from pathlib import Path
 
 from .jsonio import JsonInputError
 
-
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 UNIT_RE = re.compile(r"^/system\.slice/lumi-nutcracker-workload-([0-9a-f]{24})\.service$")
 

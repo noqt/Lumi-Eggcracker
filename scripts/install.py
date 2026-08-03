@@ -16,7 +16,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-
 LIB = Path("/usr/local/lib/lumi-nutcracker")
 BIN = Path("/usr/local/bin/nutcracker")
 ETC = Path("/etc/lumi-nutcracker")

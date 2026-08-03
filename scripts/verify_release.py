@@ -10,7 +10,6 @@ import sys
 import zipfile
 from pathlib import Path
 
-
 FORBIDDEN = ("/mnt/f/", "f:\\", "network-deny", "network_rule", "nftables", "/usr/sbin/nft", "b20", "brief 1", "brief-", "rootless", "skylark sentinel", "skylark-sentinel", "/usr/local/bin/lumi-nutcracker")
 
 

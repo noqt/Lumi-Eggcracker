@@ -11,7 +11,6 @@ import shutil
 import subprocess
 from pathlib import Path
 
-
 LIB = Path("/usr/local/lib/lumi-nutcracker")
 BIN = Path("/usr/local/bin/nutcracker")
 ETC = Path("/etc/lumi-nutcracker")

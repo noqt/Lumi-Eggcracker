@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from lumi_nutcracker.containment import EmptyProof
+from lumi_nutcracker.jsonio import JsonInputError
 from lumi_nutcracker.records import RUN_SCHEMA, make_receipt, validate_run
 
 
@@ -21,5 +22,5 @@ class RecordTests(unittest.TestCase):
     def test_schema_rejects_unknown_field(self) -> None:
         value = record()
         value["extra"] = True
-        with self.assertRaises(Exception):
+        with self.assertRaises(JsonInputError):
             validate_run(value)

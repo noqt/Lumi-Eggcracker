@@ -9,7 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 output = Path(sys.argv[1])
 attempts = int(sys.argv[2])
 socket_path = "/run/lumi-nutcracker/control.sock"

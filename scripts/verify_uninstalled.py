@@ -8,7 +8,6 @@ import pwd
 import subprocess
 from pathlib import Path
 
-
 PATHS = (Path("/usr/local/lib/lumi-nutcracker"), Path("/usr/local/bin/nutcracker"), Path("/etc/lumi-nutcracker"), Path("/etc/systemd/system/lumi-nutcracker.service"), Path("/var/lib/lumi-nutcracker"), Path("/run/lumi-nutcracker"))
 
 
