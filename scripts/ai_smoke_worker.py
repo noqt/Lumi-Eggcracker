@@ -26,3 +26,7 @@ def main(argv: list[str] | None = None) -> int:
         os.close(stderr)
     os.execv(command[0], command)
     return 127
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

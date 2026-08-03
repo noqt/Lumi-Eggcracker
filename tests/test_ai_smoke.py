@@ -63,5 +63,7 @@ class AiSmokeTests(unittest.TestCase):
 
     def test_smoke_path_does_not_use_a_shell_wrapper(self) -> None:
         source = (ROOT / "scripts" / "smoke_local_ai.py").read_text(encoding="utf-8")
+        worker = (ROOT / "scripts" / "ai_smoke_worker.py").read_text(encoding="utf-8")
         self.assertNotIn("/bin/sh", source)
         self.assertIn("ai_smoke_worker.py", source)
+        self.assertIn('raise SystemExit(main())', worker)
