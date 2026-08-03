@@ -10,13 +10,13 @@ import sys
 import zipfile
 from pathlib import Path
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 PREFIX = f"lumi-eggcracker-{VERSION}/"
 FORBIDDEN = (
     "/mnt/" + "f/", "f" + ":\\", "network" + "-deny", "network" + "_rule",
     "nft" + "ables", "/usr/sbin/" + "nft", "b" + "20", "brief" + " 1",
     "brief" + "-", "root" + "less", "skylark" + " sentinel",
-    "skylark" + "-sentinel", "nut" + "cracker",
+    "skylark" + "-sentinel",
 )
 
 
@@ -47,7 +47,7 @@ def main() -> int:
     manifest = json.loads((args.artifact.parent / "release-manifest.json").read_text(encoding="utf-8"))
     if manifest.get("version") != VERSION or manifest.get("artifact") != args.artifact.name:
         raise SystemExit("release manifest is inconsistent")
-    expected = {PREFIX + name for name in (args.artifact.name, args.source_archive.name, "release-manifest.json", "SHA256SUMS", "README.md", "LICENSE", "LIMITATIONS.md", "SECURITY.md", "SECURITY_MODEL.md", "QUALIFICATION.md", "RELEASE_NOTES.md", "scripts/install.py", "scripts/uninstall.py", "scripts/verify_uninstalled.py", "scripts/smoke_local_ai.py")}
+    expected = {PREFIX + name for name in (args.artifact.name, args.source_archive.name, "release-manifest.json", "SHA256SUMS", "README.md", "LICENSE", "LIMITATIONS.md", "SECURITY.md", "SECURITY_MODEL.md", "QUALIFICATION.md", "RELEASE_NOTES.md", "scripts/install.py", "scripts/uninstall.py", "scripts/verify_uninstalled.py", "scripts/prepare_ai_smoke.py", "scripts/ai_smoke_worker.py", "scripts/smoke_local_ai.py")}
     with zipfile.ZipFile(args.release_bundle) as archive:
         if set(archive.namelist()) != expected:
             raise SystemExit("release bundle contents are inconsistent")

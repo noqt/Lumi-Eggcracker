@@ -77,6 +77,8 @@ def main() -> int:
         ROOT / "scripts" / "install.py": "scripts/install.py",
         ROOT / "scripts" / "uninstall.py": "scripts/uninstall.py",
         ROOT / "scripts" / "verify_uninstalled.py": "scripts/verify_uninstalled.py",
+        ROOT / "scripts" / "prepare_ai_smoke.py": "scripts/prepare_ai_smoke.py",
+        ROOT / "scripts" / "ai_smoke_worker.py": "scripts/ai_smoke_worker.py",
         ROOT / "scripts" / "smoke_local_ai.py": "scripts/smoke_local_ai.py",
     }
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:

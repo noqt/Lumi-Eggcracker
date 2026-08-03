@@ -1,6 +1,6 @@
 # Qualification
 
-The 0.1.1 candidate is releaseable only when its exact commit passes the native Ubuntu matrix and produces the minimal evidence pack. Required gates include 100/100 fork-race workload-tree kills, 100/100 unrelated-canary survivals, zero workload control-socket accesses or replacement launches, PID-tripwire containment, benign near-limit completion, fail-closed supervisor restart recovery, and p95 trigger-to-empty latency below 500 ms.
+The 0.1.2 candidate is releaseable only when its exact commit passes the native Ubuntu matrix, completes five pinned real-AI smoke repetitions, and produces the minimal evidence pack. Required gates include 100/100 fork-race workload-tree kills, 100/100 unrelated-canary survivals, zero workload control-socket accesses or replacement launches, PID-tripwire containment, benign near-limit completion, fail-closed supervisor restart recovery, p95 trigger-to-empty latency below 500 ms, and no packaged third-party runner or model assets.
 
 Run the matrix only on a disposable or dedicated Linux test host:
 

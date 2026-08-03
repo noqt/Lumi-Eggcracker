@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 LIB = Path("/usr/local/lib/lumi-eggcracker")
 BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")

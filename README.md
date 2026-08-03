@@ -27,11 +27,11 @@ It does not identify AI automatically, find unknown processes, detect intrusions
 
 ## Quick start
 
-Download and extract `lumi-eggcracker-0.1.1-linux.zip`, then run as root:
+Download and extract `lumi-eggcracker-0.1.2-linux.zip`, then run as root:
 
 ```sh
-cd lumi-eggcracker-0.1.1
-sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.1.1.pyz
+cd lumi-eggcracker-0.1.2
+sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.1.2.pyz
 eggcracker doctor
 eggcracker start --name demo --max-pids 8 -- /bin/sleep 60
 eggcracker kill --name demo --receipt ./demo-receipt.json
@@ -42,10 +42,13 @@ The selected command is launched through a systemd transient unit. It does not a
 
 ## Real local AI smoke
 
-With a local `llama-cli` and GGUF model available, the release bundle includes a smoke demonstration that waits for visible model output, kills the explicitly selected inference workload, and verifies an unrelated canary survives:
+The release bundle can prepare its pinned, external llama.cpp runner and Qwen GGUF model in a separate workspace. The assets are downloaded only after explicit acceptance, are verified by commit/revision and SHA-256, and are never included in the release archive. The smoke waits for visible model output, kills the explicitly selected inference workload, and verifies an unrelated canary survives:
 
 ```sh
-sudo python3 scripts/smoke_local_ai.py --llama-cli /path/to/llama-cli --model /path/to/model.gguf --output ./ai-smoke.json
+sudo python3 scripts/prepare_ai_smoke.py --workspace /opt/lumi-eggcracker-ai-smoke --accept-third-party-downloads
+sudo python3 scripts/smoke_local_ai.py --assets-manifest /opt/lumi-eggcracker-ai-smoke/ai-smoke-assets.json --repetitions 5 --output ./ai-smoke.json
 ```
+
+The pinned runner is llama.cpp `b10240` (`0b14b87d7c20cb753b94b96854dd7b45306fc696`, MIT). The pinned model is Qwen2.5-0.5B-Instruct Q4_K_M (`9217f5db79a29953eb74d5343926648285ec7e67`, Apache-2.0). You may instead supply a local runner and model with `--llama-cli` and `--model`; that path is recorded as operator-supplied provenance.
 
 See [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md), and [QUALIFICATION.md](QUALIFICATION.md) before using the preview.

@@ -6,7 +6,11 @@ import argparse
 import json
 from pathlib import Path
 
-REQUIRED = {"manifest.json", "native-matrix.json", "ai-smoke.json", "install-cycle.json", "report.md", "SHA256SUMS"}
+REQUIRED = {
+    "environment.json", "asset-provenance.json", "ai-smoke.json",
+    "native-matrix.json", "install-cycle.json", "release-manifest.json",
+    "SHA256SUMS", "report.md",
+}
 
 
 def main() -> int:
@@ -17,10 +21,17 @@ def main() -> int:
     found = {item.name for item in args.evidence.iterdir()} if args.evidence.is_dir() else set()
     if found != REQUIRED:
         raise SystemExit(f"evidence pack files differ: {sorted(found)}")
-    manifest = json.loads((args.evidence / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((args.evidence / "release-manifest.json").read_text(encoding="utf-8"))
+    assets = json.loads((args.evidence / "asset-provenance.json").read_text(encoding="utf-8"))
     matrix = json.loads((args.evidence / "native-matrix.json").read_text(encoding="utf-8"))
     smoke = json.loads((args.evidence / "ai-smoke.json").read_text(encoding="utf-8"))
-    if manifest.get("source_commit") != args.require_source_commit or matrix.get("result") != "PASS" or smoke.get("result") != "PASS":
+    if (
+        manifest.get("source_commit") != args.require_source_commit
+        or matrix.get("result") != "PASS"
+        or smoke.get("result") != "PASS"
+        or assets.get("schema_version") != "lumi-eggcracker.ai-smoke-assets.v1"
+        or len(smoke.get("repetitions", [])) != 5
+    ):
         raise SystemExit("evidence does not meet release gate")
     print(json.dumps({"result": "PASS"}, sort_keys=True))
     return 0
