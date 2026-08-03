@@ -1,4 +1,4 @@
-"""Root-only native qualification for fresh Nutcracker-owned fixture workloads."""
+"""Root-only native qualification for fresh Eggcracker-owned fixture workloads."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI = "/usr/local/bin/nutcracker"
+CLI = "/usr/local/bin/eggcracker"
 
 
 def run(argv: list[str], *, check: bool = True, timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -77,7 +77,7 @@ def main() -> int:
         raise SystemExit("output must be a new file under an existing directory")
     if args.fork_race_repetitions != 100 or args.benign_repetitions < 50 or args.restart_repetitions < 20 or args.socket_attempts < 100:
         raise SystemExit("qualification counts are below the precommitted gates")
-    install = json.loads(Path("/var/lib/lumi-nutcracker/install-manifest.json").read_text(encoding="utf-8"))
+    install = json.loads(Path("/var/lib/lumi-eggcracker/install-manifest.json").read_text(encoding="utf-8"))
     operator = str(install["operator"])
     workload = str(install["workload_user"])
     workload_uid = pwd.getpwnam(workload).pw_uid
@@ -97,7 +97,7 @@ def main() -> int:
                 name = f"race-{token}-{index}"
                 call(operator, ["start", "--name", name, "--max-pids", "4096", "--", "/usr/bin/python3", str(ROOT / "tests/fixtures/fork_race.py"), modes[index % len(modes)]])
                 time.sleep(0.12)
-                receipt_path = Path("/tmp") / f"lumi-nutcracker-receipt-{token}-{index}.json"
+                receipt_path = Path("/tmp") / f"lumi-eggcracker-receipt-{token}-{index}.json"
                 receipt = call(operator, ["kill", "--name", name, "--receipt", str(receipt_path)])
                 if receipt.get("result") != "TERMINATED" or receipt["trigger"]["kind"] != "OPERATOR" or receipt["containment"]["surviving_pids"]:
                     raise RuntimeError("fork race did not produce exact termination receipt")
@@ -113,7 +113,7 @@ def main() -> int:
             name = f"pressure-{token}-{index}"
             call(operator, ["start", "--name", name, "--max-pids", "4", "--", "/usr/bin/python3", str(ROOT / "tests/fixtures/pid_pressure.py")])
             state = wait_state(operator, name, "TERMINATED")
-            receipt_files = sorted(Path("/var/lib/lumi-nutcracker/receipts").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
+            receipt_files = sorted(Path("/var/lib/lumi-eggcracker/receipts").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
             receipt = json.loads(receipt_files[-1].read_text(encoding="utf-8"))
             if receipt["trigger"]["kind"] != "PID_LIMIT":
                 raise RuntimeError(f"PID tripwire did not create PID receipt: {state}")
@@ -126,7 +126,7 @@ def main() -> int:
             if state.get("state") != "COMPLETED_ALLOWED":
                 raise RuntimeError("benign near-limit workload was not allowed")
             results["benign"].append(state["state"])
-        hostile_path = Path("/tmp") / f"lumi-nutcracker-hostile-{token}.json"
+        hostile_path = Path("/tmp") / f"lumi-eggcracker-hostile-{token}.json"
         hostile = f"hostile-{token}"
         call(operator, ["start", "--name", hostile, "--max-pids", "8", "--", "/usr/bin/python3", str(ROOT / "tests/fixtures/hostile_client.py"), str(hostile_path), str(args.socket_attempts)])
         wait_state(operator, hostile, "COMPLETED_ALLOWED", timeout=30)
@@ -141,9 +141,9 @@ def main() -> int:
         for index in range(args.restart_repetitions):
             name = f"restart-{token}-{index}"
             call(operator, ["start", "--name", name, "--max-pids", "8", "--", "/bin/sleep", "30"])
-            run(["/usr/bin/systemctl", "kill", "--kill-who=main", "-s", "SIGKILL", "lumi-nutcracker.service"])
+            run(["/usr/bin/systemctl", "kill", "--kill-who=main", "-s", "SIGKILL", "lumi-eggcracker.service"])
             state = wait_state(operator, name, "TERMINATED", timeout=12)
-            receipt_files = sorted(Path("/var/lib/lumi-nutcracker/receipts").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
+            receipt_files = sorted(Path("/var/lib/lumi-eggcracker/receipts").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
             receipt = json.loads(receipt_files[-1].read_text(encoding="utf-8"))
             if receipt["trigger"]["kind"] != "SUPERVISOR_RESTART_FAIL_CLOSED":
                 raise RuntimeError(f"restart did not fail closed: {state}")
@@ -162,9 +162,9 @@ def main() -> int:
             args.output.write_text(json.dumps(results, sort_keys=True) + "\n", encoding="utf-8")
         raise
     finally:
-        active = run(["/usr/bin/systemctl", "list-units", "lumi-nutcracker-workload-*", "--type=service", "--state=active", "--plain", "--no-legend"], check=False)
+        active = run(["/usr/bin/systemctl", "list-units", "lumi-eggcracker-workload-*", "--type=service", "--state=active", "--plain", "--no-legend"], check=False)
         for line in active.stdout.splitlines():
-            if line.split() and line.split()[0].startswith("lumi-nutcracker-workload-"):
+            if line.split() and line.split()[0].startswith("lumi-eggcracker-workload-"):
                 run(["/usr/bin/systemctl", "stop", line.split()[0]], check=False)
 
 

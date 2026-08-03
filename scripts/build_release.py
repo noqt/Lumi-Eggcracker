@@ -1,4 +1,4 @@
-"""Build a clean Lumi Nutcracker zipapp, source archive, and checksums."""
+"""Build a clean Lumi Eggcracker zipapp, source archive, and checksums."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def digest(path: Path) -> str:
 
 
 def version() -> str:
-    value = (ROOT / "src" / "lumi_nutcracker" / "__init__.py").read_text(encoding="utf-8")
+    value = (ROOT / "src" / "lumi_eggcracker" / "__init__.py").read_text(encoding="utf-8")
     match = re.search(r'__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"', value)
     if not match:
         raise RuntimeError("cannot determine public version")
@@ -48,20 +48,20 @@ def main() -> int:
     release_version = version()
     commit = command(["git", "-C", str(ROOT), "rev-parse", "HEAD"])
     args.output.mkdir(parents=True, exist_ok=True)
-    artifact = args.output / f"lumi-nutcracker-{release_version}.pyz"
-    source = args.output / f"lumi-nutcracker-{release_version}-source.zip"
-    bundle = args.output / f"lumi-nutcracker-{release_version}-linux.zip"
-    with tempfile.TemporaryDirectory(prefix="lumi-nutcracker-build-") as raw:
+    artifact = args.output / f"lumi-eggcracker-{release_version}.pyz"
+    source = args.output / f"lumi-eggcracker-{release_version}-source.zip"
+    bundle = args.output / f"lumi-eggcracker-{release_version}-linux.zip"
+    with tempfile.TemporaryDirectory(prefix="lumi-eggcracker-build-") as raw:
         stage = Path(raw) / "src"
-        shutil.copytree(ROOT / "src", stage, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-        (stage / "__main__.py").write_text("from lumi_nutcracker.cli import main\nraise SystemExit(main())\n", encoding="utf-8")
-        (stage / "lumi_nutcracker" / "build_info.py").write_text(f'SOURCE_COMMIT = "{commit}"\n', encoding="utf-8")
+        shutil.copytree(ROOT / "src", stage, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"))
+        (stage / "__main__.py").write_text("from lumi_eggcracker.cli import main\nraise SystemExit(main())\n", encoding="utf-8")
+        (stage / "lumi_eggcracker" / "build_info.py").write_text(f'SOURCE_COMMIT = "{commit}"\n', encoding="utf-8")
         zipapp.create_archive(stage, target=artifact, interpreter="/usr/bin/env python3")
-    command(["git", "-C", str(ROOT), "archive", "--format=zip", f"--prefix=lumi-nutcracker-{release_version}/", "-o", str(source), "HEAD"])
+    command(["git", "-C", str(ROOT), "archive", "--format=zip", f"--prefix=lumi-eggcracker-{release_version}/", "-o", str(source), "HEAD"])
     manifest = {"artifact": artifact.name, "sha256": digest(artifact), "source_archive": source.name, "source_archive_sha256": digest(source), "source_commit": commit, "version": release_version}
     (args.output / "release-manifest.json").write_text(__import__("json").dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     (args.output / "SHA256SUMS").write_text(f"{manifest['sha256']}  {artifact.name}\n{manifest['source_archive_sha256']}  {source.name}\n", encoding="utf-8")
-    prefix = f"lumi-nutcracker-{release_version}"
+    prefix = f"lumi-eggcracker-{release_version}"
     release_files = {
         artifact: artifact.name,
         source: source.name,
@@ -71,6 +71,8 @@ def main() -> int:
         ROOT / "LICENSE": "LICENSE",
         ROOT / "LIMITATIONS.md": "LIMITATIONS.md",
         ROOT / "SECURITY.md": "SECURITY.md",
+        ROOT / "SECURITY_MODEL.md": "SECURITY_MODEL.md",
+        ROOT / "QUALIFICATION.md": "QUALIFICATION.md",
         ROOT / "RELEASE_NOTES.md": "RELEASE_NOTES.md",
         ROOT / "scripts" / "install.py": "scripts/install.py",
         ROOT / "scripts" / "uninstall.py": "scripts/uninstall.py",
@@ -80,6 +82,12 @@ def main() -> int:
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path, name in release_files.items():
             archive.write(path, f"{prefix}/{name}")
+    # The bundle cannot contain a checksum of itself without recursion.  The
+    # detached checksum file intentionally covers all published binary assets.
+    (args.output / "SHA256SUMS").write_text(
+        f"{manifest['sha256']}  {artifact.name}\n{manifest['source_archive_sha256']}  {source.name}\n{digest(bundle)}  {bundle.name}\n",
+        encoding="utf-8",
+    )
     print(bundle)
     return 0
 

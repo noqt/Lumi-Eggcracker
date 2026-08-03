@@ -1,6 +1,6 @@
 ## Summary
 
-Describe the user-visible change and why it belongs in Lumi Nutcracker's narrow kill-switch scope.
+Describe the user-visible change and why it belongs in Lumi Eggcracker's narrow kill-switch scope.
 
 ## Verification
 

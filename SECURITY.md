@@ -1,5 +1,7 @@
 # Security policy
 
-Report security issues privately through GitHub's **Security → Report a vulnerability** flow when it is enabled for the repository. Otherwise, contact the project maintainer privately. Do not open a public issue containing exploit details, live credentials, private model files or VM keys.
+Lumi Eggcracker is a privileged local process-containment preview. Test only workloads and machines you own or administer.
 
-Lumi Nutcracker is a local privileged process-containment tool. Test only workloads and machines you own or administer. Do not use it against third-party processes or systems.
+Report vulnerabilities privately through the repository security-advisory channel. Do not include exploit code, machine-specific paths, credentials, or live workload details in public issues.
+
+The security boundary and non-claims are documented in [SECURITY_MODEL.md](SECURITY_MODEL.md).

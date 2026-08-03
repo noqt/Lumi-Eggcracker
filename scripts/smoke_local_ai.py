@@ -23,9 +23,9 @@ def digest(path: Path) -> str:
 
 
 def call(args: list[str]) -> dict[str, object]:
-    result = subprocess.run(["/usr/local/bin/nutcracker", *args], capture_output=True, text=True, check=False, timeout=30)
+    result = subprocess.run(["/usr/local/bin/eggcracker", *args], capture_output=True, text=True, check=False, timeout=30)
     if result.returncode:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Nutcracker command failed")
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Eggcracker command failed")
     return json.loads(result.stdout)
 
 
@@ -39,7 +39,7 @@ def main() -> int:
         raise SystemExit("output must be a new file under an existing directory")
     if not args.llama_cli.is_file() or not os.access(args.llama_cli, os.X_OK) or not args.model.is_file():
         raise SystemExit("llama-cli executable and GGUF model are required")
-    with tempfile.TemporaryDirectory(prefix="lumi-nutcracker-ai-smoke-", dir="/tmp") as raw:
+    with tempfile.TemporaryDirectory(prefix="lumi-eggcracker-ai-smoke-", dir="/tmp") as raw:
         root = Path(raw)
         # The operator owns this short-lived directory; the dedicated workload
         # identity needs a writable output location for the visible demo.

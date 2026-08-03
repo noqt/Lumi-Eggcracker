@@ -1,9 +1,7 @@
 # Limitations
 
-Lumi Nutcracker protects only commands explicitly launched through its local root supervisor. It does not inspect the host for AI, agent, malware or intrusion activity, and it cannot attach an existing process to its protected boundary.
+Lumi Eggcracker protects only commands explicitly launched through its local root supervisor on the qualified Linux/systemd/cgroup-v2 environment.
 
-The product terminates the exact cgroup it created. It does not provide network isolation, credential isolation, filesystem isolation, container isolation, virtual-machine isolation or host isolation. It is not an EDR, antivirus or general malware-prevention product.
+It does not discover AI processes, attach existing processes, identify malware, detect unknown intrusions, isolate networks, credentials or filesystems, provide general malware prevention, or replace EDR.
 
-The PID tripwire is a cgroup process-count ceiling. It is not behavioural detection, a resource-governance system or AI attribution. A supervisor restart intentionally fail-closed terminates active owned workloads rather than continuing them without a live watcher.
-
-Qualification is limited to the published tested native Linux environment. Passing local tests does not establish universal Linux compatibility or production readiness for workloads outside that environment.
+The `start` command is non-interactive in 0.1.1: there is no terminal attachment, current-working-directory forwarding, timeout, memory/CPU limit UX, or output streaming. The supervisor supports one active protected workload globally. Terminal records are retained locally up to 128 entries.

@@ -1,4 +1,4 @@
-"""Manifest-bound installer for one local root supervisor and workload account."""
+"""Manifest-bound installer for Lumi Eggcracker's root supervisor."""
 
 from __future__ import annotations
 
@@ -16,14 +16,15 @@ import time
 from pathlib import Path
 from typing import Any
 
-LIB = Path("/usr/local/lib/lumi-nutcracker")
-BIN = Path("/usr/local/bin/nutcracker")
-ETC = Path("/etc/lumi-nutcracker")
-UNIT = Path("/etc/systemd/system/lumi-nutcracker.service")
-STATE = Path("/var/lib/lumi-nutcracker")
-RUNTIME = Path("/run/lumi-nutcracker")
+VERSION = "0.1.1"
+LIB = Path("/usr/local/lib/lumi-eggcracker")
+BIN = Path("/usr/local/bin/eggcracker")
+ETC = Path("/etc/lumi-eggcracker")
+UNIT = Path("/etc/systemd/system/lumi-eggcracker.service")
+STATE = Path("/var/lib/lumi-eggcracker")
+RUNTIME = Path("/run/lumi-eggcracker")
 SOCKET = RUNTIME / "control.sock"
-WORKLOAD_NAME = "lumi-nutcracker-workload"
+WORKLOAD_NAME = "lumi-eggcracker-workload"
 TARGETS = (LIB, BIN, ETC, UNIT, STATE, RUNTIME)
 
 
@@ -54,7 +55,7 @@ def manifest_for(artifact: Path) -> dict[str, Any]:
     expected = {"artifact", "sha256", "source_archive", "source_archive_sha256", "source_commit", "version"}
     if set(value) != expected or value["artifact"] != artifact.name or value["sha256"] != digest(artifact):
         raise RuntimeError("release artifact identity does not match manifest")
-    if value["version"] != "0.1.0" or len(value["source_commit"]) != 40:
+    if value["version"] != VERSION or len(value["source_commit"]) != 40:
         raise RuntimeError("release manifest version or source identity is invalid")
     return value
 
@@ -63,7 +64,7 @@ def workload_account() -> tuple[pwd.struct_passwd, bool]:
     try:
         account = pwd.getpwnam(WORKLOAD_NAME)
         if account.pw_uid == 0 or account.pw_shell not in {"/usr/sbin/nologin", "/sbin/nologin"} or account.pw_dir != "/nonexistent":
-            raise RuntimeError("existing workload account does not meet Nutcracker contract")
+            raise RuntimeError("existing workload account does not meet Eggcracker contract")
         return account, False
     except KeyError:
         nologin = "/usr/sbin/nologin" if Path("/usr/sbin/nologin").is_file() else "/sbin/nologin"
@@ -74,12 +75,11 @@ def workload_account() -> tuple[pwd.struct_passwd, bool]:
 
 
 def service() -> bytes:
-    return b"""[Unit]\nDescription=Lumi Nutcracker protected workload supervisor\nAfter=multi-user.target\nStartLimitIntervalSec=60\nStartLimitBurst=30\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-nutcracker/lumi-nutcracker.pyz _supervisor --policy /etc/lumi-nutcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-nutcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=multi-user.target\n"""
+    return b"""[Unit]\nDescription=Lumi Eggcracker protected workload supervisor\nAfter=multi-user.target\nStartLimitIntervalSec=60\nStartLimitBurst=60\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _supervisor --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=multi-user.target\n"""
 
 
 def cgroup_kill_available() -> bool:
-    """Probe a disposable child cgroup; cgroup.kill is intentionally absent at root."""
-    unit = f"lumi-nutcracker-preflight-{secrets.token_hex(8)}.service"
+    unit = f"lumi-eggcracker-preflight-{secrets.token_hex(8)}.service"
     started = run(["/usr/bin/systemd-run", f"--unit={unit}", "--collect", "--property=Type=exec", "--", "/bin/sleep", "5"])
     if started.returncode:
         return False
@@ -87,14 +87,13 @@ def cgroup_kill_available() -> bool:
         shown = run(["/usr/bin/systemctl", "show", unit, "--property=ControlGroup"])
         values = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
         cgroup = values.get("ControlGroup", "")
-        parts = cgroup.lstrip("/").split("/")
-        return bool(cgroup.startswith("/system.slice/")) and (Path("/sys/fs/cgroup").joinpath(*parts) / "cgroup.kill").is_file()
+        return bool(cgroup.startswith("/system.slice/")) and (Path("/sys/fs/cgroup").joinpath(*cgroup.lstrip("/").split("/")) / "cgroup.kill").is_file()
     finally:
         run(["/usr/bin/systemctl", "stop", unit])
 
 
-def cleanup(created: list[Path], created_user: bool, created_group: bool = False) -> None:
-    run(["/usr/bin/systemctl", "disable", "--now", "lumi-nutcracker.service"])
+def cleanup(created: list[Path], created_user: bool, created_group: bool) -> None:
+    run(["/usr/bin/systemctl", "disable", "--now", "lumi-eggcracker.service"])
     for path in reversed(created):
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path)
@@ -121,39 +120,32 @@ def main() -> int:
     if operator.pw_uid == 0:
         raise SystemExit("operator must be non-root")
     if any(path.exists() or path.is_symlink() for path in TARGETS):
-        raise SystemExit("refusing pre-existing Nutcracker installation target")
-    if not Path("/sys/fs/cgroup/cgroup.controllers").is_file():
-        raise SystemExit("unified cgroup v2 is required")
-    if "pids" not in Path("/sys/fs/cgroup/cgroup.controllers").read_text(encoding="ascii").split():
-        raise SystemExit("cgroup PID controller is required")
-    if not cgroup_kill_available():
-        raise SystemExit("a transient system workload cgroup with cgroup.kill is required")
+        raise SystemExit("refusing pre-existing Eggcracker installation target")
+    controllers = Path("/sys/fs/cgroup/cgroup.controllers")
+    if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split() or not cgroup_kill_available():
+        raise SystemExit("unified cgroup v2 with cgroup.kill and PID controller is required")
     account, created_user = workload_account()
     group = grp.getgrgid(account.pw_gid)
     created_group = created_user and group.gr_name == WORKLOAD_NAME
-    if account.pw_uid in {0, operator.pw_uid} or account.pw_gid == operator.pw_gid:
+    supplementary = set(os.getgrouplist(account.pw_name, account.pw_gid))
+    if account.pw_uid in {0, operator.pw_uid} or account.pw_gid == operator.pw_gid or supplementary != {account.pw_gid}:
         cleanup([], created_user, created_group)
-        raise SystemExit("workload identity must be separate from operator")
+        raise SystemExit("workload identity must be isolated from the operator and have no supplementary groups")
     created: list[Path] = []
     try:
-        LIB.mkdir(mode=0o755)
-        created.append(LIB)
-        ETC.mkdir(mode=0o700)
-        created.append(ETC)
-        STATE.mkdir(mode=0o700)
-        created.append(STATE)
-        shutil.copyfile(args.artifact, LIB / "lumi-nutcracker.pyz")
-        os.chmod(LIB / "lumi-nutcracker.pyz", 0o755)
-        write_new(BIN, b"#!/bin/sh\nexec /usr/bin/python3 /usr/local/lib/lumi-nutcracker/lumi-nutcracker.pyz \"$@\"\n", 0o755)
-        created.append(BIN)
-        policy = {"operator_gid": operator.pw_gid, "operator_uid": operator.pw_uid, "schema_version": "lumi-nutcracker.policy.v1", "socket_path": str(SOCKET), "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-nutcracker-workload-", "version": release["version"], "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}
+        LIB.mkdir(mode=0o755); created.append(LIB)
+        ETC.mkdir(mode=0o700); created.append(ETC)
+        STATE.mkdir(mode=0o700); created.append(STATE)
+        shutil.copyfile(args.artifact, LIB / "lumi-eggcracker.pyz")
+        os.chmod(LIB / "lumi-eggcracker.pyz", 0o755)
+        write_new(BIN, b"#!/bin/sh\nexec /usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz \"$@\"\n", 0o755); created.append(BIN)
+        policy = {"operator_gid": operator.pw_gid, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.policy.v2", "socket_path": str(SOCKET), "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-eggcracker-workload-", "version": release["version"], "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}
         write_new(ETC / "policy.json", (json.dumps(policy, sort_keys=True) + "\n").encode(), 0o600)
-        write_new(UNIT, service(), 0o644)
-        created.append(UNIT)
-        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-nutcracker.pyz"): digest(LIB / "lumi-nutcracker.pyz"), str(UNIT): digest(UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-nutcracker.install.v1", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
+        write_new(UNIT, service(), 0o644); created.append(UNIT)
+        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v2", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
         write_new(STATE / "install-manifest.json", (json.dumps(manifest, sort_keys=True) + "\n").encode(), 0o600)
         checked = run(["/usr/bin/systemctl", "daemon-reload"])
-        started = run(["/usr/bin/systemctl", "enable", "--now", "lumi-nutcracker.service"])
+        started = run(["/usr/bin/systemctl", "enable", "--now", "lumi-eggcracker.service"])
         if checked.returncode or started.returncode:
             raise RuntimeError((checked.stderr + started.stderr).strip() or "cannot start supervisor")
         deadline = time.monotonic() + 15
@@ -162,7 +154,7 @@ def main() -> int:
         metadata = SOCKET.stat()
         if not SOCKET.exists() or stat.S_IMODE(metadata.st_mode) != 0o660 or metadata.st_uid != 0 or metadata.st_gid != operator.pw_gid:
             raise RuntimeError("control socket ownership contract failed")
-        print(json.dumps({"result": "INSTALLED", "service": "lumi-nutcracker.service", "workload_uid": account.pw_uid}, sort_keys=True))
+        print(json.dumps({"result": "INSTALLED", "service": "lumi-eggcracker.service", "workload_uid": account.pw_uid}, sort_keys=True))
         return 0
     except Exception:
         cleanup(created, created_user, created_group)

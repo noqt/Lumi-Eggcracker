@@ -9,12 +9,13 @@ from pathlib import Path
 
 from . import __version__
 from .client import request
+from .gate import main as gate_main
 from .jsonio import JsonInputError, write_new_json
 from .supervisor import main as supervisor_main
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="nutcracker")
+    parser = argparse.ArgumentParser(prog="eggcracker")
     commands = parser.add_subparsers(dest="command", required=True)
     start = commands.add_parser("start", help="launch an explicitly selected protected workload")
     start.add_argument("--name", required=True)
@@ -39,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     values = sys.argv[1:] if argv is None else argv
     if values[:1] == ["_supervisor"]:
         return supervisor_main(values[1:])
+    if values[:1] == ["_gate"]:
+        return gate_main(values[1:])
     args = _parser().parse_args(values)
     if args.command == "version":
         print(__version__)
@@ -63,5 +66,5 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(value, sort_keys=True))
         return 0
     except (JsonInputError, OSError) as error:
-        print(f"nutcracker: {error}", file=sys.stderr)
+        print(f"eggcracker: {error}", file=sys.stderr)
         return 4

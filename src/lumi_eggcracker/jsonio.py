@@ -54,14 +54,17 @@ def write_new_json(destination: Path, value: dict[str, Any], *, mode: int = 0o60
     descriptor, raw = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
     temporary = Path(raw)
     try:
-        os.fchmod(descriptor, mode)
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, mode)
         os.write(descriptor, canonical_bytes(value))
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+    if not hasattr(os, "fchmod"):
+        os.chmod(temporary, mode)
     try:
         os.link(temporary, destination)
-        directory = os.open(destination.parent, os.O_RDONLY)
+        directory = os.open(destination.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(directory)
         finally:

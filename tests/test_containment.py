@@ -5,14 +5,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from lumi_nutcracker import containment
-from lumi_nutcracker.jsonio import JsonInputError
+from lumi_eggcracker import containment
+from lumi_eggcracker.jsonio import JsonInputError
 
 
 class ContainmentTests(unittest.TestCase):
     def _root(self, temporary: Path) -> tuple[Path, str, str, str]:
         run_id = "a" * 24
-        unit = f"lumi-nutcracker-workload-{run_id}.service"
+        unit = f"lumi-eggcracker-workload-{run_id}.service"
         cgroup = f"/system.slice/{unit}"
         path = temporary / "system.slice" / unit
         path.mkdir(parents=True)
@@ -51,11 +51,10 @@ class ContainmentTests(unittest.TestCase):
             self.assertTrue(direct.called)
             self.assertTrue(proof.complete)
 
-    def test_collected_cgroup_after_direct_kill_is_empty(self) -> None:
+    def test_collected_cgroup_wrapped_as_json_error_is_still_an_empty_proof(self) -> None:
         with tempfile.TemporaryDirectory() as raw, patch.object(containment, "boot_id", return_value="a" * 36):
-            path, cgroup, run_id, unit = self._root(Path(raw))
+            _, cgroup, run_id, unit = self._root(Path(raw))
             identity = containment.capture_identity(cgroup, run_id, unit, root=Path(raw))
-            (path / "cgroup.events").write_text("populated 1\n", encoding="ascii")
-            with patch.object(containment, "kill_path", side_effect=FileNotFoundError(2, "No such file")):
+            with patch.object(containment, "_events", side_effect=JsonInputError("cannot read cgroup.events: No such file")):
                 _, proof = containment.verify_empty(identity, root=Path(raw))
             self.assertTrue(proof.complete)

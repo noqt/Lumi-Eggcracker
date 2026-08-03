@@ -1,4 +1,4 @@
-"""Exact manifest-bound uninstaller for Lumi Nutcracker."""
+"""Exact manifest-bound uninstaller for Lumi Eggcracker."""
 
 from __future__ import annotations
 
@@ -11,12 +11,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
-LIB = Path("/usr/local/lib/lumi-nutcracker")
-BIN = Path("/usr/local/bin/nutcracker")
-ETC = Path("/etc/lumi-nutcracker")
-UNIT = Path("/etc/systemd/system/lumi-nutcracker.service")
-STATE = Path("/var/lib/lumi-nutcracker")
-RUNTIME = Path("/run/lumi-nutcracker")
+LIB = Path("/usr/local/lib/lumi-eggcracker")
+BIN = Path("/usr/local/bin/eggcracker")
+ETC = Path("/etc/lumi-eggcracker")
+UNIT = Path("/etc/systemd/system/lumi-eggcracker.service")
+STATE = Path("/var/lib/lumi-eggcracker")
+RUNTIME = Path("/run/lumi-eggcracker")
+PREFIX = "lumi-eggcracker-workload-"
 
 
 def digest(path: Path) -> str:
@@ -31,6 +32,23 @@ def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60)
 
 
+def owned_cgroups_empty() -> bool:
+    root = Path("/sys/fs/cgroup/system.slice")
+    if not root.is_dir():
+        return False
+    for path in root.glob(f"{PREFIX}*.service"):
+        if not path.is_dir() or path.is_symlink():
+            return False
+        events = path / "cgroup.events"
+        try:
+            populated = dict(line.split(" ", 1) for line in events.read_text(encoding="ascii").splitlines()).get("populated")
+        except OSError:
+            return False
+        if populated != "0":
+            return False
+    return True
+
+
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("uninstaller must run as root")
@@ -38,23 +56,19 @@ def main() -> int:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise SystemExit("installed manifest is missing")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "lumi-nutcracker.install.v1":
+    if manifest.get("schema_version") != "lumi-eggcracker.install.v2":
         raise SystemExit("installed manifest schema is invalid")
     for name, expected in manifest.get("files", {}).items():
         path = Path(name)
         if path.is_symlink() or not path.is_file() or digest(path) != expected:
             raise SystemExit(f"refusing uninstall because installed file drifted: {path}")
-    active = run(["/usr/bin/systemctl", "list-units", "lumi-nutcracker-workload-*", "--type=service", "--state=active", "--no-legend", "--no-pager"])
-    if active.stdout.strip():
-        raise SystemExit("refusing uninstall with active Nutcracker workloads")
-    run(["/usr/bin/systemctl", "disable", "--now", "lumi-nutcracker.service"])
-    run(["/usr/bin/systemctl", "reset-failed", "lumi-nutcracker.service"])
+    if not owned_cgroups_empty():
+        raise SystemExit("refusing uninstall with populated or uncertain Eggcracker cgroups")
+    run(["/usr/bin/systemctl", "disable", "--now", "lumi-eggcracker.service"])
+    run(["/usr/bin/systemctl", "reset-failed", "lumi-eggcracker.service"])
     for path in (UNIT, BIN, LIB, ETC, STATE, RUNTIME):
         if path.exists() and not path.is_symlink():
-            if path.is_dir():
-                shutil.rmtree(path)
-            else:
-                path.unlink()
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
     if manifest.get("created_workload_user"):
         try:
             account = pwd.getpwnam(str(manifest["workload_user"]))
@@ -65,9 +79,8 @@ def main() -> int:
             if result.returncode:
                 raise SystemExit(result.stderr.strip() or "cannot remove created workload account")
     if manifest.get("created_workload_group"):
-        group_name = str(manifest.get("workload_group", ""))
         try:
-            group = grp.getgrnam(group_name)
+            group = grp.getgrnam(str(manifest.get("workload_group", "")))
         except KeyError:
             group = None
         if group:

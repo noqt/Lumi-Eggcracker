@@ -3,8 +3,8 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lumi-nutcracker"
-version = "0.1.0"
+name = "lumi-eggcracker"
+version = "0.1.1"
 description = "A local Linux kill switch for explicitly selected AI and agent workloads"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,7 +22,7 @@ classifiers = [
 ]
 
 [project.scripts]
-nutcracker = "lumi_nutcracker.cli:main"
+eggcracker = "lumi_eggcracker.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

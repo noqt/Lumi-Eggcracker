@@ -13,11 +13,11 @@ jobs:
   test-and-package:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -38,19 +38,19 @@ jobs:
       - name: Verify public release
         run: >-
           python scripts/verify_release.py
-          --artifact dist/github/lumi-nutcracker-0.1.0.pyz
-          --source-archive dist/github/lumi-nutcracker-0.1.0-source.zip
-          --release-bundle dist/github/lumi-nutcracker-0.1.0-linux.zip
+          --artifact dist/github/lumi-eggcracker-0.1.1.pyz
+          --source-archive dist/github/lumi-eggcracker-0.1.1-source.zip
+          --release-bundle dist/github/lumi-eggcracker-0.1.1-linux.zip
 
       - name: Upload tag artifacts
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: lumi-nutcracker-${{ github.ref_name }}
+          name: lumi-eggcracker-${{ github.ref_name }}
           path: |
-            dist/github/lumi-nutcracker-0.1.0.pyz
-            dist/github/lumi-nutcracker-0.1.0-source.zip
-            dist/github/lumi-nutcracker-0.1.0-linux.zip
+            dist/github/lumi-eggcracker-0.1.1.pyz
+            dist/github/lumi-eggcracker-0.1.1-source.zip
+            dist/github/lumi-eggcracker-0.1.1-linux.zip
             dist/github/release-manifest.json
             dist/github/SHA256SUMS
           if-no-files-found: error
