@@ -65,6 +65,7 @@ GATES_DIR = Path("/run/lumi-eggcracker/gates")
 MAX_TERMINAL_RECORDS = 128
 DETECTION_LIMIT = 1000
 RECENT_DISCOVERY_NS = 5_000_000_000
+CONTENT_SCAN_INTERVAL = 5
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -169,6 +170,7 @@ class Supervisor:
         self.discovery_thread: threading.Thread | None = None
         self.digest_cache: dict[tuple[int, int, int, int], str] = {}
         self.observations = ObservationStore()
+        self.content_scan_tick = 0
 
     @property
     def operator_uid(self) -> int:
@@ -482,6 +484,8 @@ class Supervisor:
                 }
 
     def _scan_once(self, *, synchronous: bool = False) -> None:
+        self.content_scan_tick += 1
+        content_due = synchronous or self.content_scan_tick % CONTENT_SCAN_INTERVAL == 0
         try:
             approvals = load_approvals(self.approvals)
         except JsonInputError:
@@ -493,7 +497,7 @@ class Supervisor:
             content: tuple[ArtifactEvidence, ...] = ()
             runtimes: tuple[RuntimeEvidence, ...] = ()
             first_seen_ns = time.monotonic_ns()
-            if detected is None:
+            if detected is None and content_due:
                 content = artifacts_from_snapshot(snapshot)
                 runtimes = runtime_from_snapshot(snapshot) if content else ()
                 supplied = {

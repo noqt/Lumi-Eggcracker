@@ -32,6 +32,7 @@ class SupervisorTests(unittest.TestCase):
         value.discovery_active = set()
         value.discovery_done = {}
         value.discovery_lock = threading.Lock()
+        value.content_scan_tick = 0
         return value
 
     def test_recently_contained_identity_is_not_reenforced(self) -> None:
