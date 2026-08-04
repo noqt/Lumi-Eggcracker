@@ -39,7 +39,7 @@ def main() -> int:
         fixture = ROOT / "tests" / "fixtures" / "benign_model_handler.py"
         with tempfile.TemporaryDirectory(prefix="lumi-content-benign-", dir="/tmp") as raw:
             root = Path(raw)
-            os.chmod(root, 0o755)
+            os.chmod(root, 0o777)
             for index in range(args.repetitions):
                 mode = MODES[index % len(MODES)]
                 destination = root / f"copy-{index}"
