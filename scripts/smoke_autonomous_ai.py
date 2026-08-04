@@ -102,7 +102,7 @@ def one(*, runner: Path, model: Path, user: str, index: int, provenance: dict[st
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, argv, output)
             receipt = receipt_after(before)
-            unapproved.wait(timeout=15)
+            stop(unapproved); unapproved = None
             if receipt.get("trigger", {}).get("kind") != "UNAPPROVED_AI_MATCH" or receipt.get("detector", {}).get("profile") != "llama.cpp" or canary.poll() is not None:
                 raise RuntimeError("unapproved real AI result or canary is invalid")
             approval = call(user, ["approve", "--name", name, "--uid", str(pwd.getpwnam(user).pw_uid), "--", *argv])
@@ -119,7 +119,7 @@ def one(*, runner: Path, model: Path, user: str, index: int, provenance: dict[st
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, argv, output)
             receipt_after_revoke = receipt_after(before)
-            unapproved.wait(timeout=15)
+            stop(unapproved); unapproved = None
             if receipt_after_revoke.get("result") != "TERMINATED" or canary.poll() is not None:
                 raise RuntimeError("revoked real AI was not autonomously terminated")
             return {"asset_model_sha256": provenance["model"]["sha256"], "asset_runner_sha256": provenance["llama"]["sha256"], "approved_generated_bytes": output.stat().st_size, "first_receipt": receipt, "result": "PASS", "second_receipt": receipt_after_revoke}
