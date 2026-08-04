@@ -114,6 +114,7 @@ def one(*, runner: Path, model: Path, user: str, index: int, provenance: dict[st
                 time.sleep(0.05)
             if not generated(output) or allowed.poll() is not None:
                 raise RuntimeError("approved real AI did not remain alive and generate output")
+            approved_bytes = output.stat().st_size
             stop(allowed); allowed = None
             call(user, ["revoke", "--name", name])
             before = set(DETECTIONS.glob("*.json"))
@@ -122,7 +123,7 @@ def one(*, runner: Path, model: Path, user: str, index: int, provenance: dict[st
             stop(unapproved); unapproved = None
             if receipt_after_revoke.get("result") != "TERMINATED" or canary.poll() is not None:
                 raise RuntimeError("revoked real AI was not autonomously terminated")
-            return {"asset_model_sha256": provenance["model"]["sha256"], "asset_runner_sha256": provenance["llama"]["sha256"], "approved_generated_bytes": output.stat().st_size, "first_receipt": receipt, "result": "PASS", "second_receipt": receipt_after_revoke}
+            return {"asset_model_sha256": provenance["model"]["sha256"], "asset_runner_sha256": provenance["llama"]["sha256"], "approved_generated_bytes": approved_bytes, "first_receipt": receipt, "result": "PASS", "second_receipt": receipt_after_revoke}
         finally:
             if unapproved is not None:
                 stop(unapproved)
