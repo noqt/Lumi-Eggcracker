@@ -38,7 +38,9 @@ class ProcessSnapshot:
 
 
 def _read(path: Path, limit: int = MAX_READ) -> bytes:
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         value = os.read(descriptor, limit + 1)
     finally:
@@ -150,8 +152,12 @@ def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | 
     root = proc / str(value.pid)
     try:
         exe = os.readlink(root / "exe")
-        command = tuple(item for item in _read(root / "cmdline").decode("utf-8").split("\0") if item)
-        cgroups = tuple(line for line in _read(root / "cgroup", 8192).decode("utf-8").splitlines() if line)
+        command = tuple(
+            item for item in _read(root / "cmdline").decode("utf-8").split("\0") if item
+        )
+        cgroups = tuple(
+            line for line in _read(root / "cgroup", 8192).decode("utf-8").splitlines() if line
+        )
         uid = _uid(_read(root / "status", 8192).decode("utf-8"))
         fd_entries = _fd_entries(root / "fd", limit=MAX_FDS)
         fd_paths = tuple(item[1] for item in fd_entries)
@@ -160,10 +166,23 @@ def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | 
     if not command or not exe or len(exe) > 4096:
         return None
     maps = _map_paths(root / "maps")
-    return ProcessSnapshot(value, uid, exe, Path(exe.removesuffix(" (deleted)")).name, command, cgroups, fd_paths, tuple(Path(item).name for item in maps), fd_entries, maps)
+    return ProcessSnapshot(
+        value,
+        uid,
+        exe,
+        Path(exe.removesuffix(" (deleted)")).name,
+        command,
+        cgroups,
+        fd_paths,
+        tuple(Path(item).name for item in maps),
+        fd_entries,
+        maps,
+    )
 
 
-def scan(*, proc: Path = PROC, exclude: Callable[[ProcessSnapshot], bool] | None = None) -> list[ProcessSnapshot]:
+def scan(
+    *, proc: Path = PROC, exclude: Callable[[ProcessSnapshot], bool] | None = None
+) -> list[ProcessSnapshot]:
     result: list[ProcessSnapshot] = []
     try:
         candidates = sorted(int(item.name) for item in proc.iterdir() if item.name.isdigit())

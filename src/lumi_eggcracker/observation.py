@@ -21,11 +21,17 @@ class ObservationStore:
     def __init__(self) -> None:
         self._values: dict[Hashable, Observation] = {}
 
-    def observe(self, identity: Hashable, evidence: set[str], *, now_ns: int | None = None) -> Observation:
+    def observe(
+        self, identity: Hashable, evidence: set[str], *, now_ns: int | None = None
+    ) -> Observation:
         now = time.monotonic_ns() if now_ns is None else now_ns
         self.expire(now_ns=now)
         previous = self._values.get(identity)
-        value = Observation(frozenset(evidence) | (previous.evidence if previous else frozenset()), previous.first_seen_ns if previous else now, now)
+        value = Observation(
+            frozenset(evidence) | (previous.evidence if previous else frozenset()),
+            previous.first_seen_ns if previous else now,
+            now,
+        )
         self._values[identity] = value
         if len(self._values) > MAX_OBSERVATIONS:
             oldest = min(self._values, key=lambda key: self._values[key].last_seen_ns)

@@ -53,14 +53,44 @@ def main() -> int:
     bundle = args.output / f"lumi-eggcracker-{release_version}-linux.zip"
     with tempfile.TemporaryDirectory(prefix="lumi-eggcracker-build-") as raw:
         stage = Path(raw) / "src"
-        shutil.copytree(ROOT / "src", stage, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"))
-        (stage / "__main__.py").write_text("from lumi_eggcracker.cli import main\nraise SystemExit(main())\n", encoding="utf-8")
-        (stage / "lumi_eggcracker" / "build_info.py").write_text(f'SOURCE_COMMIT = "{commit}"\n', encoding="utf-8")
+        shutil.copytree(
+            ROOT / "src", stage, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info")
+        )
+        (stage / "__main__.py").write_text(
+            "from lumi_eggcracker.cli import main\nraise SystemExit(main())\n", encoding="utf-8"
+        )
+        (stage / "lumi_eggcracker" / "build_info.py").write_text(
+            f'SOURCE_COMMIT = "{commit}"\n', encoding="utf-8"
+        )
         zipapp.create_archive(stage, target=artifact, interpreter="/usr/bin/env python3")
-    command(["git", "-C", str(ROOT), "archive", "--format=zip", f"--prefix=lumi-eggcracker-{release_version}/", "-o", str(source), "HEAD"])
-    manifest = {"artifact": artifact.name, "sha256": digest(artifact), "source_archive": source.name, "source_archive_sha256": digest(source), "source_commit": commit, "version": release_version}
-    (args.output / "release-manifest.json").write_text(__import__("json").dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
-    (args.output / "SHA256SUMS").write_text(f"{manifest['sha256']}  {artifact.name}\n{manifest['source_archive_sha256']}  {source.name}\n", encoding="utf-8")
+    command(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "archive",
+            "--format=zip",
+            f"--prefix=lumi-eggcracker-{release_version}/",
+            "-o",
+            str(source),
+            "HEAD",
+        ]
+    )
+    manifest = {
+        "artifact": artifact.name,
+        "sha256": digest(artifact),
+        "source_archive": source.name,
+        "source_archive_sha256": digest(source),
+        "source_commit": commit,
+        "version": release_version,
+    }
+    (args.output / "release-manifest.json").write_text(
+        __import__("json").dumps(manifest, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    (args.output / "SHA256SUMS").write_text(
+        f"{manifest['sha256']}  {artifact.name}\n{manifest['source_archive_sha256']}  {source.name}\n",
+        encoding="utf-8",
+    )
     prefix = f"lumi-eggcracker-{release_version}"
     release_files = {
         artifact: artifact.name,
@@ -82,6 +112,7 @@ def main() -> int:
         ROOT / "scripts" / "smoke_local_ai.py": "scripts/smoke_local_ai.py",
         ROOT / "scripts" / "smoke_autonomous_ai.py": "scripts/smoke_autonomous_ai.py",
         ROOT / "scripts" / "smoke_content_ai.py": "scripts/smoke_content_ai.py",
+        ROOT / "scripts" / "run_content_matrix.py": "scripts/run_content_matrix.py",
         ROOT / "scripts" / "run_autonomous_matrix.py": "scripts/run_autonomous_matrix.py",
     }
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:

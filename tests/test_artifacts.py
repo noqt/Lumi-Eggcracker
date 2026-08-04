@@ -27,14 +27,18 @@ class ArtifactTests(unittest.TestCase):
     def test_bad_magic_version_and_impossible_counts_do_not_qualify(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            for index, body in enumerate((b"NOPE" + gguf()[4:], gguf(version=1), gguf(tensors=1_000_000, padding=1))):
+            for index, body in enumerate(
+                (b"NOPE" + gguf()[4:], gguf(version=1), gguf(tensors=1_000_000, padding=1))
+            ):
                 path = root / str(index)
                 path.write_bytes(body)
                 self.assertIsNone(validate_path(path))
 
     def test_symlink_and_non_regular_files_do_not_qualify(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw); target = root / "target"; link = root / "link"
+            root = Path(raw)
+            target = root / "target"
+            link = root / "link"
             target.write_bytes(gguf())
             try:
                 os.symlink(target, link)

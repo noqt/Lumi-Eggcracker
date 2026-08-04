@@ -80,9 +80,20 @@ def validate_gguf_fd(descriptor: int) -> ArtifactEvidence:
         raise JsonInputError("GGUF declared header exceeds the inspection budget")
     header = _read_exact(descriptor, min(before.st_size, MAX_ARTIFACT_BYTES))
     after = _regular(descriptor)
-    if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
+    if (before.st_dev, before.st_ino, before.st_size) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+    ):
         raise JsonInputError("candidate model artifact changed during validation")
-    return ArtifactEvidence(f"gguf-v{version}", "GGUF", before.st_dev, before.st_ino, before.st_size, hashlib.sha256(header).hexdigest())
+    return ArtifactEvidence(
+        f"gguf-v{version}",
+        "GGUF",
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        hashlib.sha256(header).hexdigest(),
+    )
 
 
 def validate_path(path: Path) -> ArtifactEvidence | None:
@@ -100,7 +111,9 @@ def validate_path(path: Path) -> ArtifactEvidence | None:
         os.close(descriptor)
 
 
-def from_process_fds(snapshot: object, *, proc: Path = Path("/proc")) -> tuple[ArtifactEvidence, ...]:
+def from_process_fds(
+    snapshot: object, *, proc: Path = Path("/proc")
+) -> tuple[ArtifactEvidence, ...]:
     """Inspect a bounded set of currently open target descriptors.
 
     The descriptor is opened through ``/proc/<pid>/fd/<n>``.  The link name is

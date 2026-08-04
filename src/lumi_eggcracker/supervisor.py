@@ -110,7 +110,20 @@ class Supervisor:
         if os.geteuid() != 0:
             raise JsonInputError("supervisor must run as root")
         policy = load_regular_json(policy_path)
-        expected = {"catalogue_path", "catalogue_sha256", "operator_gid", "operator_uid", "schema_version", "socket_path", "source_commit", "state_dir", "unit_prefix", "version", "workload_gid", "workload_uid"}
+        expected = {
+            "catalogue_path",
+            "catalogue_sha256",
+            "operator_gid",
+            "operator_uid",
+            "schema_version",
+            "socket_path",
+            "source_commit",
+            "state_dir",
+            "unit_prefix",
+            "version",
+            "workload_gid",
+            "workload_uid",
+        }
         if set(policy) != expected or policy["schema_version"] != POLICY_SCHEMA:
             raise JsonInputError("supervisor policy schema is invalid")
         for key in ("operator_gid", "operator_uid", "workload_gid", "workload_uid"):
@@ -118,14 +131,24 @@ class Supervisor:
                 raise JsonInputError("supervisor policy identity is invalid")
         if policy["operator_uid"] == policy["workload_uid"] or policy["workload_uid"] == 0:
             raise JsonInputError("operator and workload identities must be distinct non-root users")
-        if Path(policy["socket_path"]) != SOCKET_PATH or Path(policy["state_dir"]) != STATE_DIR or policy["unit_prefix"] != UNIT_PREFIX:
+        if (
+            Path(policy["socket_path"]) != SOCKET_PATH
+            or Path(policy["state_dir"]) != STATE_DIR
+            or policy["unit_prefix"] != UNIT_PREFIX
+        ):
             raise JsonInputError("supervisor policy path is invalid")
         if policy["version"] != __version__ or not isinstance(policy["source_commit"], str):
             raise JsonInputError("supervisor build identity is invalid")
         catalogue_path = Path(policy["catalogue_path"])
-        if catalogue_path != Path("/etc/lumi-eggcracker/detector_catalogue.json") or catalogue_path.is_symlink() or not catalogue_path.is_file():
+        if (
+            catalogue_path != Path("/etc/lumi-eggcracker/detector_catalogue.json")
+            or catalogue_path.is_symlink()
+            or not catalogue_path.is_file()
+        ):
             raise JsonInputError("supervisor detector catalogue path is invalid")
-        self.catalogue: Catalogue = load_catalogue(catalogue_path.read_bytes(), expected_digest=policy["catalogue_sha256"])
+        self.catalogue: Catalogue = load_catalogue(
+            catalogue_path.read_bytes(), expected_digest=policy["catalogue_sha256"]
+        )
         self.policy = policy
         self.runs = STATE_DIR / "runs"
         self.names = STATE_DIR / "names"
@@ -155,10 +178,24 @@ class Supervisor:
     def _show(self, unit: str) -> dict[str, str]:
         if not unit.startswith(UNIT_PREFIX) or not unit.endswith(".service"):
             raise JsonInputError("unit is outside Eggcracker namespace")
-        result = self._run(["/usr/bin/systemctl", "show", unit, "--property=ActiveState", "--property=ControlGroup", "--property=TasksMax"])
+        result = self._run(
+            [
+                "/usr/bin/systemctl",
+                "show",
+                unit,
+                "--property=ActiveState",
+                "--property=ControlGroup",
+                "--property=TasksMax",
+            ]
+        )
         if result.returncode:
             return {"ActiveState": "unknown", "ControlGroup": "", "TasksMax": ""}
-        return {key: value for key, value in (line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)}
+        return {
+            key: value
+            for key, value in (
+                line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+            )
+        }
 
     def _new_lock(self, name: str) -> threading.Lock:
         with self.lock_guard:
@@ -222,7 +259,16 @@ class Supervisor:
         # Workloads need traversal only to their group-readable gate.  The
         # control socket remains a root/operator 0660 inode, so traversal does
         # not grant control-socket access or directory listing.
-        for path, mode, gid in ((SOCKET_PATH.parent, 0o711, self.policy["operator_gid"]), (GATES_DIR, 0o710, self.policy["workload_gid"]), (STATE_DIR, 0o700, 0), (self.runs, 0o700, 0), (self.names, 0o700, 0), (self.receipts, 0o700, 0), (self.approvals, 0o700, 0), (self.detections, 0o700, 0)):
+        for path, mode, gid in (
+            (SOCKET_PATH.parent, 0o711, self.policy["operator_gid"]),
+            (GATES_DIR, 0o710, self.policy["workload_gid"]),
+            (STATE_DIR, 0o700, 0),
+            (self.runs, 0o700, 0),
+            (self.names, 0o700, 0),
+            (self.receipts, 0o700, 0),
+            (self.approvals, 0o700, 0),
+            (self.detections, 0o700, 0),
+        ):
             path.mkdir(mode=mode, parents=True, exist_ok=True)
             os.chown(path, 0, gid)
             os.chmod(path, mode)
@@ -248,7 +294,9 @@ class Supervisor:
         if root.is_symlink():
             raise JsonInputError("quarantine root is a symlink")
         root.mkdir(mode=0o700, exist_ok=True)
-        if not root.is_dir() or not all((root / name).is_file() for name in ("cgroup.events", "cgroup.procs")):
+        if not root.is_dir() or not all(
+            (root / name).is_file() for name in ("cgroup.events", "cgroup.procs")
+        ):
             raise JsonInputError("delegated quarantine cgroup is unavailable")
         return root
 
@@ -258,7 +306,9 @@ class Supervisor:
                 record = load_run(self.runs, path.stem)
             except JsonInputError:
                 continue
-            if record["state"] in ACTIVE_STATES and any(line.endswith(":" + record["cgroup"]) for line in snapshot.cgroups):
+            if record["state"] in ACTIVE_STATES and any(
+                line.endswith(":" + record["cgroup"]) for line in snapshot.cgroups
+            ):
                 return True
         return False
 
@@ -279,37 +329,141 @@ class Supervisor:
 
     def _store_detection(self, value: dict[str, Any]) -> None:
         write_atomic(self._detection_path(value["event_id"]), value)
-        records = sorted(self.detections.glob("*.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True)
+        records = sorted(
+            self.detections.glob("*.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True
+        )
         for path in records[DETECTION_LIMIT:]:
             path.unlink(missing_ok=True)
 
-    def _detection_receipt(self, *, event_id: str, snapshot: ProcessSnapshot, detected: DetectionMatch, content: tuple[ArtifactEvidence, ...], runtimes: tuple[RuntimeEvidence, ...], first_seen_ns: int, executable_sha256: str, result: AdoptionResult | None, error: str | None) -> dict[str, Any]:
-        detector: dict[str, Any] = {"catalogue_schema": "lumi-eggcracker.detectors.v2", "detection_path": detected.path, "matched_evidence": list(detected.evidence), "matched_predicates": list(detected.evidence), "profile": detected.profile}
+    def _detection_receipt(
+        self,
+        *,
+        event_id: str,
+        snapshot: ProcessSnapshot,
+        detected: DetectionMatch,
+        content: tuple[ArtifactEvidence, ...],
+        runtimes: tuple[RuntimeEvidence, ...],
+        first_seen_ns: int,
+        qualified_ns: int,
+        executable_sha256: str,
+        result: AdoptionResult | None,
+        error: str | None,
+    ) -> dict[str, Any]:
+        detector: dict[str, Any] = {
+            "catalogue_schema": "lumi-eggcracker.detectors.v2",
+            "detection_path": detected.path,
+            "matched_evidence": list(detected.evidence),
+            "matched_predicates": list(detected.evidence),
+            "profile": detected.profile,
+        }
         if detected.path == "CONTENT":
             detector["model"] = content[0].public() if content else {}
             detector["runtime"] = runtimes[0].public() if runtimes else {}
-            detector["observation"] = {"first_seen_monotonic_ns": first_seen_ns, "qualified_monotonic_ns": time.monotonic_ns()}
-        value: dict[str, Any] = {"catalogue_sha256": self.catalogue.digest, "detector": detector, "event_id": event_id, "executable": {"basename": snapshot.exe_basename, "sha256": executable_sha256}, "observed": {"argv_count": len(snapshot.argv), "argv_sha256": hashlib.sha256("\0".join(snapshot.argv).encode("utf-8")).hexdigest(), "pid": snapshot.identity.pid, "start_time": snapshot.identity.start_time, "uid": snapshot.uid}, "receipt_written_utc": None, "schema_version": "lumi-eggcracker.detection-receipt.v2", "source_commit": self.policy["source_commit"], "trigger": {"kind": "UNAPPROVED_AI_MATCH"}, "version": __version__}
+            detector["observation"] = {
+                "first_seen_monotonic_ns": first_seen_ns,
+                "qualified_monotonic_ns": qualified_ns,
+            }
+        value: dict[str, Any] = {
+            "catalogue_sha256": self.catalogue.digest,
+            "detector": detector,
+            "event_id": event_id,
+            "executable": {"basename": snapshot.exe_basename, "sha256": executable_sha256},
+            "observed": {
+                "argv_count": len(snapshot.argv),
+                "argv_sha256": hashlib.sha256("\0".join(snapshot.argv).encode("utf-8")).hexdigest(),
+                "pid": snapshot.identity.pid,
+                "start_time": snapshot.identity.start_time,
+                "uid": snapshot.uid,
+            },
+            "receipt_written_utc": None,
+            "schema_version": "lumi-eggcracker.detection-receipt.v2",
+            "source_commit": self.policy["source_commit"],
+            "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+            "version": __version__,
+        }
         if result is None:
             value["result"] = "CONTAINMENT_FAILED"
             value["error"] = (error or "containment failed")[:160]
             return value
-        value.update({"result": "TERMINATED", "capture": {"captured_processes": len(result.captured), "fixed_point_scans": result.fixed_point_scans, "quarantine_cgroup": str(result.identity.path), "quarantine_device": result.identity.device, "quarantine_inode": result.identity.inode}, "containment": {"empty_verified_monotonic_ns": result.empty_ns, "first_stop_monotonic_ns": result.first_stop_ns, "kill_write_completed_monotonic_ns": result.kill_complete_ns, "kill_write_started_monotonic_ns": result.kill_started_ns, "primitive": "pidfd-stop+cgroup.kill", "root_populated": result.proof.root_populated, "surviving_pids": result.proof.surviving_pids, "trigger_to_empty_ms": (result.empty_ns - result.first_stop_ns) / 1_000_000}, "trigger": {"kind": "UNAPPROVED_AI_MATCH", "observed_monotonic_ns": result.first_stop_ns}})
+        value.update(
+            {
+                "result": "TERMINATED",
+                "capture": {
+                    "captured_processes": len(result.captured),
+                    "fixed_point_scans": result.fixed_point_scans,
+                    "quarantine_cgroup": str(result.identity.path),
+                    "quarantine_device": result.identity.device,
+                    "quarantine_inode": result.identity.inode,
+                },
+                "containment": {
+                    "empty_verified_monotonic_ns": result.empty_ns,
+                    "first_stop_monotonic_ns": result.first_stop_ns,
+                    "kill_write_completed_monotonic_ns": result.kill_complete_ns,
+                    "kill_write_started_monotonic_ns": result.kill_started_ns,
+                    "primitive": "pidfd-stop+cgroup.kill",
+                    "qualification_to_first_stop_ms": (result.first_stop_ns - qualified_ns)
+                    / 1_000_000,
+                    "root_populated": result.proof.root_populated,
+                    "surviving_pids": result.proof.surviving_pids,
+                    "trigger_to_empty_ms": (result.empty_ns - result.first_stop_ns) / 1_000_000,
+                },
+                "trigger": {
+                    "kind": "UNAPPROVED_AI_MATCH",
+                    "observed_monotonic_ns": result.first_stop_ns,
+                },
+            }
+        )
         return value
 
-    def _enforce_discovery(self, snapshot: ProcessSnapshot, detected: DetectionMatch, content: tuple[ArtifactEvidence, ...], runtimes: tuple[RuntimeEvidence, ...], first_seen_ns: int, executable_sha256: str, event_id: str) -> None:
+    def _enforce_discovery(
+        self,
+        snapshot: ProcessSnapshot,
+        detected: DetectionMatch,
+        content: tuple[ArtifactEvidence, ...],
+        runtimes: tuple[RuntimeEvidence, ...],
+        first_seen_ns: int,
+        qualified_ns: int,
+        executable_sha256: str,
+        event_id: str,
+    ) -> None:
         try:
             if self.quarantine_root is None:
                 raise JsonInputError("quarantine root is unavailable")
             self.operations.append("pidfd.stop")
             result = contain(snapshot.identity, self.quarantine_root, event_id)
             self.operations.append("cgroup.kill")
-            receipt = self._detection_receipt(event_id=event_id, snapshot=snapshot, detected=detected, content=content, runtimes=runtimes, first_seen_ns=first_seen_ns, executable_sha256=executable_sha256, result=result, error=None)
-            receipt["receipt_written_utc"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+            receipt = self._detection_receipt(
+                event_id=event_id,
+                snapshot=snapshot,
+                detected=detected,
+                content=content,
+                runtimes=runtimes,
+                first_seen_ns=first_seen_ns,
+                qualified_ns=qualified_ns,
+                executable_sha256=executable_sha256,
+                result=result,
+                error=None,
+            )
+            receipt["receipt_written_utc"] = (
+                dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+            )
             self._store_detection(receipt)
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
-            receipt = self._detection_receipt(event_id=event_id, snapshot=snapshot, detected=detected, content=content, runtimes=runtimes, first_seen_ns=first_seen_ns, executable_sha256=executable_sha256, result=None, error=str(error))
-            receipt["receipt_written_utc"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+            receipt = self._detection_receipt(
+                event_id=event_id,
+                snapshot=snapshot,
+                detected=detected,
+                content=content,
+                runtimes=runtimes,
+                first_seen_ns=first_seen_ns,
+                qualified_ns=qualified_ns,
+                executable_sha256=executable_sha256,
+                result=None,
+                error=str(error),
+            )
+            receipt["receipt_written_utc"] = (
+                dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
+            )
             try:
                 self._store_detection(receipt)
             except (JsonInputError, OSError):
@@ -323,7 +477,9 @@ class Supervisor:
             approvals = load_approvals(self.approvals)
         except JsonInputError:
             approvals = []  # A corrupt approval never authorizes a matching workload.
-        for snapshot in scan(exclude=lambda item: item.identity.pid == os.getpid() or self._managed(item)):
+        for snapshot in scan(
+            exclude=lambda item: item.identity.pid == os.getpid() or self._managed(item)
+        ):
             detected = match(self.catalogue, snapshot)
             content: tuple[ArtifactEvidence, ...] = ()
             runtimes: tuple[RuntimeEvidence, ...] = ()
@@ -331,14 +487,20 @@ class Supervisor:
             if detected is None:
                 content = artifacts_from_snapshot(snapshot)
                 runtimes = runtime_from_snapshot(snapshot)
-                supplied = {"MODEL_CONTENT": {item.evidence_id for item in content}, "INFERENCE_RUNTIME": {item.evidence_id for item in runtimes}}
-                observation = self.observations.observe(snapshot.identity, set().union(*supplied.values()))
+                supplied = {
+                    "MODEL_CONTENT": {item.evidence_id for item in content},
+                    "INFERENCE_RUNTIME": {item.evidence_id for item in runtimes},
+                }
+                observation = self.observations.observe(
+                    snapshot.identity, set().union(*supplied.values())
+                )
                 first_seen_ns = observation.first_seen_ns
                 # Both groups must be valid in this snapshot. Observations only
                 # provide bounded timing, never stale evidence joining.
                 detected = match(self.catalogue, snapshot, evidence=supplied)
             if detected is None:
                 continue
+            qualified_ns = time.monotonic_ns()
             try:
                 executable_sha256 = self._cached_executable_digest(snapshot)
             except (JsonInputError, OSError):
@@ -351,9 +513,31 @@ class Supervisor:
                 self.discovery_active.add(snapshot.identity)
             event_id = os.urandom(12).hex()
             if synchronous:
-                self._enforce_discovery(snapshot, detected, content, runtimes, first_seen_ns, executable_sha256, event_id)
+                self._enforce_discovery(
+                    snapshot,
+                    detected,
+                    content,
+                    runtimes,
+                    first_seen_ns,
+                    qualified_ns,
+                    executable_sha256,
+                    event_id,
+                )
             else:
-                threading.Thread(target=self._enforce_discovery, args=(snapshot, detected, content, runtimes, first_seen_ns, executable_sha256, event_id), daemon=True).start()
+                threading.Thread(
+                    target=self._enforce_discovery,
+                    args=(
+                        snapshot,
+                        detected,
+                        content,
+                        runtimes,
+                        first_seen_ns,
+                        qualified_ns,
+                        executable_sha256,
+                        event_id,
+                    ),
+                    daemon=True,
+                ).start()
 
     def _discovery_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -365,14 +549,20 @@ class Supervisor:
 
     def _cleanup(self, unit: str) -> dict[str, Any]:
         result = self._run(["/usr/bin/systemctl", "stop", unit])
-        return {"attempted": True, "systemctl_stop_returncode": result.returncode, "systemctl_stop_stderr": result.stderr.strip()}
+        return {
+            "attempted": True,
+            "systemctl_stop_returncode": result.returncode,
+            "systemctl_stop_stderr": result.stderr.strip(),
+        }
 
     def _write_receipt(self, receipt: dict[str, Any], event_id: str) -> None:
         receipt["receipt_written_utc"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
         self.operations.append("durable-receipt")
         write_atomic(self._receipt_path(event_id), receipt)
 
-    def _contain(self, record: dict[str, Any], trigger: str, trigger_ns: int | None = None) -> dict[str, Any]:
+    def _contain(
+        self, record: dict[str, Any], trigger: str, trigger_ns: int | None = None
+    ) -> dict[str, Any]:
         """Direct cgroup.kill is the first trigger-side effect; cleanup is post-proof only."""
         lock = self._new_lock(record["run_id"])
         with lock:
@@ -392,7 +582,18 @@ class Supervisor:
                 self._store(record)
                 raise JsonInputError(f"containment failed: {error}") from error
             event_id = os.urandom(12).hex()
-            receipt = make_receipt(record=record, trigger=trigger, trigger_ns=observed, kill_started_ns=kill_started, kill_complete_ns=kill_completed, empty_ns=empty_ns, proof=proof, version=__version__, source_commit=self.policy["source_commit"], event_id=event_id)
+            receipt = make_receipt(
+                record=record,
+                trigger=trigger,
+                trigger_ns=observed,
+                kill_started_ns=kill_started,
+                kill_complete_ns=kill_completed,
+                empty_ns=empty_ns,
+                proof=proof,
+                version=__version__,
+                source_commit=self.policy["source_commit"],
+                event_id=event_id,
+            )
             try:
                 self._write_receipt(receipt, event_id)
                 record["state"] = "TERMINATED"
@@ -400,7 +601,9 @@ class Supervisor:
             except Exception as error:
                 record["state"] = "CONTAINED_RECEIPT_FAILED"
                 self._store(record)
-                raise JsonInputError(f"contained but receipt persistence failed: {error}") from error
+                raise JsonInputError(
+                    f"contained but receipt persistence failed: {error}"
+                ) from error
             # Cleanup is deliberately not in the enforcement or proof path.
             cleanup = self._cleanup(record["unit"])
             receipt["cleanup"] = cleanup
@@ -519,11 +722,36 @@ class Supervisor:
             raise JsonInputError("max_pids must be from 4 to 4096")
         with self.start_lock:
             if name_path(self.names, name).exists() or self._active_exists():
-                raise JsonInputError("one protected workload is already active or name is unavailable")
+                raise JsonInputError(
+                    "one protected workload is already active or name is unavailable"
+                )
             run_id = os.urandom(12).hex()
             unit = f"{UNIT_PREFIX}{run_id}.service"
             gate = self._make_gate(run_id)
-            result = self._run(["/usr/bin/systemd-run", "--no-block", f"--unit={unit}", "--collect", f"--uid={self.policy['workload_uid']}", f"--gid={self.policy['workload_gid']}", "--property=Type=exec", "--property=ExitType=cgroup", "--property=KillMode=control-group", "--property=NoNewPrivileges=yes", "--property=UMask=0077", f"--property=TasksMax={maximum}", "--", "/usr/bin/python3", "/usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz", "_gate", "--fifo", str(gate), "--", *argv])
+            result = self._run(
+                [
+                    "/usr/bin/systemd-run",
+                    "--no-block",
+                    f"--unit={unit}",
+                    "--collect",
+                    f"--uid={self.policy['workload_uid']}",
+                    f"--gid={self.policy['workload_gid']}",
+                    "--property=Type=exec",
+                    "--property=ExitType=cgroup",
+                    "--property=KillMode=control-group",
+                    "--property=NoNewPrivileges=yes",
+                    "--property=UMask=0077",
+                    f"--property=TasksMax={maximum}",
+                    "--",
+                    "/usr/bin/python3",
+                    "/usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz",
+                    "_gate",
+                    "--fifo",
+                    str(gate),
+                    "--",
+                    *argv,
+                ]
+            )
             if result.returncode:
                 gate.unlink(missing_ok=True)
                 raise JsonInputError(result.stderr.strip() or "system workload launch failed")
@@ -538,7 +766,23 @@ class Supervisor:
                 if props.get("ActiveState") != "active" or not props.get("ControlGroup"):
                     raise JsonInputError("gated workload did not become active")
                 identity = capture_identity(props["ControlGroup"], run_id, unit)
-                record = {**summary, "boot_id": identity.boot_id, "cgroup": identity.cgroup, "cgroup_device": identity.device, "cgroup_inode": identity.inode, "created_monotonic_ns": time.monotonic_ns(), "max_pids": maximum, "name": name, "operator_uid": self.operator_uid, "run_id": run_id, "schema_version": RUN_SCHEMA, "state": "STARTING", "unit": unit, "workload_gid": self.policy["workload_gid"], "workload_uid": self.policy["workload_uid"]}
+                record = {
+                    **summary,
+                    "boot_id": identity.boot_id,
+                    "cgroup": identity.cgroup,
+                    "cgroup_device": identity.device,
+                    "cgroup_inode": identity.inode,
+                    "created_monotonic_ns": time.monotonic_ns(),
+                    "max_pids": maximum,
+                    "name": name,
+                    "operator_uid": self.operator_uid,
+                    "run_id": run_id,
+                    "schema_version": RUN_SCHEMA,
+                    "state": "STARTING",
+                    "unit": unit,
+                    "workload_gid": self.policy["workload_gid"],
+                    "workload_uid": self.policy["workload_uid"],
+                }
                 self._store(record)
                 ready = threading.Event()
                 watcher = threading.Thread(target=self._watch, args=(record, ready), daemon=True)
@@ -551,7 +795,13 @@ class Supervisor:
                 if record["state"] in ACTIVE_STATES:
                     record["state"] = "RUNNING"
                     self._store(record)
-                return {"name": name, "run_id": run_id, "state": record["state"], "unit": unit, "workload_uid": record["workload_uid"]}
+                return {
+                    "name": name,
+                    "run_id": run_id,
+                    "state": record["state"],
+                    "unit": unit,
+                    "workload_uid": record["workload_uid"],
+                }
             except Exception:
                 gate.unlink(missing_ok=True)
                 try:
@@ -569,7 +819,25 @@ class Supervisor:
         if not RUN_ID.fullmatch(run_id):
             raise JsonInputError("orphan cgroup identity is invalid")
         identity = capture_identity(cgroup, run_id, unit)
-        return {"argv_count": 0, "argv_sha256": "0" * 64, "boot_id": identity.boot_id, "cgroup": identity.cgroup, "cgroup_device": identity.device, "cgroup_inode": identity.inode, "created_monotonic_ns": time.monotonic_ns(), "executable": "<orphaned-owned-cgroup>", "max_pids": 0, "name": f"orphan-{run_id}", "operator_uid": self.operator_uid, "run_id": run_id, "schema_version": RUN_SCHEMA, "state": "RUNNING", "unit": unit, "workload_gid": self.policy["workload_gid"], "workload_uid": self.policy["workload_uid"]}
+        return {
+            "argv_count": 0,
+            "argv_sha256": "0" * 64,
+            "boot_id": identity.boot_id,
+            "cgroup": identity.cgroup,
+            "cgroup_device": identity.device,
+            "cgroup_inode": identity.inode,
+            "created_monotonic_ns": time.monotonic_ns(),
+            "executable": "<orphaned-owned-cgroup>",
+            "max_pids": 0,
+            "name": f"orphan-{run_id}",
+            "operator_uid": self.operator_uid,
+            "run_id": run_id,
+            "schema_version": RUN_SCHEMA,
+            "state": "RUNNING",
+            "unit": unit,
+            "workload_gid": self.policy["workload_gid"],
+            "workload_uid": self.policy["workload_uid"],
+        }
 
     def _recover(self) -> None:
         recorded_ids: set[str] = set()
@@ -589,16 +857,36 @@ class Supervisor:
                 continue
             run_id = path.name.removeprefix(UNIT_PREFIX).removesuffix(".service")
             if RUN_ID.fullmatch(run_id) and run_id not in recorded_ids:
-                self._contain(self._orphan_record("/system.slice/" + path.name), "SUPERVISOR_RESTART_FAIL_CLOSED")
+                self._contain(
+                    self._orphan_record("/system.slice/" + path.name),
+                    "SUPERVISOR_RESTART_FAIL_CLOSED",
+                )
 
     def handle(self, value: dict[str, Any]) -> dict[str, Any]:
-        if set(value) != {"action", "args"} or not isinstance(value["action"], str) or not isinstance(value["args"], dict):
+        if (
+            set(value) != {"action", "args"}
+            or not isinstance(value["action"], str)
+            or not isinstance(value["args"], dict)
+        ):
             raise JsonInputError("request contract is invalid")
         action, args = value["action"], value["args"]
         if action == "doctor" and not args:
-            available = Path("/sys/fs/cgroup/cgroup.controllers").is_file() and "pids" in Path("/sys/fs/cgroup/cgroup.controllers").read_text(encoding="ascii").split()
+            available = (
+                Path("/sys/fs/cgroup/cgroup.controllers").is_file()
+                and "pids"
+                in Path("/sys/fs/cgroup/cgroup.controllers").read_text(encoding="ascii").split()
+            )
             ready = available and pidfd_available() and self.quarantine_root is not None
-            return {"autonomous_discovery": ready, "backend": "root-supervisor", "catalogue": public_catalogue(self.catalogue), "cgroup_v2": available, "pidfd": pidfd_available(), "result": "PASS" if ready else "UNSUPPORTED", "version": __version__, "workload_uid": self.policy["workload_uid"]}
+            return {
+                "autonomous_discovery": ready,
+                "backend": "root-supervisor",
+                "catalogue": public_catalogue(self.catalogue),
+                "cgroup_v2": available,
+                "pidfd": pidfd_available(),
+                "result": "PASS" if ready else "UNSUPPORTED",
+                "version": __version__,
+                "workload_uid": self.policy["workload_uid"],
+            }
         if action == "start":
             return self._start(args)
         if action == "status" and set(args) == {"name"}:
@@ -606,23 +894,45 @@ class Supervisor:
                 record = self._load(args["name"])
             except JsonInputError:
                 record = self._latest_by_name(args["name"])
-            return {"name": record["name"], "run_id": record["run_id"], "state": record["state"], "unit": record["unit"], "workload_uid": record["workload_uid"]}
+            return {
+                "name": record["name"],
+                "run_id": record["run_id"],
+                "state": record["state"],
+                "unit": record["unit"],
+                "workload_uid": record["workload_uid"],
+            }
         if action == "list" and not args:
-            runs = [self.handle({"action": "status", "args": {"name": path.stem}}) for path in sorted(self.names.glob("*.json"))]
+            runs = [
+                self.handle({"action": "status", "args": {"name": path.stem}})
+                for path in sorted(self.names.glob("*.json"))
+            ]
             return {"runs": runs}
         if action == "approve" and set(args) == {"argv", "name", "uid"}:
-            value = create_approval(self.approvals, name=args["name"], uid=args["uid"], argv=args["argv"], operator_uid=self.operator_uid)
+            value = create_approval(
+                self.approvals,
+                name=args["name"],
+                uid=args["uid"],
+                argv=args["argv"],
+                operator_uid=self.operator_uid,
+            )
             return {"approval": public_approval(value), "result": "APPROVED"}
         if action == "revoke" and set(args) == {"name"}:
             return revoke(self.approvals, args["name"])
         if action == "approvals" and not args:
-            return {"approvals": [public_approval(value) for value in load_approvals(self.approvals)]}
+            return {
+                "approvals": [public_approval(value) for value in load_approvals(self.approvals)]
+            }
         if action == "detections" and not args:
             values: list[dict[str, Any]] = []
             for path in sorted(self.detections.glob("*.json"), reverse=True):
                 try:
                     value = load_regular_json(path)
-                    values.append({key: value[key] for key in ("detector", "event_id", "result", "trigger", "version")})
+                    values.append(
+                        {
+                            key: value[key]
+                            for key in ("detector", "event_id", "result", "trigger", "version")
+                        }
+                    )
                 except (JsonInputError, KeyError):
                     continue
             return {"detections": values[:100]}
@@ -648,7 +958,9 @@ class Supervisor:
                 with connection:
                     connection.settimeout(3.0)
                     try:
-                        _pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                        _pid, uid, _gid = struct.unpack(
+                            "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                        )
                         if uid not in {0, self.operator_uid}:
                             raise JsonInputError("peer uid is not authorized")
                         _send(connection, {"ok": True, "value": self.handle(_receive(connection))})
@@ -665,6 +977,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy", required=True, type=Path)
     args = parser.parse_args(argv)
     supervisor = Supervisor(args.policy)
+
     def stop(*_: object) -> None:
         supervisor.stop_event.set()
         raise SystemExit(0)

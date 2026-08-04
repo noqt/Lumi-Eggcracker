@@ -19,19 +19,32 @@ class DetectorTests(unittest.TestCase):
     def test_llama_cpp_fast_path_requires_model_argument(self) -> None:
         catalogue = load_bundled()
         self.assertIsNone(match(catalogue, Sample("llama-cli", ("/usr/bin/llama-cli", "--help"))))
-        value = match(catalogue, Sample("llama-cli", ("/usr/bin/llama-cli", "-m", "/models/tiny.gguf")))
-        self.assertEqual(DetectionMatch("llama.cpp", "FAST_NAME", ("exe_basename", "argv_model_suffix")), value)
+        value = match(
+            catalogue, Sample("llama-cli", ("/usr/bin/llama-cli", "-m", "/models/tiny.gguf"))
+        )
+        self.assertEqual(
+            DetectionMatch("llama.cpp", "FAST_NAME", ("exe_basename", "argv_model_suffix")), value
+        )
 
     def test_content_profile_requires_both_independent_groups(self) -> None:
         catalogue = load_bundled()
         sample = Sample("unfamiliar", ("anything",))
         self.assertIsNone(match(catalogue, sample, evidence={"MODEL_CONTENT": {"gguf-v3"}}))
         self.assertIsNone(match(catalogue, sample, evidence={"INFERENCE_RUNTIME": {"llama-elf"}}))
-        self.assertEqual(DetectionMatch("content.gguf-llama", "CONTENT", ("gguf-v3", "llama-elf")), match(catalogue, sample, evidence={"MODEL_CONTENT": {"gguf-v3"}, "INFERENCE_RUNTIME": {"llama-elf"}}))
+        self.assertEqual(
+            DetectionMatch("content.gguf-llama", "CONTENT", ("gguf-v3", "llama-elf")),
+            match(
+                catalogue,
+                sample,
+                evidence={"MODEL_CONTENT": {"gguf-v3"}, "INFERENCE_RUNTIME": {"llama-elf"}},
+            ),
+        )
 
     def test_generic_language_runtime_is_not_a_match(self) -> None:
         catalogue = load_bundled()
-        self.assertIsNone(match(catalogue, Sample("python3", ("/usr/bin/python3", "worker.py", "--model", "cat"))))
+        self.assertIsNone(
+            match(catalogue, Sample("python3", ("/usr/bin/python3", "worker.py", "--model", "cat")))
+        )
         self.assertIsNone(match(catalogue, Sample("node", ("node", "agent.js"))))
 
     def test_catalogue_rejects_unknown_predicate_and_incomplete_content_group(self) -> None:

@@ -12,7 +12,14 @@ from .jsonio import JsonInputError
 
 MAX_ELF_BYTES = 4 * 1024 * 1024
 MAX_SECTIONS = 1024
-LLAMA_MARKERS = frozenset({"llama_decode", "llama_model_load_from_file", "llama_model_load_from_splits", "ggml_build_forward_expand"})
+LLAMA_MARKERS = frozenset(
+    {
+        "llama_decode",
+        "llama_model_load_from_file",
+        "llama_model_load_from_splits",
+        "ggml_build_forward_expand",
+    }
+)
 PINNED_LLAMA_BUILD_IDS = frozenset({"7c2bca7f8ea49e1c6e86adb14861e721e041f95e"})
 
 
@@ -41,21 +48,55 @@ def _symbols(descriptor: int, size: int) -> set[str]:
     header = _read(descriptor, 0, 64)
     if header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01":
         raise JsonInputError("candidate runtime is not little-endian ELF64")
-    _type, _machine, _version, _entry, _phoff, section_offset, _flags, header_size, _phent, _phnum, section_size, section_count, _shstr = struct.unpack("<HHIQQQIHHHHHH", header[16:])
+    (
+        _type,
+        _machine,
+        _version,
+        _entry,
+        _phoff,
+        section_offset,
+        _flags,
+        header_size,
+        _phent,
+        _phnum,
+        section_size,
+        section_count,
+        _shstr,
+    ) = struct.unpack("<HHIQQQIHHHHHH", header[16:])
     if header_size != 64 or not 1 <= section_count <= MAX_SECTIONS or section_size < 64:
         raise JsonInputError("ELF section table is invalid")
-    if section_offset + section_size * section_count > size or section_offset + section_size * section_count > MAX_ELF_BYTES:
+    if (
+        section_offset + section_size * section_count > size
+        or section_offset + section_size * section_count > MAX_ELF_BYTES
+    ):
         raise JsonInputError("ELF section table exceeds inspection window")
-    sections = [_read(descriptor, section_offset + index * section_size, 64) for index in range(section_count)]
+    sections = [
+        _read(descriptor, section_offset + index * section_size, 64)
+        for index in range(section_count)
+    ]
     values: set[str] = set()
     for entry in sections:
-        _name, kind, _flags, _address, offset, length, link, _info, _align, entry_size = struct.unpack("<IIQQQQIIQQ", entry)
-        if kind not in {2, 11} or entry_size != 24 or not length or length > MAX_ELF_BYTES or offset + length > size:
+        _name, kind, _flags, _address, offset, length, link, _info, _align, entry_size = (
+            struct.unpack("<IIQQQQIIQQ", entry)
+        )
+        if (
+            kind not in {2, 11}
+            or entry_size != 24
+            or not length
+            or length > MAX_ELF_BYTES
+            or offset + length > size
+        ):
             continue
         if link >= section_count:
             raise JsonInputError("ELF symbol table references invalid string table")
-        _n, string_kind, _f, _a, string_offset, string_length, _l, _i, _al, _es = struct.unpack("<IIQQQQIIQQ", sections[link])
-        if string_kind != 3 or string_offset + string_length > size or string_length > MAX_ELF_BYTES:
+        _n, string_kind, _f, _a, string_offset, string_length, _l, _i, _al, _es = struct.unpack(
+            "<IIQQQQIIQQ", sections[link]
+        )
+        if (
+            string_kind != 3
+            or string_offset + string_length > size
+            or string_length > MAX_ELF_BYTES
+        ):
             raise JsonInputError("ELF string table is invalid")
         strings = _read(descriptor, string_offset, string_length)
         symbols = _read(descriptor, offset, length)
@@ -82,11 +123,17 @@ def _build_id(descriptor: int, size: int) -> str | None:
     program_offset, entry_size, count = values[4], values[8], values[9]
     if count == 0:
         return None
-    if entry_size < 56 or not 1 <= count <= MAX_SECTIONS or program_offset + entry_size * count > size:
+    if (
+        entry_size < 56
+        or not 1 <= count <= MAX_SECTIONS
+        or program_offset + entry_size * count > size
+    ):
         raise JsonInputError("ELF program table is invalid")
     for index in range(count):
         entry = _read(descriptor, program_offset + index * entry_size, 56)
-        kind, _flags, offset, _virtual, _physical, length, _memory, _align = struct.unpack("<IIQQQQQQ", entry)
+        kind, _flags, offset, _virtual, _physical, length, _memory, _align = struct.unpack(
+            "<IIQQQQQQ", entry
+        )
         if kind != 4 or not length or offset + length > size or offset + length > MAX_ELF_BYTES:
             continue
         note = _read(descriptor, offset, length)
@@ -124,7 +171,11 @@ def inspect_path(path: Path) -> RuntimeEvidence | None:
             # window. It may still qualify only through the exact build ID.
             found = ()
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
+        if (before.st_dev, before.st_ino, before.st_size) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+        ):
             return None
         if len(found) >= 2:
             return RuntimeEvidence("llama-elf", "llama.cpp/GGML", "ELF_MARKERS", found)

@@ -46,7 +46,11 @@ class DetectionMatch:
 
 
 def bundled_bytes() -> bytes:
-    return importlib.resources.files("lumi_eggcracker").joinpath("detector_catalogue.json").read_bytes()
+    return (
+        importlib.resources.files("lumi_eggcracker")
+        .joinpath("detector_catalogue.json")
+        .read_bytes()
+    )
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -65,7 +69,11 @@ def _identifier(value: object) -> str:
 
 
 def _values(value: object) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value or not all(isinstance(item, str) and 1 <= len(item) <= 128 for item in value):
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and 1 <= len(item) <= 128 for item in value)
+    ):
         raise JsonInputError("detector evidence values are invalid")
     if len(set(value)) != len(value):
         raise JsonInputError("detector evidence values are duplicated")
@@ -74,13 +82,19 @@ def _values(value: object) -> tuple[str, ...]:
 
 def load_catalogue(raw: bytes, *, expected_digest: str | None = None) -> Catalogue:
     digest = hashlib.sha256(raw).hexdigest()
-    if expected_digest is not None and (not HEX.fullmatch(expected_digest) or digest != expected_digest):
+    if expected_digest is not None and (
+        not HEX.fullmatch(expected_digest) or digest != expected_digest
+    ):
         raise JsonInputError("detector catalogue digest is invalid")
     try:
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, JsonInputError) as error:
         raise JsonInputError(f"detector catalogue is invalid: {error}") from error
-    if not isinstance(value, dict) or set(value) != {"profiles", "schema_version"} or value.get("schema_version") != SCHEMA:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"profiles", "schema_version"}
+        or value.get("schema_version") != SCHEMA
+    ):
         raise JsonInputError("detector catalogue schema is invalid")
     raw_profiles = value["profiles"]
     if not isinstance(raw_profiles, list) or not raw_profiles:
@@ -99,9 +113,15 @@ def load_catalogue(raw: bytes, *, expected_digest: str | None = None) -> Catalog
             if not isinstance(item["all"], list) or not item["all"]:
                 raise JsonInputError("detector profile predicates are invalid")
             for predicate in item["all"]:
-                if not isinstance(predicate, dict) or set(predicate) != {"kind", "values"} or predicate["kind"] not in KINDS:
+                if (
+                    not isinstance(predicate, dict)
+                    or set(predicate) != {"kind", "values"}
+                    or predicate["kind"] not in KINDS
+                ):
                     raise JsonInputError("detector predicate schema is invalid")
-                predicates.append({"kind": predicate["kind"], "values": _values(predicate["values"])})
+                predicates.append(
+                    {"kind": predicate["kind"], "values": _values(predicate["values"])}
+                )
             profile = Profile(identifier, path, tuple(predicates))
         elif path == "CONTENT" and set(item) == {"id", "path", "require_all_groups"}:
             raw_groups = item["require_all_groups"]
@@ -110,7 +130,12 @@ def load_catalogue(raw: bytes, *, expected_digest: str | None = None) -> Catalog
             groups: list[dict[str, tuple[str, ...]]] = []
             present: set[str] = set()
             for group in raw_groups:
-                if not isinstance(group, dict) or set(group) != {"any", "group"} or group["group"] not in GROUPS or group["group"] in present:
+                if (
+                    not isinstance(group, dict)
+                    or set(group) != {"any", "group"}
+                    or group["group"] not in GROUPS
+                    or group["group"] in present
+                ):
                     raise JsonInputError("content evidence group is invalid")
                 present.add(group["group"])
                 groups.append({"group": group["group"], "any": _values(group["any"])})
@@ -144,18 +169,26 @@ def _matches(snapshot: Snapshot, predicate: dict[str, Any]) -> bool:
     raise JsonInputError("unknown detector predicate")
 
 
-def match(catalogue: Catalogue, snapshot: Snapshot, *, evidence: dict[str, set[str]] | None = None) -> DetectionMatch | None:
+def match(
+    catalogue: Catalogue, snapshot: Snapshot, *, evidence: dict[str, set[str]] | None = None
+) -> DetectionMatch | None:
     """Return one complete profile match, never partial, fuzzy or scored evidence."""
     supplied = evidence or {}
     for profile in catalogue.profiles:
         if profile.path == "FAST_NAME":
-            matched = tuple(predicate["kind"] for predicate in profile.predicates if _matches(snapshot, predicate))
+            matched = tuple(
+                predicate["kind"]
+                for predicate in profile.predicates
+                if _matches(snapshot, predicate)
+            )
             if len(matched) == len(profile.predicates):
                 return DetectionMatch(profile.identifier, profile.path, matched)
         else:
             matched_ids: list[str] = []
             for group in profile.groups:
-                values = tuple(sorted(set(group["any"]).intersection(supplied.get(group["group"], set()))))
+                values = tuple(
+                    sorted(set(group["any"]).intersection(supplied.get(group["group"], set())))
+                )
                 if not values:
                     break
                 matched_ids.extend(values)
@@ -171,7 +204,9 @@ def public_catalogue(catalogue: Catalogue) -> dict[str, Any]:
         if profile.path == "FAST_NAME":
             value["predicates"] = [item["kind"] for item in profile.predicates]
         else:
-            value["evidence_groups"] = [{"group": item["group"], "any": list(item["any"])} for item in profile.groups]
+            value["evidence_groups"] = [
+                {"group": item["group"], "any": list(item["any"])} for item in profile.groups
+            ]
         profiles.append(value)
     return {"digest": catalogue.digest, "profiles": profiles, "schema_version": SCHEMA}
 
