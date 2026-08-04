@@ -1,6 +1,6 @@
 # Limitations
 
-Lumi Eggcracker 0.3.0 autonomously acts only on a complete match from its installed deterministic AI-runtime catalogue. Its content path currently supports only a regular GGUF v2/v3 artifact combined with a qualified llama.cpp/GGML ELF runtime exposing two valid symbol-table markers, or the release-pinned llama.cpp launcher ELF build ID. It does not recognise arbitrary, custom, fully stripped, encrypted, containerised, remote or otherwise unlisted AI/agent workloads.
+Lumi Eggcracker 0.3.1 autonomously acts only on a complete match from its installed deterministic AI-runtime catalogue. Its content path currently supports only a regular GGUF v2/v3 artifact combined with a qualified llama.cpp/GGML ELF runtime exposing two valid symbol-table markers, or the release-pinned llama.cpp launcher ELF build ID. It does not recognise arbitrary, custom, fully stripped, encrypted, containerised, remote or otherwise unlisted AI/agent workloads.
 
 The observer uses bounded `/proc` polling. It has no kernel execution hook, eBPF programme or guarantee that a process which forks, daemonises or exits before discovery can be reconstructed as one complete historical tree. A successful receipt proves the exact captured quarantine cgroup is empty.
 
@@ -8,4 +8,4 @@ The product does not kill generic Python, Node.js, Java, shell, GPU-intensive, m
 
 Approvals are exact: UID, resolved executable identity and complete argv digest must all match. Changing any argument requires a new approval. Revoking an approval affects future detections, not a workload already running under that approval.
 
-The explicit `start` command remains non-interactive. It has no terminal attachment, current-working-directory forwarding, timeout, memory/CPU limit UX or output streaming. It supports one active selected workload globally. Detection receipts are bounded to 1000 entries.
+The explicit `start` command remains non-interactive. It has no terminal attachment, current-working-directory forwarding, timeout or output streaming. It supports one active selected workload globally; PID, memory and CPU limits are explicit. Detection receipts are bounded to 1000 entries.

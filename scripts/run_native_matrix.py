@@ -132,7 +132,11 @@ def main() -> int:
         wait_state(operator, hostile, "COMPLETED_ALLOWED", timeout=30)
         hostile_result = json.loads(hostile_path.read_text(encoding="utf-8"))
         hostile_path.unlink(missing_ok=True)
-        if hostile_result["uid"] != workload_uid or hostile_result["connection_successes"] or hostile_result["replacement_successes"]:
+        if (
+            hostile_result["uid"] != workload_uid
+            or any(hostile_result["connection_successes"].values())
+            or hostile_result["replacement_successes"]
+        ):
             raise RuntimeError(f"workload control access succeeded: {hostile_result}")
         units = run(["/usr/bin/systemctl", "list-units", "replacement-*", "--all", "--plain", "--no-legend"]).stdout
         if units.strip():

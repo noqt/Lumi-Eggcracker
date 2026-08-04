@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from .client import request
 from .gate import main as gate_main
 from .jsonio import JsonInputError, write_new_json
 from .supervisor import main as supervisor_main
+from .watchdog import main as watchdog_main
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -20,6 +22,8 @@ def _parser() -> argparse.ArgumentParser:
     start = commands.add_parser("start", help="launch an explicitly selected protected workload")
     start.add_argument("--name", required=True)
     start.add_argument("--max-pids", required=True, type=int)
+    start.add_argument("--max-memory-mib", default=2048, type=int)
+    start.add_argument("--cpu-quota-percent", default=400, type=int)
     start.add_argument("argv", nargs=argparse.REMAINDER)
     kill = commands.add_parser("kill", help="terminate one protected workload")
     kill.add_argument("--name", required=True)
@@ -50,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         return supervisor_main(values[1:])
     if values[:1] == ["_gate"]:
         return gate_main(values[1:])
+    if values[:1] == ["_watchdog"]:
+        return watchdog_main(values[1:])
     args = _parser().parse_args(values)
     if args.command == "version":
         print(__version__)
@@ -60,14 +66,25 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(value, sort_keys=True))
             return 0 if value.get("result") == "PASS" else 6
         if args.command == "start":
-            value = request("start", name=args.name, max_pids=args.max_pids, argv=_command(args.argv))
+            value = request(
+                "start",
+                name=args.name,
+                max_pids=args.max_pids,
+                max_memory_mib=args.max_memory_mib,
+                cpu_quota_percent=args.cpu_quota_percent,
+                argv=_command(args.argv),
+            )
         elif args.command == "status":
             value = request("status", name=args.name)
         elif args.command == "list":
             value = request("list")
         elif args.command == "approve":
+            if os.geteuid() != 0:
+                raise JsonInputError("approve requires root administrative authority; use sudo")
             value = request("approve", name=args.name, uid=args.uid, argv=_command(args.argv))
         elif args.command == "revoke":
+            if os.geteuid() != 0:
+                raise JsonInputError("revoke requires root administrative authority; use sudo")
             value = request("revoke", name=args.name)
         elif args.command == "approvals":
             value = request("approvals")

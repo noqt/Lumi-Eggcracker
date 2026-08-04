@@ -18,16 +18,21 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 LIB = Path("/usr/local/lib/lumi-eggcracker")
 BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
 UNIT = Path("/etc/systemd/system/lumi-eggcracker.service")
+WATCHDOG_UNIT = Path("/etc/systemd/system/lumi-eggcracker-watchdog.service")
 STATE = Path("/var/lib/lumi-eggcracker")
 RUNTIME = Path("/run/lumi-eggcracker")
-SOCKET = RUNTIME / "control.sock"
+QUERY_SOCKET = RUNTIME / "query.sock"
+OPERATOR_SOCKET = RUNTIME / "operator.sock"
+ADMIN_SOCKET = RUNTIME / "admin.sock"
+WATCHDOG_RUNTIME = Path("/run/lumi-eggcracker-watchdog")
+HEARTBEAT_SOCKET = WATCHDOG_RUNTIME / "heartbeat.sock"
 WORKLOAD_NAME = "lumi-eggcracker-workload"
-TARGETS = (LIB, BIN, ETC, UNIT, STATE, RUNTIME)
+TARGETS = (LIB, BIN, ETC, UNIT, WATCHDOG_UNIT, STATE, RUNTIME, WATCHDOG_RUNTIME)
 
 
 def digest(path: Path) -> str:
@@ -77,7 +82,11 @@ def workload_account() -> tuple[pwd.struct_passwd, bool]:
 
 
 def service() -> bytes:
-    return b"""[Unit]\nDescription=Lumi Eggcracker autonomous AI runtime supervisor\nAfter=multi-user.target\nStartLimitIntervalSec=60\nStartLimitBurst=60\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _supervisor --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\nDelegate=yes\n\n[Install]\nWantedBy=multi-user.target\n"""
+    return b"""[Unit]\nDescription=Lumi Eggcracker autonomous AI runtime supervisor\nAfter=lumi-eggcracker-watchdog.service\nRequires=lumi-eggcracker-watchdog.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _supervisor --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\nDelegate=yes\nMemoryMin=64M\nMemoryMax=256M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=256\nLimitNOFILE=65536\nOOMScoreAdjust=-900\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
+
+
+def watchdog_service() -> bytes:
+    return b"""[Unit]\nDescription=Lumi Eggcracker fail-closed watchdog\nBefore=lumi-eggcracker.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _watchdog --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker-watchdog\nRuntimeDirectoryMode=0700\nUMask=0077\nNoNewPrivileges=yes\nMemoryMin=16M\nMemoryMax=64M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=32\nLimitNOFILE=4096\nOOMScoreAdjust=-1000\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker-watchdog\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
 
 
 def autonomous_primitives_available() -> bool:
@@ -124,6 +133,7 @@ def catalogue_from_artifact(artifact: Path) -> bytes:
 
 def cleanup(created: list[Path], created_user: bool, created_group: bool) -> None:
     run(["/usr/bin/systemctl", "disable", "--now", "lumi-eggcracker.service"])
+    run(["/usr/bin/systemctl", "disable", "--now", "lumi-eggcracker-watchdog.service"])
     for path in reversed(created):
         if path.is_dir() and not path.is_symlink():
             shutil.rmtree(path)
@@ -172,21 +182,24 @@ def main() -> int:
         catalogue = catalogue_from_artifact(args.artifact)
         catalogue_path = ETC / "detector_catalogue.json"
         write_new(catalogue_path, catalogue, 0o644)
-        policy = {"catalogue_path": str(catalogue_path), "catalogue_sha256": hashlib.sha256(catalogue).hexdigest(), "operator_gid": operator.pw_gid, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.policy.v3", "socket_path": str(SOCKET), "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-eggcracker-workload-", "version": release["version"], "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}
+        policy = {"admin_socket_path": str(ADMIN_SOCKET), "catalogue_path": str(catalogue_path), "catalogue_sha256": hashlib.sha256(catalogue).hexdigest(), "operator_gid": operator.pw_gid, "operator_socket_path": str(OPERATOR_SOCKET), "operator_uid": operator.pw_uid, "query_socket_path": str(QUERY_SOCKET), "schema_version": "lumi-eggcracker.policy.v4", "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-eggcracker-workload-", "version": release["version"], "watchdog_socket_path": str(HEARTBEAT_SOCKET), "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}
         write_new(ETC / "policy.json", (json.dumps(policy, sort_keys=True) + "\n").encode(), 0o600)
         write_new(UNIT, service(), 0o644); created.append(UNIT)
-        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v3", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
+        write_new(WATCHDOG_UNIT, watchdog_service(), 0o644); created.append(WATCHDOG_UNIT)
+        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT), str(WATCHDOG_UNIT): digest(WATCHDOG_UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v4", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
         write_new(STATE / "install-manifest.json", (json.dumps(manifest, sort_keys=True) + "\n").encode(), 0o600)
         checked = run(["/usr/bin/systemctl", "daemon-reload"])
+        started_watchdog = run(["/usr/bin/systemctl", "enable", "--now", "lumi-eggcracker-watchdog.service"])
         started = run(["/usr/bin/systemctl", "enable", "--now", "lumi-eggcracker.service"])
-        if checked.returncode or started.returncode:
-            raise RuntimeError((checked.stderr + started.stderr).strip() or "cannot start supervisor")
+        if checked.returncode or started.returncode or started_watchdog.returncode:
+            raise RuntimeError((checked.stderr + started.stderr + started_watchdog.stderr).strip() or "cannot start supervisor")
         deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and not SOCKET.exists():
+        while time.monotonic() < deadline and not all(path.exists() for path in (QUERY_SOCKET, OPERATOR_SOCKET, ADMIN_SOCKET, HEARTBEAT_SOCKET)):
             time.sleep(0.02)
-        metadata = SOCKET.stat()
-        if not SOCKET.exists() or stat.S_IMODE(metadata.st_mode) != 0o660 or metadata.st_uid != 0 or metadata.st_gid != operator.pw_gid:
-            raise RuntimeError("control socket ownership contract failed")
+        for path, mode, gid in ((QUERY_SOCKET, 0o660, operator.pw_gid), (OPERATOR_SOCKET, 0o660, operator.pw_gid), (ADMIN_SOCKET, 0o600, 0), (HEARTBEAT_SOCKET, 0o600, 0)):
+            metadata = path.stat()
+            if not path.exists() or stat.S_IMODE(metadata.st_mode) != mode or metadata.st_uid != 0 or metadata.st_gid != gid:
+                raise RuntimeError("socket ownership contract failed")
         print(json.dumps({"result": "INSTALLED", "service": "lumi-eggcracker.service", "workload_uid": account.pw_uid}, sort_keys=True))
         return 0
     except Exception:

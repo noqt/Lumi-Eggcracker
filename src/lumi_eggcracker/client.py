@@ -10,7 +10,21 @@ from typing import Any
 from .jsonio import JsonInputError
 
 MAX_FRAME = 32 * 1024
-SOCKET_PATH = "/run/lumi-eggcracker/control.sock"
+QUERY_SOCKET = "/run/lumi-eggcracker/query.sock"
+OPERATOR_SOCKET = "/run/lumi-eggcracker/operator.sock"
+ADMIN_SOCKET = "/run/lumi-eggcracker/admin.sock"
+
+SOCKETS = {
+    "approvals": QUERY_SOCKET,
+    "detections": QUERY_SOCKET,
+    "doctor": QUERY_SOCKET,
+    "list": QUERY_SOCKET,
+    "status": QUERY_SOCKET,
+    "approve": ADMIN_SOCKET,
+    "revoke": ADMIN_SOCKET,
+    "kill": OPERATOR_SOCKET,
+    "start": OPERATOR_SOCKET,
+}
 
 
 def _receive(connection: socket.socket) -> dict[str, Any]:
@@ -37,12 +51,16 @@ def _receive(connection: socket.socket) -> dict[str, Any]:
 
 
 def request(action: str, **args: Any) -> dict[str, Any]:
+    try:
+        socket_path = SOCKETS[action]
+    except KeyError as error:
+        raise JsonInputError("unsupported client action") from error
     payload = json.dumps({"action": action, "args": args}, sort_keys=True, separators=(",", ":")).encode()
     if not 1 <= len(payload) <= MAX_FRAME:
         raise JsonInputError("supervisor request is too large")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(3.0)
-        connection.connect(SOCKET_PATH)
+        connection.connect(socket_path)
         connection.sendall(struct.pack("!I", len(payload)) + payload)
         response = _receive(connection)
     if set(response) != {"ok", "value"} or not isinstance(response["ok"], bool):

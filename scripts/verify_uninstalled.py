@@ -8,7 +8,13 @@ import pwd
 import subprocess
 from pathlib import Path
 
-PATHS = (Path("/usr/local/lib/lumi-eggcracker"), Path("/usr/local/bin/eggcracker"), Path("/etc/lumi-eggcracker"), Path("/etc/systemd/system/lumi-eggcracker.service"), Path("/var/lib/lumi-eggcracker"), Path("/run/lumi-eggcracker"))
+PATHS = (
+    Path("/usr/local/lib/lumi-eggcracker"), Path("/usr/local/bin/eggcracker"),
+    Path("/etc/lumi-eggcracker"), Path("/etc/systemd/system/lumi-eggcracker.service"),
+    Path("/etc/systemd/system/lumi-eggcracker-watchdog.service"),
+    Path("/var/lib/lumi-eggcracker"), Path("/run/lumi-eggcracker"),
+    Path("/run/lumi-eggcracker-watchdog"),
+)
 
 
 def main() -> int:

@@ -31,11 +31,11 @@ A successful receipt proves the captured quarantine cgroup is empty. It does not
 
 ## Quick start
 
-Download and extract `lumi-eggcracker-0.3.0-linux.zip`, then run as root:
+Download and extract `lumi-eggcracker-0.3.1-linux.zip`, then run as root:
 
 ```sh
-cd lumi-eggcracker-0.3.0
-sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.3.0.pyz
+cd lumi-eggcracker-0.3.1
+sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.3.1.pyz
 eggcracker doctor
 eggcracker approvals
 ```
@@ -43,7 +43,7 @@ eggcracker approvals
 An unapproved complete fast-name or content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, approve it before launch. The approval stores hashes, not its raw arguments:
 
 ```sh
-eggcracker approve --name local-qwen --uid "$(id -u)" -- \
+sudo eggcracker approve --name local-qwen --uid "$(id -u)" -- \
   /opt/llama.cpp/llama-cli -m /opt/models/qwen.gguf -p "Hello" -n 256
 ```
 
@@ -53,12 +53,12 @@ Inspect autonomous containment summaries with:
 eggcracker detections
 ```
 
-Remove an approval for future launches with `eggcracker revoke --name local-qwen`. Revocation does not kill a workload that was already approved and running.
+Remove an approval for future launches with `sudo eggcracker revoke --name local-qwen`. Revocation does not kill a workload that was already approved and running.
 
 The selected-workload command remains available for controlled tests and explicit workloads:
 
 ```sh
-eggcracker start --name demo --max-pids 8 -- /bin/sleep 60
+eggcracker start --name demo --max-pids 8 --max-memory-mib 256 --cpu-quota-percent 100 -- /bin/sleep 60
 eggcracker kill --name demo --receipt ./demo-receipt.json
 ```
 

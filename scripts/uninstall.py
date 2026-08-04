@@ -15,10 +15,13 @@ LIB = Path("/usr/local/lib/lumi-eggcracker")
 BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
 UNIT = Path("/etc/systemd/system/lumi-eggcracker.service")
+WATCHDOG_UNIT = Path("/etc/systemd/system/lumi-eggcracker-watchdog.service")
 STATE = Path("/var/lib/lumi-eggcracker")
 RUNTIME = Path("/run/lumi-eggcracker")
+WATCHDOG_RUNTIME = Path("/run/lumi-eggcracker-watchdog")
 PREFIX = "lumi-eggcracker-workload-"
 SUPERVISOR = "lumi-eggcracker.service"
+WATCHDOG = "lumi-eggcracker-watchdog.service"
 
 
 def digest(path: Path) -> str:
@@ -76,17 +79,19 @@ def main() -> int:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise SystemExit("installed manifest is missing")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "lumi-eggcracker.install.v3":
+    if manifest.get("schema_version") != "lumi-eggcracker.install.v4":
         raise SystemExit("installed manifest schema is invalid")
     for name, expected in manifest.get("files", {}).items():
         path = Path(name)
         if path.is_symlink() or not path.is_file() or digest(path) != expected:
             raise SystemExit(f"refusing uninstall because installed file drifted: {path}")
     run(["/usr/bin/systemctl", "disable", "--now", SUPERVISOR])
+    run(["/usr/bin/systemctl", "disable", "--now", WATCHDOG])
     if not owned_cgroups_empty() or not quarantine_empty():
         raise SystemExit("refusing uninstall with populated or uncertain Eggcracker cgroups")
     run(["/usr/bin/systemctl", "reset-failed", SUPERVISOR])
-    for path in (UNIT, BIN, LIB, ETC, STATE, RUNTIME):
+    run(["/usr/bin/systemctl", "reset-failed", WATCHDOG])
+    for path in (UNIT, WATCHDOG_UNIT, BIN, LIB, ETC, STATE, RUNTIME, WATCHDOG_RUNTIME):
         if path.exists() and not path.is_symlink():
             shutil.rmtree(path) if path.is_dir() else path.unlink()
     if manifest.get("created_workload_user"):

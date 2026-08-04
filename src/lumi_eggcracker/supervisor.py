@@ -54,11 +54,20 @@ from .records import (
     validate_run,
     write_atomic,
 )
+from .watchdog import HEARTBEAT, HEARTBEAT_MAGIC, HEARTBEAT_SOCKET
 
 MAX_FRAME = 32 * 1024
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-POLICY_SCHEMA = "lumi-eggcracker.policy.v3"
-SOCKET_PATH = Path("/run/lumi-eggcracker/control.sock")
+POLICY_SCHEMA = "lumi-eggcracker.policy.v4"
+QUERY_SOCKET = Path("/run/lumi-eggcracker/query.sock")
+OPERATOR_SOCKET = Path("/run/lumi-eggcracker/operator.sock")
+ADMIN_SOCKET = Path("/run/lumi-eggcracker/admin.sock")
+LEGACY_SOCKET = Path("/run/lumi-eggcracker/control.sock")
+SOCKET_ACTIONS = {
+    QUERY_SOCKET: frozenset({"approvals", "detections", "doctor", "list", "status"}),
+    OPERATOR_SOCKET: frozenset({"kill", "start"}),
+    ADMIN_SOCKET: frozenset({"approve", "revoke"}),
+}
 STATE_DIR = Path("/var/lib/lumi-eggcracker")
 UNIT_PREFIX = "lumi-eggcracker-workload-"
 GATES_DIR = Path("/run/lumi-eggcracker/gates")
@@ -113,16 +122,19 @@ class Supervisor:
             raise JsonInputError("supervisor must run as root")
         policy = load_regular_json(policy_path)
         expected = {
+            "admin_socket_path",
             "catalogue_path",
             "catalogue_sha256",
             "operator_gid",
+            "operator_socket_path",
             "operator_uid",
+            "query_socket_path",
             "schema_version",
-            "socket_path",
             "source_commit",
             "state_dir",
             "unit_prefix",
             "version",
+            "watchdog_socket_path",
             "workload_gid",
             "workload_uid",
         }
@@ -134,7 +146,10 @@ class Supervisor:
         if policy["operator_uid"] == policy["workload_uid"] or policy["workload_uid"] == 0:
             raise JsonInputError("operator and workload identities must be distinct non-root users")
         if (
-            Path(policy["socket_path"]) != SOCKET_PATH
+            Path(policy["query_socket_path"]) != QUERY_SOCKET
+            or Path(policy["operator_socket_path"]) != OPERATOR_SOCKET
+            or Path(policy["admin_socket_path"]) != ADMIN_SOCKET
+            or Path(policy["watchdog_socket_path"]) != HEARTBEAT_SOCKET
             or Path(policy["state_dir"]) != STATE_DIR
             or policy["unit_prefix"] != UNIT_PREFIX
         ):
@@ -171,6 +186,10 @@ class Supervisor:
         self.digest_cache: dict[tuple[int, int, int, int], str] = {}
         self.observations = ObservationStore()
         self.content_scan_tick = 0
+        self.last_scan_completed_ns = time.monotonic_ns()
+        self.discovery_failures = 0
+        self.heartbeat_sequence = 0
+        self.last_heartbeat_sent = 0.0
 
     @property
     def operator_uid(self) -> int:
@@ -264,7 +283,7 @@ class Supervisor:
         # control socket remains a root/operator 0660 inode, so traversal does
         # not grant control-socket access or directory listing.
         for path, mode, gid in (
-            (SOCKET_PATH.parent, 0o711, self.policy["operator_gid"]),
+            (QUERY_SOCKET.parent, 0o711, self.policy["operator_gid"]),
             (GATES_DIR, 0o710, self.policy["workload_gid"]),
             (STATE_DIR, 0o700, 0),
             (self.runs, 0o700, 0),
@@ -276,8 +295,9 @@ class Supervisor:
             path.mkdir(mode=mode, parents=True, exist_ok=True)
             os.chown(path, 0, gid)
             os.chmod(path, mode)
-        if SOCKET_PATH.exists() or SOCKET_PATH.is_symlink():
-            raise JsonInputError("control socket already exists")
+        for path in (*SOCKET_ACTIONS, LEGACY_SOCKET):
+            if path.exists() or path.is_symlink():
+                raise JsonInputError("Eggcracker socket already exists")
         self._recover()
         self.quarantine_root = self._prepare_quarantine()
         self._scan_once(synchronous=True)
@@ -562,9 +582,34 @@ class Supervisor:
         while not self.stop_event.is_set():
             try:
                 self._scan_once()
+                self.last_scan_completed_ns = time.monotonic_ns()
+                self.discovery_failures = 0
             except (JsonInputError, OSError) as error:
+                self.discovery_failures += 1
                 print(f"eggcracker discovery scan failed: {error}", file=sys.stderr, flush=True)
             self.stop_event.wait(0.1)
+
+    def _heartbeat(self) -> None:
+        now = time.monotonic()
+        if now - self.last_heartbeat_sent < 0.25:
+            return
+        thread = self.discovery_thread
+        if (
+            thread is None
+            or not thread.is_alive()
+            or time.monotonic_ns() - self.last_scan_completed_ns > 5_000_000_000
+            or self.discovery_failures >= 3
+        ):
+            return
+        self.heartbeat_sequence += 1
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as value:
+                value.connect(str(HEARTBEAT_SOCKET))
+                value.sendall(HEARTBEAT.pack(HEARTBEAT_MAGIC, 1, self.heartbeat_sequence))
+            self.last_heartbeat_sent = now
+        except OSError:
+            # The independent watchdog decides whether the missing heartbeat is fatal.
+            pass
 
     def _cleanup(self, unit: str) -> dict[str, Any]:
         result = self._run(["/usr/bin/systemctl", "stop", unit])
@@ -731,14 +776,19 @@ class Supervisor:
         return False
 
     def _start(self, args: dict[str, Any]) -> dict[str, Any]:
-        if set(args) != {"argv", "max_pids", "name"}:
+        if set(args) != {"argv", "cpu_quota_percent", "max_memory_mib", "max_pids", "name"}:
             raise JsonInputError("start arguments are invalid")
         name, argv, maximum = args["name"], args["argv"], args["max_pids"]
+        memory_mib, cpu_quota = args["max_memory_mib"], args["cpu_quota_percent"]
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise JsonInputError("workload name is invalid")
         summary = command_summary(argv)
         if isinstance(maximum, bool) or not isinstance(maximum, int) or not 4 <= maximum <= 4096:
             raise JsonInputError("max_pids must be from 4 to 4096")
+        if isinstance(memory_mib, bool) or not isinstance(memory_mib, int) or not 64 <= memory_mib <= 131_072:
+            raise JsonInputError("max_memory_mib must be from 64 to 131072")
+        if isinstance(cpu_quota, bool) or not isinstance(cpu_quota, int) or not 10 <= cpu_quota <= 10_000:
+            raise JsonInputError("cpu_quota_percent must be from 10 to 10000")
         with self.start_lock:
             if name_path(self.names, name).exists() or self._active_exists():
                 raise JsonInputError(
@@ -761,6 +811,10 @@ class Supervisor:
                     "--property=NoNewPrivileges=yes",
                     "--property=UMask=0077",
                     f"--property=TasksMax={maximum}",
+                    f"--property=MemoryMax={memory_mib}M",
+                    f"--property=CPUQuota={cpu_quota}%",
+                    "--property=IOWeight=10",
+                    "--property=LimitNOFILE=1024",
                     "--",
                     "/usr/bin/python3",
                     "/usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz",
@@ -792,6 +846,8 @@ class Supervisor:
                     "cgroup_device": identity.device,
                     "cgroup_inode": identity.inode,
                     "created_monotonic_ns": time.monotonic_ns(),
+                    "cpu_quota_percent": cpu_quota,
+                    "max_memory_mib": memory_mib,
                     "max_pids": maximum,
                     "name": name,
                     "operator_uid": self.operator_uid,
@@ -819,6 +875,8 @@ class Supervisor:
                     "run_id": run_id,
                     "state": record["state"],
                     "unit": unit,
+                    "cpu_quota_percent": cpu_quota,
+                    "max_memory_mib": memory_mib,
                     "workload_uid": record["workload_uid"],
                 }
             except Exception:
@@ -846,8 +904,10 @@ class Supervisor:
             "cgroup_device": identity.device,
             "cgroup_inode": identity.inode,
             "created_monotonic_ns": time.monotonic_ns(),
+            "cpu_quota_percent": 0,
             "executable": "<orphaned-owned-cgroup>",
             "max_pids": 0,
+            "max_memory_mib": 0,
             "name": f"orphan-{run_id}",
             "operator_uid": self.operator_uid,
             "run_id": run_id,
@@ -932,7 +992,7 @@ class Supervisor:
                 name=args["name"],
                 uid=args["uid"],
                 argv=args["argv"],
-                operator_uid=self.operator_uid,
+                administrator_uid=0,
             )
             return {"approval": public_approval(value), "result": "APPROVED"}
         if action == "revoke" and set(args) == {"name"}:
@@ -959,35 +1019,55 @@ class Supervisor:
             return self._contain(self._load(args["name"]), "OPERATOR")
         raise JsonInputError("unsupported supervisor action")
 
+    def _serve_connection(self, connection: socket.socket, path: Path) -> None:
+        with connection:
+            connection.settimeout(0.25)
+            try:
+                _pid, uid, _gid = struct.unpack(
+                    "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                )
+                if path == ADMIN_SOCKET:
+                    if uid != 0:
+                        raise JsonInputError("administrative authority is required")
+                elif uid not in {0, self.operator_uid}:
+                    raise JsonInputError("peer uid is not authorized")
+                value = _receive(connection)
+                action = value.get("action") if isinstance(value, dict) else None
+                if action not in SOCKET_ACTIONS[path]:
+                    raise JsonInputError("action is not permitted on this socket")
+                _send(connection, {"ok": True, "value": self.handle(value)})
+            except (JsonInputError, OSError, struct.error) as error:
+                try:
+                    _send(connection, {"ok": False, "value": str(error)})
+                except OSError:
+                    pass
+
     def serve(self) -> int:
         self._prepare()
         self.discovery_thread = threading.Thread(target=self._discovery_loop, daemon=True)
         self.discovery_thread.start()
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-            listener.bind(str(SOCKET_PATH))
-            os.chown(SOCKET_PATH, 0, self.policy["operator_gid"])
-            os.chmod(SOCKET_PATH, 0o660)
-            listener.listen(16)
-            listener.settimeout(0.5)
+        listeners: dict[socket.socket, Path] = {}
+        try:
+            for path in SOCKET_ACTIONS:
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                listener.bind(str(path))
+                os.chown(path, 0, 0 if path == ADMIN_SOCKET else self.policy["operator_gid"])
+                os.chmod(path, 0o600 if path == ADMIN_SOCKET else 0o660)
+                listener.listen(32)
+                listener.setblocking(False)
+                listeners[listener] = path
             while not self.stop_event.is_set():
-                try:
-                    connection, _ = listener.accept()
-                except TimeoutError:
-                    continue
-                with connection:
-                    connection.settimeout(3.0)
+                ready, _, _ = select.select(listeners, [], [], 0.25)
+                self._heartbeat()
+                for listener in ready:
                     try:
-                        _pid, uid, _gid = struct.unpack(
-                            "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-                        )
-                        if uid not in {0, self.operator_uid}:
-                            raise JsonInputError("peer uid is not authorized")
-                        _send(connection, {"ok": True, "value": self.handle(_receive(connection))})
-                    except (JsonInputError, OSError, struct.error) as error:
-                        try:
-                            _send(connection, {"ok": False, "value": str(error)})
-                        except OSError:
-                            pass
+                        connection, _ = listener.accept()
+                    except BlockingIOError:
+                        continue
+                    self._serve_connection(connection, listeners[listener])
+        finally:
+            for listener in listeners:
+                listener.close()
         return 0
 
 

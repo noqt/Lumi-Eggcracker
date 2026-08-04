@@ -12,7 +12,7 @@ from typing import Any
 from .containment import CgroupIdentity, EmptyProof
 from .jsonio import JsonInputError, canonical_bytes, load_regular_json
 
-RUN_SCHEMA = "lumi-eggcracker.run.v2"
+RUN_SCHEMA = "lumi-eggcracker.run.v3"
 RECEIPT_SCHEMA = "lumi-eggcracker.receipt.v2"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 RUN_ID = re.compile(r"[0-9a-f]{24}\Z")
@@ -67,7 +67,7 @@ def command_summary(argv: list[str]) -> dict[str, Any]:
 def validate_run(value: dict[str, Any]) -> dict[str, Any]:
     expected = {
         "argv_count", "argv_sha256", "boot_id", "cgroup", "cgroup_device", "cgroup_inode",
-        "created_monotonic_ns", "executable", "max_pids", "name", "operator_uid", "run_id",
+        "created_monotonic_ns", "cpu_quota_percent", "executable", "max_memory_mib", "max_pids", "name", "operator_uid", "run_id",
         "schema_version", "state", "unit", "workload_gid", "workload_uid",
     }
     if set(value) != expected or value.get("schema_version") != RUN_SCHEMA:
@@ -82,7 +82,7 @@ def validate_run(value: dict[str, Any]) -> dict[str, Any]:
         raise JsonInputError("run record executable is invalid")
     if not isinstance(value["argv_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["argv_sha256"]):
         raise JsonInputError("run record command hash is invalid")
-    keys = ("cgroup_device", "cgroup_inode", "created_monotonic_ns", "operator_uid", "workload_gid", "workload_uid", "max_pids", "argv_count")
+    keys = ("cgroup_device", "cgroup_inode", "created_monotonic_ns", "cpu_quota_percent", "max_memory_mib", "operator_uid", "workload_gid", "workload_uid", "max_pids", "argv_count")
     if any(isinstance(value[key], bool) or not isinstance(value[key], int) or value[key] < 0 for key in keys):
         raise JsonInputError("run record integer field is invalid")
     if value["state"] not in ACTIVE_STATES | TERMINAL_STATES:
