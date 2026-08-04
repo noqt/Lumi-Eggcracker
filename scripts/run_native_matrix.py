@@ -144,7 +144,10 @@ def main() -> int:
         results["socket"] = hostile_result
         for index in range(args.restart_repetitions):
             name = f"restart-{token}-{index}"
-            call(operator, ["start", "--name", name, "--max-pids", "8", "--", "/bin/sleep", "30"])
+            # Keep the target alive across the slowest full qualification run;
+            # the probe must exercise restart containment of a live workload,
+            # not race a naturally completed 30-second sleep.
+            call(operator, ["start", "--name", name, "--max-pids", "8", "--", "/bin/sleep", "300"])
             run(["/usr/bin/systemctl", "kill", "--kill-who=main", "-s", "SIGKILL", "lumi-eggcracker.service"])
             state = wait_state(operator, name, "TERMINATED", timeout=12)
             receipt_files = sorted(Path("/var/lib/lumi-eggcracker/receipts").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
