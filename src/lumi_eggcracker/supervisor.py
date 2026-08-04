@@ -765,7 +765,11 @@ class Supervisor:
         return gate
 
     def _release_gate(self, gate: Path) -> None:
-        deadline = time.monotonic() + 1.5
+        # systemd may take a little longer to schedule a freshly created
+        # transient unit under sustained fork-race qualification.  The gate
+        # remains closed throughout this bounded wait, so this changes launch
+        # availability only; it never releases an unobserved workload.
+        deadline = time.monotonic() + 5.0
         try:
             while True:
                 try:
