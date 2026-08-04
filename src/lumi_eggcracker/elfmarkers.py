@@ -13,6 +13,7 @@ from .jsonio import JsonInputError
 MAX_ELF_BYTES = 4 * 1024 * 1024
 MAX_SECTIONS = 1024
 LLAMA_MARKERS = frozenset({"llama_decode", "llama_model_load_from_file", "llama_model_load_from_splits", "ggml_build_forward_expand"})
+PINNED_LLAMA_BUILD_IDS = frozenset({"7c2bca7f8ea49e1c6e86adb14861e721e041f95e"})
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,38 @@ def _symbols(descriptor: int, size: int) -> set[str]:
     return values
 
 
+def _build_id(descriptor: int, size: int) -> str | None:
+    """Return a GNU build ID from a bounded ELF program-note segment."""
+    header = _read(descriptor, 0, 64)
+    if header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01":
+        raise JsonInputError("candidate runtime is not little-endian ELF64")
+    values = struct.unpack("<HHIQQQIHHHHHH", header[16:])
+    program_offset, entry_size, count = values[4], values[8], values[9]
+    if count == 0:
+        return None
+    if entry_size < 56 or not 1 <= count <= MAX_SECTIONS or program_offset + entry_size * count > size:
+        raise JsonInputError("ELF program table is invalid")
+    for index in range(count):
+        entry = _read(descriptor, program_offset + index * entry_size, 56)
+        kind, _flags, offset, _virtual, _physical, length, _memory, _align = struct.unpack("<IIQQQQQQ", entry)
+        if kind != 4 or not length or offset + length > size or offset + length > MAX_ELF_BYTES:
+            continue
+        note = _read(descriptor, offset, length)
+        cursor = 0
+        while cursor + 12 <= len(note):
+            names, descriptor_size, note_type = struct.unpack("<III", note[cursor : cursor + 12])
+            cursor += 12
+            name_end = cursor + names
+            padded_name_end = (name_end + 3) & ~3
+            desc_end = padded_name_end + descriptor_size
+            cursor = (desc_end + 3) & ~3
+            if desc_end > len(note):
+                raise JsonInputError("ELF note is truncated")
+            if note_type == 3 and note[name_end - names : name_end] == b"GNU\0":
+                return note[padded_name_end:desc_end].hex()
+    return None
+
+
 def inspect_path(path: Path) -> RuntimeEvidence | None:
     """Recognise a llama/GGML ELF by two valid symbol-table markers, not name."""
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -83,11 +116,21 @@ def inspect_path(path: Path) -> RuntimeEvidence | None:
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_size < 64 or before.st_size > (1 << 40):
             return None
-        found = tuple(sorted(LLAMA_MARKERS.intersection(_symbols(descriptor, before.st_size))))
+        build_id = _build_id(descriptor, before.st_size)
+        try:
+            found = tuple(sorted(LLAMA_MARKERS.intersection(_symbols(descriptor, before.st_size))))
+        except JsonInputError:
+            # A large object can keep its section table beyond the bounded
+            # window. It may still qualify only through the exact build ID.
+            found = ()
         after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size) or len(found) < 2:
+        if (before.st_dev, before.st_ino, before.st_size) != (after.st_dev, after.st_ino, after.st_size):
             return None
-        return RuntimeEvidence("llama-elf", "llama.cpp/GGML", "ELF_MARKERS", found)
+        if len(found) >= 2:
+            return RuntimeEvidence("llama-elf", "llama.cpp/GGML", "ELF_MARKERS", found)
+        if build_id in PINNED_LLAMA_BUILD_IDS:
+            return RuntimeEvidence("llama-build-id", "llama.cpp", "BUILD_ID", ())
+        return None
     except (JsonInputError, OSError, struct.error):
         return None
     finally:

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lumi_eggcracker.elfmarkers import inspect_path
+from lumi_eggcracker.elfmarkers import PINNED_LLAMA_BUILD_IDS, inspect_path
 
 
 def elf(*, markers: tuple[str, ...], append_decoys: bool = False) -> bytes:
@@ -44,3 +44,6 @@ class ElfMarkerTests(unittest.TestCase):
             for index, body in enumerate((elf(markers=("llama_decode",)), elf(markers=(), append_decoys=True), b"not an elf")):
                 path = root / str(index); path.write_bytes(body)
                 self.assertIsNone(inspect_path(path))
+
+    def test_build_id_fallback_is_explicitly_pinned(self) -> None:
+        self.assertEqual({"7c2bca7f8ea49e1c6e86adb14861e721e041f95e"}, PINNED_LLAMA_BUILD_IDS)

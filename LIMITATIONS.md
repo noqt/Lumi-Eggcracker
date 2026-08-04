@@ -1,6 +1,6 @@
 # Limitations
 
-Lumi Eggcracker 0.3.0 autonomously acts only on a complete match from its installed deterministic AI-runtime catalogue. Its content path currently supports only a regular GGUF v2/v3 artifact combined with a qualified llama.cpp/GGML ELF runtime exposing two valid symbol-table markers. It does not recognise arbitrary, custom, fully stripped, encrypted, containerised, remote or otherwise unlisted AI/agent workloads.
+Lumi Eggcracker 0.3.0 autonomously acts only on a complete match from its installed deterministic AI-runtime catalogue. Its content path currently supports only a regular GGUF v2/v3 artifact combined with a qualified llama.cpp/GGML ELF runtime exposing two valid symbol-table markers, or the release-pinned llama.cpp launcher ELF build ID. It does not recognise arbitrary, custom, fully stripped, encrypted, containerised, remote or otherwise unlisted AI/agent workloads.
 
 The observer uses bounded `/proc` polling. It has no kernel execution hook, eBPF programme or guarantee that a process which forks, daemonises or exits before discovery can be reconstructed as one complete historical tree. A successful receipt proves the exact captured quarantine cgroup is empty.
 

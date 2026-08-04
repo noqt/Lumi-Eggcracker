@@ -10,7 +10,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 
 - continuously scans host processes and performs a startup scan before accepting control commands;
 - detects published local-runtime profiles including llama.cpp, Ollama, vLLM, Text Generation Inference, LocalAI, llamafile and selected agent CLIs;
-- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a structurally valid GGUF v2/v3 artifact and two llama.cpp/GGML ELF runtime markers are both required;
+- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a structurally valid GGUF v2/v3 artifact and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
 - lets the configured operator approve one exact executable, UID and invocation before it is run;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
