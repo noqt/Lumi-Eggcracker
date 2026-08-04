@@ -59,7 +59,9 @@ def request(action: str, **args: Any) -> dict[str, Any]:
     if not 1 <= len(payload) <= MAX_FRAME:
         raise JsonInputError("supervisor request is too large")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(3.0)
+        # A transient systemd unit may take several seconds to schedule under
+        # the fork-race qualification load while its launch gate stays closed.
+        connection.settimeout(10.0)
         connection.connect(socket_path)
         connection.sendall(struct.pack("!I", len(payload)) + payload)
         response = _receive(connection)
