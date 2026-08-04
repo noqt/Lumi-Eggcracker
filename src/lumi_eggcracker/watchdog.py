@@ -30,7 +30,7 @@ STARTUP_GRACE_SECONDS = 10.0
 # fail-closed availability bound, not containment latency: normal enforcement
 # remains immediate and the watchdog still kills owned workloads if recovery
 # does not restore a heartbeat within this window.
-HEARTBEAT_TIMEOUT_SECONDS = 10.0
+HEARTBEAT_TIMEOUT_SECONDS = 30.0
 INTEGRITY_INTERVAL_SECONDS = 5.0
 
 
