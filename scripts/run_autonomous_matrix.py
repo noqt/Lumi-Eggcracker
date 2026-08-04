@@ -88,7 +88,7 @@ def main() -> int:
     starts: list[float] = []
     empties: list[float] = []
     with tempfile.TemporaryDirectory(prefix="lumi-eggcracker-autonomous-", dir="/tmp") as raw:
-        root = Path(raw); runner = fixture_runner(root); model = root / "fixture.gguf"; model.write_bytes(b"fixture")
+        root = Path(raw); os.chmod(root, 0o755); runner = fixture_runner(root); model = root / "fixture.gguf"; model.write_bytes(b"fixture")
         fixture = ROOT / "tests" / "fixtures" / "discovery_fork_race.py"
         try:
             doctor = call(operator, ["doctor"])
