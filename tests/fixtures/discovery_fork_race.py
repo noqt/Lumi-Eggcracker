@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 import time
+from pathlib import Path
 
 children: list[int] = []
 
@@ -25,5 +27,7 @@ for _ in range(32):
         while True:
             time.sleep(1)
     children.append(child)
-while True:
-    time.sleep(1)
+model = Path(sys.argv[-1]).with_suffix(".gguf")
+with model.open("rb"):
+    while True:
+        time.sleep(1)

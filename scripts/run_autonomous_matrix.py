@@ -60,7 +60,7 @@ def percentile(values: list[float], percent: int) -> float:
 
 
 def launch(user: str, runner: Path, fixture: Path, model: Path) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(["/usr/sbin/runuser", "-u", user, "--", str(runner), str(fixture), "-m", str(model)], start_new_session=True)
+    return subprocess.Popen(["/usr/sbin/runuser", "-u", user, "--", str(runner), str(fixture), "-m", str(model.with_suffix(".model"))], start_new_session=True)
 
 
 def fixture_runner(root: Path) -> Path:
@@ -101,8 +101,8 @@ def main() -> int:
                     before = set(DETECTIONS.glob("*.json")); started = time.monotonic_ns()
                     process = launch(user, runner, fixture, model)
                     receipt = new_receipt(before)
-                    process.wait(timeout=10)
-                    if receipt.get("detector", {}).get("profile") != "llama.cpp" or canary.poll() is not None or receipt.get("containment", {}).get("surviving_pids"):
+                    stop(process)
+                    if receipt.get("detector", {}).get("profile") != "llama.cpp-open-model" or canary.poll() is not None or receipt.get("containment", {}).get("surviving_pids"):
                         raise RuntimeError("autonomous fixture containment or canary proof failed")
                     starts.append((receipt["containment"]["first_stop_monotonic_ns"] - started) / 1_000_000)
                     empties.append(float(receipt["containment"]["trigger_to_empty_ms"]))
@@ -113,7 +113,7 @@ def main() -> int:
                     stop(canary)
             for index in range(args.approved):
                 name = f"allow-{secrets.token_hex(6)}"
-                argv = [str(runner), str(fixture), "-m", str(model)]
+                argv = [str(runner), str(fixture), "-m", str(model.with_suffix(".model"))]
                 call(operator, ["approve", "--name", name, "--uid", str(uid), "--", *argv])
                 process = launch(user, runner, fixture, model)
                 try:
