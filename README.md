@@ -81,4 +81,17 @@ To remove Eggcracker completely:
 sudo python3 scripts/uninstall.py
 ```
 
+## Local validation
+
+Run a complete local qualification after installation. It uses the pinned external AI assets, takes several minutes, and writes a self-contained evidence directory; it does not publish anything.
+
+```sh
+sudo python3 scripts/self_validate.py \
+  --operator "$USER" \
+  --assets-manifest /opt/lumi-eggcracker-ai-smoke/ai-smoke-assets.json \
+  --evidence-dir /opt/lumi-eggcracker-evidence
+```
+
+It runs the real-AI approval smoke, renamed content matrix, benign model-handling matrix, descendants/startup/restart checks, autonomous regression and selected-workload security regression.
+
 See [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md), and [QUALIFICATION.md](QUALIFICATION.md) before using this engineering preview.
