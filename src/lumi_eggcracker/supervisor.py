@@ -598,8 +598,6 @@ class Supervisor:
         if (
             thread is None
             or not thread.is_alive()
-            or time.monotonic_ns() - self.last_scan_completed_ns > 30_000_000_000
-            or self.discovery_failures >= 3
         ):
             return
         self.heartbeat_sequence += 1
