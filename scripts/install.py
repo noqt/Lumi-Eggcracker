@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 LIB = Path("/usr/local/lib/lumi-eggcracker")
 BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
@@ -117,7 +117,7 @@ def catalogue_from_artifact(artifact: Path) -> bytes:
         parsed = json.loads(value.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("detector catalogue is invalid") from error
-    if not isinstance(parsed, dict) or parsed.get("schema_version") != "lumi-eggcracker.detectors.v1":
+    if not isinstance(parsed, dict) or parsed.get("schema_version") != "lumi-eggcracker.detectors.v2":
         raise RuntimeError("detector catalogue schema is invalid")
     return value
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- Add bounded name-independent `content.gguf-llama` recognition from validated GGUF content and two ELF runtime markers.
+- Keep exact approvals and immediate pidfd-stop/cgroup-kill enforcement for content matches.
+- Add redacted content-path detection receipts and renamed-runner content smoke tooling.
+
 ## 0.2.0
 
 - Add deterministic autonomous discovery of unapproved supported AI runtimes.

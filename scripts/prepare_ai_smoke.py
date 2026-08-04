@@ -130,7 +130,7 @@ def download_model(destination: Path) -> None:
     temporary.unlink(missing_ok=True)
     value = hashlib.sha256()
     size = 0
-    request = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Lumi-Eggcracker-0.2.0"})
+    request = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Lumi-Eggcracker-0.3.0"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response, temporary.open("xb") as handle:
             if not response.url.startswith("https://"):

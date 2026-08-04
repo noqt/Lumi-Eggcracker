@@ -1,4 +1,4 @@
-"""Strict deterministic AI-runtime detector catalogue."""
+"""Strict deterministic fast-name and content-evidence detector catalogue."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ from typing import Any, Protocol
 
 from .jsonio import JsonInputError, canonical_bytes
 
-SCHEMA = "lumi-eggcracker.detectors.v1"
+SCHEMA = "lumi-eggcracker.detectors.v2"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 KINDS = {"exe_basename", "argv_token", "argv_model_suffix", "open_model_suffix", "map_basename"}
+GROUPS = {"MODEL_CONTENT", "INFERENCE_RUNTIME"}
 
 
 class Snapshot(Protocol):
@@ -26,13 +27,22 @@ class Snapshot(Protocol):
 @dataclass(frozen=True)
 class Profile:
     identifier: str
-    predicates: tuple[dict[str, Any], ...]
+    path: str
+    predicates: tuple[dict[str, Any], ...] = ()
+    groups: tuple[dict[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
 class Catalogue:
     digest: str
     profiles: tuple[Profile, ...]
+
+
+@dataclass(frozen=True)
+class DetectionMatch:
+    profile: str
+    path: str
+    evidence: tuple[str, ...]
 
 
 def bundled_bytes() -> bytes:
@@ -48,6 +58,20 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _identifier(value: object) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9.-]{0,63}", value):
+        raise JsonInputError("detector profile identity is invalid")
+    return value
+
+
+def _values(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) and 1 <= len(item) <= 128 for item in value):
+        raise JsonInputError("detector evidence values are invalid")
+    if len(set(value)) != len(value):
+        raise JsonInputError("detector evidence values are duplicated")
+    return tuple(value)
+
+
 def load_catalogue(raw: bytes, *, expected_digest: str | None = None) -> Catalogue:
     digest = hashlib.sha256(raw).hexdigest()
     if expected_digest is not None and (not HEX.fullmatch(expected_digest) or digest != expected_digest):
@@ -58,30 +82,46 @@ def load_catalogue(raw: bytes, *, expected_digest: str | None = None) -> Catalog
         raise JsonInputError(f"detector catalogue is invalid: {error}") from error
     if not isinstance(value, dict) or set(value) != {"profiles", "schema_version"} or value.get("schema_version") != SCHEMA:
         raise JsonInputError("detector catalogue schema is invalid")
-    profiles = value["profiles"]
-    if not isinstance(profiles, list) or not profiles:
+    raw_profiles = value["profiles"]
+    if not isinstance(raw_profiles, list) or not raw_profiles:
         raise JsonInputError("detector catalogue profiles are invalid")
-    result: list[Profile] = []
+    profiles: list[Profile] = []
     seen: set[str] = set()
-    for item in profiles:
-        if not isinstance(item, dict) or set(item) != {"all", "id"}:
+    for item in raw_profiles:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             raise JsonInputError("detector profile schema is invalid")
-        identifier, predicates = item["id"], item["all"]
-        if not isinstance(identifier, str) or not re.fullmatch(r"[a-z][a-z0-9.-]{0,63}", identifier) or identifier in seen:
-            raise JsonInputError("detector profile identity is invalid")
-        if not isinstance(predicates, list) or not predicates:
-            raise JsonInputError("detector profile predicates are invalid")
-        clean: list[dict[str, Any]] = []
-        for predicate in predicates:
-            if not isinstance(predicate, dict) or set(predicate) != {"kind", "values"}:
-                raise JsonInputError("detector predicate schema is invalid")
-            kind, values = predicate["kind"], predicate["values"]
-            if kind not in KINDS or not isinstance(values, list) or not values or not all(isinstance(entry, str) and 1 <= len(entry) <= 128 for entry in values):
-                raise JsonInputError("detector predicate is invalid")
-            clean.append({"kind": kind, "values": tuple(values)})
+        identifier = _identifier(item.get("id"))
+        if identifier in seen:
+            raise JsonInputError("detector profile identity is duplicated")
+        path = item["path"]
+        if path == "FAST_NAME" and set(item) == {"all", "id", "path"}:
+            predicates: list[dict[str, Any]] = []
+            if not isinstance(item["all"], list) or not item["all"]:
+                raise JsonInputError("detector profile predicates are invalid")
+            for predicate in item["all"]:
+                if not isinstance(predicate, dict) or set(predicate) != {"kind", "values"} or predicate["kind"] not in KINDS:
+                    raise JsonInputError("detector predicate schema is invalid")
+                predicates.append({"kind": predicate["kind"], "values": _values(predicate["values"])})
+            profile = Profile(identifier, path, tuple(predicates))
+        elif path == "CONTENT" and set(item) == {"id", "path", "require_all_groups"}:
+            raw_groups = item["require_all_groups"]
+            if not isinstance(raw_groups, list) or len(raw_groups) < 2:
+                raise JsonInputError("content profile requires independent evidence groups")
+            groups: list[dict[str, tuple[str, ...]]] = []
+            present: set[str] = set()
+            for group in raw_groups:
+                if not isinstance(group, dict) or set(group) != {"any", "group"} or group["group"] not in GROUPS or group["group"] in present:
+                    raise JsonInputError("content evidence group is invalid")
+                present.add(group["group"])
+                groups.append({"group": group["group"], "any": _values(group["any"])})
+            if present != GROUPS:
+                raise JsonInputError("content profile must require model and runtime evidence")
+            profile = Profile(identifier, path, groups=tuple(groups))
+        else:
+            raise JsonInputError("detector profile schema is invalid")
         seen.add(identifier)
-        result.append(Profile(identifier, tuple(clean)))
-    return Catalogue(digest, tuple(result))
+        profiles.append(profile)
+    return Catalogue(digest, tuple(profiles))
 
 
 def load_bundled(*, expected_digest: str | None = None) -> Catalogue:
@@ -104,19 +144,37 @@ def _matches(snapshot: Snapshot, predicate: dict[str, Any]) -> bool:
     raise JsonInputError("unknown detector predicate")
 
 
-def match(catalogue: Catalogue, snapshot: Snapshot) -> tuple[str, tuple[str, ...]] | None:
-    """Return one complete profile match, never a partial or scored decision."""
+def match(catalogue: Catalogue, snapshot: Snapshot, *, evidence: dict[str, set[str]] | None = None) -> DetectionMatch | None:
+    """Return one complete profile match, never partial, fuzzy or scored evidence."""
+    supplied = evidence or {}
     for profile in catalogue.profiles:
-        matched = tuple(predicate["kind"] for predicate in profile.predicates if _matches(snapshot, predicate))
-        if len(matched) == len(profile.predicates):
-            return profile.identifier, matched
+        if profile.path == "FAST_NAME":
+            matched = tuple(predicate["kind"] for predicate in profile.predicates if _matches(snapshot, predicate))
+            if len(matched) == len(profile.predicates):
+                return DetectionMatch(profile.identifier, profile.path, matched)
+        else:
+            matched_ids: list[str] = []
+            for group in profile.groups:
+                values = tuple(sorted(set(group["any"]).intersection(supplied.get(group["group"], set()))))
+                if not values:
+                    break
+                matched_ids.extend(values)
+            else:
+                return DetectionMatch(profile.identifier, profile.path, tuple(matched_ids))
     return None
 
 
 def public_catalogue(catalogue: Catalogue) -> dict[str, Any]:
-    return {"digest": catalogue.digest, "profiles": [{"id": profile.identifier, "predicates": [item["kind"] for item in profile.predicates]} for profile in catalogue.profiles], "schema_version": SCHEMA}
+    profiles: list[dict[str, object]] = []
+    for profile in catalogue.profiles:
+        value: dict[str, object] = {"id": profile.identifier, "path": profile.path}
+        if profile.path == "FAST_NAME":
+            value["predicates"] = [item["kind"] for item in profile.predicates]
+        else:
+            value["evidence_groups"] = [{"group": item["group"], "any": list(item["any"])} for item in profile.groups]
+        profiles.append(value)
+    return {"digest": catalogue.digest, "profiles": profiles, "schema_version": SCHEMA}
 
 
 def canonical_catalogue_bytes(catalogue: Catalogue) -> bytes:
-    """Small deterministic public representation used only by direct tests."""
     return canonical_bytes(public_catalogue(catalogue))

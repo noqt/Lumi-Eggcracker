@@ -33,6 +33,8 @@ class ProcessSnapshot:
     cgroups: tuple[str, ...]
     fd_paths: tuple[str, ...]
     map_basenames: tuple[str, ...]
+    fd_entries: tuple[tuple[int, str], ...] = ()
+    map_paths: tuple[str, ...] = ()
 
 
 def _read(path: Path, limit: int = MAX_READ) -> bytes:
@@ -101,6 +103,20 @@ def _links(directory: Path, *, limit: int) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _fd_entries(directory: Path, *, limit: int) -> tuple[tuple[int, str], ...]:
+    values: list[tuple[int, str]] = []
+    for item in sorted(directory.iterdir(), key=lambda value: value.name)[:limit]:
+        if not item.name.isdigit():
+            continue
+        try:
+            target = os.readlink(item)
+        except OSError:
+            continue
+        if len(target) <= 4096:
+            values.append((int(item.name), target.removesuffix(" (deleted)")))
+    return tuple(values)
+
+
 def _maps(path: Path) -> tuple[str, ...]:
     try:
         raw = _read(path).decode("utf-8", errors="replace")
@@ -114,6 +130,19 @@ def _maps(path: Path) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _map_paths(path: Path) -> tuple[str, ...]:
+    try:
+        raw = _read(path).decode("utf-8", errors="replace")
+    except OSError:
+        return ()
+    values: list[str] = []
+    for line in raw.splitlines()[:MAX_MAPS]:
+        parts = line.split(maxsplit=5)
+        if len(parts) == 6 and parts[5].startswith("/"):
+            values.append(parts[5].removesuffix(" (deleted)"))
+    return tuple(values)
+
+
 def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | None:
     current = identity(value.pid, proc=proc)
     if current != value:
@@ -124,12 +153,14 @@ def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | 
         command = tuple(item for item in _read(root / "cmdline").decode("utf-8").split("\0") if item)
         cgroups = tuple(line for line in _read(root / "cgroup", 8192).decode("utf-8").splitlines() if line)
         uid = _uid(_read(root / "status", 8192).decode("utf-8"))
-        fd_paths = _links(root / "fd", limit=MAX_FDS)
+        fd_entries = _fd_entries(root / "fd", limit=MAX_FDS)
+        fd_paths = tuple(item[1] for item in fd_entries)
     except (OSError, UnicodeDecodeError, JsonInputError):
         return None
     if not command or not exe or len(exe) > 4096:
         return None
-    return ProcessSnapshot(value, uid, exe, Path(exe.removesuffix(" (deleted)")).name, command, cgroups, fd_paths, _maps(root / "maps"))
+    maps = _map_paths(root / "maps")
+    return ProcessSnapshot(value, uid, exe, Path(exe.removesuffix(" (deleted)")).name, command, cgroups, fd_paths, tuple(Path(item).name for item in maps), fd_entries, maps)
 
 
 def scan(*, proc: Path = PROC, exclude: Callable[[ProcessSnapshot], bool] | None = None) -> list[ProcessSnapshot]:

@@ -2,7 +2,7 @@
 
 Lumi Eggcracker is a local Linux kill switch for unapproved, supported AI and agent runtimes.
 
-> Eggcracker monitors a Linux host for processes matching its published AI-runtime fingerprints. When a matching process has no exact operator approval, it automatically stops the process, captures its discovered process tree in a root-owned cgroup, and kills that cgroup.
+> Eggcracker monitors a Linux host for supported local AI inference workloads. It recognises installed fast-name profiles and, for qualified GGUF/llama.cpp combinations, validated model content plus inference-runtime binary evidence. When a complete match has no exact operator approval, it automatically stops the process, captures its discovered process tree in a root-owned cgroup, and kills that cgroup.
 
 There is no alert-only phase for an unapproved catalogue match. Containment begins with a pidfd stop signal; the explanation and receipt are written only after cgroup containment completes.
 
@@ -10,6 +10,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 
 - continuously scans host processes and performs a startup scan before accepting control commands;
 - detects published local-runtime profiles including llama.cpp, Ollama, vLLM, Text Generation Inference, LocalAI, llamafile and selected agent CLIs;
+- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a structurally valid GGUF v2/v3 artifact and two llama.cpp/GGML ELF runtime markers are both required;
 - lets the configured operator approve one exact executable, UID and invocation before it is run;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
@@ -17,7 +18,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 
 ## What it does not do
 
-Eggcracker does not identify every possible AI implementation. It does not claim to detect custom, obfuscated, containerised or remote AI workloads, general malware or intrusions. It does not use a behavioural model, isolate host networking, credentials or filesystems, or replace EDR.
+Eggcracker does not identify every possible AI implementation. Content recognition currently excludes stripped or bespoke runtimes without the qualified markers, custom/encrypted model formats, containerised and remote API-only workloads. It does not claim general malware or intrusion detection. It does not use a behavioural model, isolate host networking, credentials or filesystems, or replace EDR.
 
 A successful receipt proves the captured quarantine cgroup is empty. It does not prove that a process which escaped before detection never existed.
 
@@ -30,16 +31,16 @@ A successful receipt proves the captured quarantine cgroup is empty. It does not
 
 ## Quick start
 
-Download and extract `lumi-eggcracker-0.2.0-linux.zip`, then run as root:
+Download and extract `lumi-eggcracker-0.3.0-linux.zip`, then run as root:
 
 ```sh
-cd lumi-eggcracker-0.2.0
-sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.2.0.pyz
+cd lumi-eggcracker-0.3.0
+sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.3.0.pyz
 eggcracker doctor
 eggcracker approvals
 ```
 
-An unapproved supported runtime is killed automatically when it starts. To allow a known invocation, approve it before launch. The approval stores hashes, not its raw arguments:
+An unapproved complete fast-name or content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, approve it before launch. The approval stores hashes, not its raw arguments:
 
 ```sh
 eggcracker approve --name local-qwen --uid "$(id -u)" -- \
@@ -72,7 +73,7 @@ sudo python3 scripts/smoke_autonomous_ai.py \
   --user "$USER" --repetitions 5 --output ./autonomous-ai-smoke.json
 ```
 
-The smoke launches the model directly, outside `eggcracker start`, verifies that Eggcracker kills the unapproved invocation, then proves that the same exact invocation survives only when approved.
+The smoke launches the model directly, outside `eggcracker start`, verifies that Eggcracker kills the unapproved invocation, then proves that the same exact invocation survives only when approved. The companion `smoke_content_ai.py` uses a renamed runner, unfamiliar wrapper and extensionless GGUF path to exercise the content profile.
 
 To remove Eggcracker completely:
 

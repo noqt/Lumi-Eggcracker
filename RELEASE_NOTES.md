@@ -1,5 +1,5 @@
-# Lumi Eggcracker 0.2.0
+# Lumi Eggcracker 0.3.0
 
-0.2.0 adds autonomous catalogue-based discovery and termination of unapproved local AI-runtime processes. It uses deterministic fingerprints, exact pre-launch approvals, pidfd stop, cgroup capture and direct `cgroup.kill`.
+0.3.0 adds the qualified `content.gguf-llama` profile. It recognises a locally opened, structurally valid GGUF v2/v3 model alongside two llama.cpp/GGML ELF symbol markers. Neither the executable name nor model filename is required for this content path. Complete unapproved matches use the existing exact-approval, pidfd-stop, cgroup-capture and direct `cgroup.kill` sequence.
 
 The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.

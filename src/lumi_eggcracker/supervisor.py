@@ -26,6 +26,8 @@ from .approvals import approved, revoke
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
 from .approvals import public as public_approval
+from .artifacts import ArtifactEvidence
+from .artifacts import from_snapshot as artifacts_from_snapshot
 from .containment import (
     capture_identity,
     events_from_fd,
@@ -33,9 +35,12 @@ from .containment import (
     validate_identity,
     verify_empty,
 )
-from .detectors import Catalogue, load_catalogue, match, public_catalogue
+from .detectors import Catalogue, DetectionMatch, load_catalogue, match, public_catalogue
 from .discovery import ProcessIdentity, ProcessSnapshot, executable_digest, scan
+from .elfmarkers import RuntimeEvidence
+from .elfmarkers import from_snapshot as runtime_from_snapshot
 from .jsonio import JsonInputError, load_regular_json
+from .observation import ObservationStore
 from .records import (
     ACTIVE_STATES,
     RUN_ID,
@@ -138,6 +143,7 @@ class Supervisor:
         self.discovery_active: set[ProcessIdentity] = set()
         self.discovery_thread: threading.Thread | None = None
         self.digest_cache: dict[tuple[int, int, int, int], str] = {}
+        self.observations = ObservationStore()
 
     @property
     def operator_uid(self) -> int:
@@ -277,8 +283,13 @@ class Supervisor:
         for path in records[DETECTION_LIMIT:]:
             path.unlink(missing_ok=True)
 
-    def _detection_receipt(self, *, event_id: str, snapshot: ProcessSnapshot, profile: str, predicates: tuple[str, ...], executable_sha256: str, result: AdoptionResult | None, error: str | None) -> dict[str, Any]:
-        value: dict[str, Any] = {"catalogue_sha256": self.catalogue.digest, "detector": {"matched_predicates": list(predicates), "profile": profile}, "event_id": event_id, "executable": {"basename": snapshot.exe_basename, "sha256": executable_sha256}, "observed": {"argv_count": len(snapshot.argv), "argv_sha256": hashlib.sha256("\0".join(snapshot.argv).encode("utf-8")).hexdigest(), "pid": snapshot.identity.pid, "start_time": snapshot.identity.start_time, "uid": snapshot.uid}, "receipt_written_utc": None, "schema_version": "lumi-eggcracker.detection-receipt.v1", "source_commit": self.policy["source_commit"], "trigger": {"kind": "UNAPPROVED_AI_MATCH"}, "version": __version__}
+    def _detection_receipt(self, *, event_id: str, snapshot: ProcessSnapshot, detected: DetectionMatch, content: tuple[ArtifactEvidence, ...], runtimes: tuple[RuntimeEvidence, ...], first_seen_ns: int, executable_sha256: str, result: AdoptionResult | None, error: str | None) -> dict[str, Any]:
+        detector: dict[str, Any] = {"catalogue_schema": "lumi-eggcracker.detectors.v2", "detection_path": detected.path, "matched_evidence": list(detected.evidence), "matched_predicates": list(detected.evidence), "profile": detected.profile}
+        if detected.path == "CONTENT":
+            detector["model"] = content[0].public() if content else {}
+            detector["runtime"] = runtimes[0].public() if runtimes else {}
+            detector["observation"] = {"first_seen_monotonic_ns": first_seen_ns, "qualified_monotonic_ns": time.monotonic_ns()}
+        value: dict[str, Any] = {"catalogue_sha256": self.catalogue.digest, "detector": detector, "event_id": event_id, "executable": {"basename": snapshot.exe_basename, "sha256": executable_sha256}, "observed": {"argv_count": len(snapshot.argv), "argv_sha256": hashlib.sha256("\0".join(snapshot.argv).encode("utf-8")).hexdigest(), "pid": snapshot.identity.pid, "start_time": snapshot.identity.start_time, "uid": snapshot.uid}, "receipt_written_utc": None, "schema_version": "lumi-eggcracker.detection-receipt.v2", "source_commit": self.policy["source_commit"], "trigger": {"kind": "UNAPPROVED_AI_MATCH"}, "version": __version__}
         if result is None:
             value["result"] = "CONTAINMENT_FAILED"
             value["error"] = (error or "containment failed")[:160]
@@ -286,18 +297,18 @@ class Supervisor:
         value.update({"result": "TERMINATED", "capture": {"captured_processes": len(result.captured), "fixed_point_scans": result.fixed_point_scans, "quarantine_cgroup": str(result.identity.path), "quarantine_device": result.identity.device, "quarantine_inode": result.identity.inode}, "containment": {"empty_verified_monotonic_ns": result.empty_ns, "first_stop_monotonic_ns": result.first_stop_ns, "kill_write_completed_monotonic_ns": result.kill_complete_ns, "kill_write_started_monotonic_ns": result.kill_started_ns, "primitive": "pidfd-stop+cgroup.kill", "root_populated": result.proof.root_populated, "surviving_pids": result.proof.surviving_pids, "trigger_to_empty_ms": (result.empty_ns - result.first_stop_ns) / 1_000_000}, "trigger": {"kind": "UNAPPROVED_AI_MATCH", "observed_monotonic_ns": result.first_stop_ns}})
         return value
 
-    def _enforce_discovery(self, snapshot: ProcessSnapshot, profile: str, predicates: tuple[str, ...], executable_sha256: str, event_id: str) -> None:
+    def _enforce_discovery(self, snapshot: ProcessSnapshot, detected: DetectionMatch, content: tuple[ArtifactEvidence, ...], runtimes: tuple[RuntimeEvidence, ...], first_seen_ns: int, executable_sha256: str, event_id: str) -> None:
         try:
             if self.quarantine_root is None:
                 raise JsonInputError("quarantine root is unavailable")
             self.operations.append("pidfd.stop")
             result = contain(snapshot.identity, self.quarantine_root, event_id)
             self.operations.append("cgroup.kill")
-            receipt = self._detection_receipt(event_id=event_id, snapshot=snapshot, profile=profile, predicates=predicates, executable_sha256=executable_sha256, result=result, error=None)
+            receipt = self._detection_receipt(event_id=event_id, snapshot=snapshot, detected=detected, content=content, runtimes=runtimes, first_seen_ns=first_seen_ns, executable_sha256=executable_sha256, result=result, error=None)
             receipt["receipt_written_utc"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
             self._store_detection(receipt)
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
-            receipt = self._detection_receipt(event_id=event_id, snapshot=snapshot, profile=profile, predicates=predicates, executable_sha256=executable_sha256, result=None, error=str(error))
+            receipt = self._detection_receipt(event_id=event_id, snapshot=snapshot, detected=detected, content=content, runtimes=runtimes, first_seen_ns=first_seen_ns, executable_sha256=executable_sha256, result=None, error=str(error))
             receipt["receipt_written_utc"] = dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
             try:
                 self._store_detection(receipt)
@@ -313,8 +324,20 @@ class Supervisor:
         except JsonInputError:
             approvals = []  # A corrupt approval never authorizes a matching workload.
         for snapshot in scan(exclude=lambda item: item.identity.pid == os.getpid() or self._managed(item)):
-            result = match(self.catalogue, snapshot)
-            if result is None:
+            detected = match(self.catalogue, snapshot)
+            content: tuple[ArtifactEvidence, ...] = ()
+            runtimes: tuple[RuntimeEvidence, ...] = ()
+            first_seen_ns = time.monotonic_ns()
+            if detected is None:
+                content = artifacts_from_snapshot(snapshot)
+                runtimes = runtime_from_snapshot(snapshot)
+                supplied = {"MODEL_CONTENT": {item.evidence_id for item in content}, "INFERENCE_RUNTIME": {item.evidence_id for item in runtimes}}
+                observation = self.observations.observe(snapshot.identity, set().union(*supplied.values()))
+                first_seen_ns = observation.first_seen_ns
+                # Both groups must be valid in this snapshot. Observations only
+                # provide bounded timing, never stale evidence joining.
+                detected = match(self.catalogue, snapshot, evidence=supplied)
+            if detected is None:
                 continue
             try:
                 executable_sha256 = self._cached_executable_digest(snapshot)
@@ -326,12 +349,11 @@ class Supervisor:
                 if snapshot.identity in self.discovery_active:
                     continue
                 self.discovery_active.add(snapshot.identity)
-            profile, predicates = result
             event_id = os.urandom(12).hex()
             if synchronous:
-                self._enforce_discovery(snapshot, profile, predicates, executable_sha256, event_id)
+                self._enforce_discovery(snapshot, detected, content, runtimes, first_seen_ns, executable_sha256, event_id)
             else:
-                threading.Thread(target=self._enforce_discovery, args=(snapshot, profile, predicates, executable_sha256, event_id), daemon=True).start()
+                threading.Thread(target=self._enforce_discovery, args=(snapshot, detected, content, runtimes, first_seen_ns, executable_sha256, event_id), daemon=True).start()
 
     def _discovery_loop(self) -> None:
         while not self.stop_event.is_set():
