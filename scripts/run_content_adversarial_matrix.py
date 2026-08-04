@@ -75,7 +75,7 @@ def main() -> int:
         runner, model, _manifest = assets(args.assets_manifest)
         with tempfile.TemporaryDirectory(prefix="lumi-content-adversarial-", dir="/tmp") as raw:
             root = Path(raw)
-            os.chmod(root, 0o755)
+            os.chmod(root, 0o777)
             disguised_runner = root / secrets.token_hex(12)
             disguised_model = root / secrets.token_hex(12)
             pid_file = root / "children"
