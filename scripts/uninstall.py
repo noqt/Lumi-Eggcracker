@@ -18,6 +18,7 @@ UNIT = Path("/etc/systemd/system/lumi-eggcracker.service")
 STATE = Path("/var/lib/lumi-eggcracker")
 RUNTIME = Path("/run/lumi-eggcracker")
 PREFIX = "lumi-eggcracker-workload-"
+SUPERVISOR = "lumi-eggcracker.service"
 
 
 def digest(path: Path) -> str:
@@ -49,6 +50,25 @@ def owned_cgroups_empty() -> bool:
     return True
 
 
+def quarantine_empty() -> bool:
+    root = Path("/sys/fs/cgroup/system.slice/lumi-eggcracker.service/quarantine")
+    if not root.exists():
+        return True
+    if root.is_symlink() or not root.is_dir():
+        return False
+    for path in root.iterdir():
+        if path.is_symlink() or not path.is_dir() or len(path.name) != 24 or any(item not in "0123456789abcdef" for item in path.name):
+            return False
+        events = path / "cgroup.events"
+        try:
+            populated = dict(line.split(" ", 1) for line in events.read_text(encoding="ascii").splitlines()).get("populated")
+        except OSError:
+            return False
+        if populated != "0":
+            return False
+    return True
+
+
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("uninstaller must run as root")
@@ -56,16 +76,16 @@ def main() -> int:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise SystemExit("installed manifest is missing")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "lumi-eggcracker.install.v2":
+    if manifest.get("schema_version") != "lumi-eggcracker.install.v3":
         raise SystemExit("installed manifest schema is invalid")
     for name, expected in manifest.get("files", {}).items():
         path = Path(name)
         if path.is_symlink() or not path.is_file() or digest(path) != expected:
             raise SystemExit(f"refusing uninstall because installed file drifted: {path}")
-    if not owned_cgroups_empty():
+    run(["/usr/bin/systemctl", "disable", "--now", SUPERVISOR])
+    if not owned_cgroups_empty() or not quarantine_empty():
         raise SystemExit("refusing uninstall with populated or uncertain Eggcracker cgroups")
-    run(["/usr/bin/systemctl", "disable", "--now", "lumi-eggcracker.service"])
-    run(["/usr/bin/systemctl", "reset-failed", "lumi-eggcracker.service"])
+    run(["/usr/bin/systemctl", "reset-failed", SUPERVISOR])
     for path in (UNIT, BIN, LIB, ETC, STATE, RUNTIME):
         if path.exists() and not path.is_symlink():
             shutil.rmtree(path) if path.is_dir() else path.unlink()

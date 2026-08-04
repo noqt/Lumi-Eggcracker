@@ -10,13 +10,15 @@ import os
 import pwd
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.1.2"
+VERSION = "0.2.0"
 LIB = Path("/usr/local/lib/lumi-eggcracker")
 BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
@@ -75,21 +77,49 @@ def workload_account() -> tuple[pwd.struct_passwd, bool]:
 
 
 def service() -> bytes:
-    return b"""[Unit]\nDescription=Lumi Eggcracker protected workload supervisor\nAfter=multi-user.target\nStartLimitIntervalSec=60\nStartLimitBurst=60\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _supervisor --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=multi-user.target\n"""
+    return b"""[Unit]\nDescription=Lumi Eggcracker autonomous AI runtime supervisor\nAfter=multi-user.target\nStartLimitIntervalSec=60\nStartLimitBurst=60\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _supervisor --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\nDelegate=yes\n\n[Install]\nWantedBy=multi-user.target\n"""
 
 
-def cgroup_kill_available() -> bool:
+def autonomous_primitives_available() -> bool:
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        return False
     unit = f"lumi-eggcracker-preflight-{secrets.token_hex(8)}.service"
-    started = run(["/usr/bin/systemd-run", f"--unit={unit}", "--collect", "--property=Type=exec", "--", "/bin/sleep", "5"])
+    started = run(["/usr/bin/systemd-run", f"--unit={unit}", "--collect", "--property=Type=exec", "--property=Delegate=yes", "--", "/bin/sleep", "5"])
     if started.returncode:
         return False
     try:
         shown = run(["/usr/bin/systemctl", "show", unit, "--property=ControlGroup"])
         values = dict(line.split("=", 1) for line in shown.stdout.splitlines() if "=" in line)
         cgroup = values.get("ControlGroup", "")
-        return bool(cgroup.startswith("/system.slice/")) and (Path("/sys/fs/cgroup").joinpath(*cgroup.lstrip("/").split("/")) / "cgroup.kill").is_file()
+        root = Path("/sys/fs/cgroup").joinpath(*cgroup.lstrip("/").split("/"))
+        child = root / f"lumi-eggcracker-probe-{secrets.token_hex(4)}"
+        if not cgroup.startswith("/system.slice/") or not (root / "cgroup.kill").is_file():
+            return False
+        try:
+            child.mkdir(mode=0o700)
+            return (child / "cgroup.kill").is_file() and (child / "cgroup.procs").is_file()
+        finally:
+            if child.exists() and not child.is_symlink():
+                child.rmdir()
     finally:
         run(["/usr/bin/systemctl", "stop", unit])
+
+
+def catalogue_from_artifact(artifact: Path) -> bytes:
+    try:
+        with zipfile.ZipFile(artifact) as bundle:
+            value = bundle.read("lumi_eggcracker/detector_catalogue.json")
+    except (KeyError, OSError, zipfile.BadZipFile) as error:
+        raise RuntimeError("release artifact lacks detector catalogue") from error
+    if not 1 <= len(value) <= 32 * 1024:
+        raise RuntimeError("detector catalogue size is invalid")
+    try:
+        parsed = json.loads(value.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("detector catalogue is invalid") from error
+    if not isinstance(parsed, dict) or parsed.get("schema_version") != "lumi-eggcracker.detectors.v1":
+        raise RuntimeError("detector catalogue schema is invalid")
+    return value
 
 
 def cleanup(created: list[Path], created_user: bool, created_group: bool) -> None:
@@ -122,8 +152,8 @@ def main() -> int:
     if any(path.exists() or path.is_symlink() for path in TARGETS):
         raise SystemExit("refusing pre-existing Eggcracker installation target")
     controllers = Path("/sys/fs/cgroup/cgroup.controllers")
-    if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split() or not cgroup_kill_available():
-        raise SystemExit("unified cgroup v2 with cgroup.kill and PID controller is required")
+    if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split() or not autonomous_primitives_available():
+        raise SystemExit("unified cgroup v2, delegated child cgroups, cgroup.kill and pidfds are required")
     account, created_user = workload_account()
     group = grp.getgrgid(account.pw_gid)
     created_group = created_user and group.gr_name == WORKLOAD_NAME
@@ -139,10 +169,13 @@ def main() -> int:
         shutil.copyfile(args.artifact, LIB / "lumi-eggcracker.pyz")
         os.chmod(LIB / "lumi-eggcracker.pyz", 0o755)
         write_new(BIN, b"#!/bin/sh\nexec /usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz \"$@\"\n", 0o755); created.append(BIN)
-        policy = {"operator_gid": operator.pw_gid, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.policy.v2", "socket_path": str(SOCKET), "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-eggcracker-workload-", "version": release["version"], "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}
+        catalogue = catalogue_from_artifact(args.artifact)
+        catalogue_path = ETC / "detector_catalogue.json"
+        write_new(catalogue_path, catalogue, 0o644)
+        policy = {"catalogue_path": str(catalogue_path), "catalogue_sha256": hashlib.sha256(catalogue).hexdigest(), "operator_gid": operator.pw_gid, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.policy.v3", "socket_path": str(SOCKET), "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-eggcracker-workload-", "version": release["version"], "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}
         write_new(ETC / "policy.json", (json.dumps(policy, sort_keys=True) + "\n").encode(), 0o600)
         write_new(UNIT, service(), 0o644); created.append(UNIT)
-        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v2", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
+        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v3", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
         write_new(STATE / "install-manifest.json", (json.dumps(manifest, sort_keys=True) + "\n").encode(), 0o600)
         checked = run(["/usr/bin/systemctl", "daemon-reload"])
         started = run(["/usr/bin/systemctl", "enable", "--now", "lumi-eggcracker.service"])

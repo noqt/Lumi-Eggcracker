@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lumi-eggcracker"
-version = "0.1.2"
-description = "A local Linux kill switch for explicitly selected AI and agent workloads"
+version = "0.2.0"
+description = "A local Linux kill switch for unapproved supported AI and agent runtimes"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"

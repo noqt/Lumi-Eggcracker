@@ -1,3 +1,3 @@
-"""Lumi Eggcracker: explicit protected Linux workload termination."""
+"""Lumi Eggcracker: autonomous Linux AI-runtime containment."""
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"

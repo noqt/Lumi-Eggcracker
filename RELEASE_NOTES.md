@@ -1,5 +1,5 @@
-# Lumi Eggcracker 0.1.2
+# Lumi Eggcracker 0.2.0
 
-0.1.2 is an engineering-preview candidate that adds a reproducible real-AI smoke demonstration. It prepares a pinned external llama.cpp runner and Qwen GGUF model only with explicit acceptance, verifies their provenance and SHA-256 digests, waits for visible generated output, then proves operator containment and unrelated-canary survival across five repetitions.
+0.2.0 adds autonomous catalogue-based discovery and termination of unapproved local AI-runtime processes. It uses deterministic fingerprints, exact pre-launch approvals, pidfd stop, cgroup capture and direct `cgroup.kill`.
 
-The runner and model remain external test assets; they are never included in a release archive. 0.1.2 does not add AI identification, autonomous detection, behavioural modelling, network isolation, or any new containment primitive. It is not published automatically by this repository. Native Ubuntu qualification and explicit release approval are required before tag or promotion.
+The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.

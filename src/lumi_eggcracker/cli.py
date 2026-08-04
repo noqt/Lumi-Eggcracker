@@ -1,4 +1,4 @@
-"""Public six-command CLI for the protected Linux workload kill switch."""
+"""Public CLI for protected workloads and autonomous AI-runtime enforcement."""
 
 from __future__ import annotations
 
@@ -27,6 +27,14 @@ def _parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show one protected workload")
     status.add_argument("--name", required=True)
     commands.add_parser("list", help="list protected workloads")
+    approve = commands.add_parser("approve", help="approve one exact AI runtime invocation")
+    approve.add_argument("--name", required=True)
+    approve.add_argument("--uid", required=True, type=int)
+    approve.add_argument("argv", nargs=argparse.REMAINDER)
+    revoke = commands.add_parser("revoke", help="revoke one exact AI runtime approval")
+    revoke.add_argument("--name", required=True)
+    commands.add_parser("approvals", help="list exact AI runtime approvals")
+    commands.add_parser("detections", help="list autonomous containment summaries")
     commands.add_parser("doctor", help="check the installed protected supervisor")
     commands.add_parser("version", help="print the public version")
     return parser
@@ -57,6 +65,14 @@ def main(argv: list[str] | None = None) -> int:
             value = request("status", name=args.name)
         elif args.command == "list":
             value = request("list")
+        elif args.command == "approve":
+            value = request("approve", name=args.name, uid=args.uid, argv=_command(args.argv))
+        elif args.command == "revoke":
+            value = request("revoke", name=args.name)
+        elif args.command == "approvals":
+            value = request("approvals")
+        elif args.command == "detections":
+            value = request("detections")
         else:
             # This validation is deliberately read-only: no receipt reservation before kill.
             if args.receipt.exists() or args.receipt.is_symlink() or not args.receipt.parent.is_dir():

@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 
 REQUIRED = {
-    "environment.json", "asset-provenance.json", "ai-smoke.json",
-    "native-matrix.json", "install-cycle.json", "release-manifest.json",
+    "environment.json", "catalogue.json", "autonomous-matrix.json",
+    "real-ai-smoke.json", "benign-matrix.json", "install-cycle.json", "release-manifest.json",
     "SHA256SUMS", "report.md",
 }
 
@@ -22,14 +22,16 @@ def main() -> int:
     if found != REQUIRED:
         raise SystemExit(f"evidence pack files differ: {sorted(found)}")
     manifest = json.loads((args.evidence / "release-manifest.json").read_text(encoding="utf-8"))
-    assets = json.loads((args.evidence / "asset-provenance.json").read_text(encoding="utf-8"))
-    matrix = json.loads((args.evidence / "native-matrix.json").read_text(encoding="utf-8"))
-    smoke = json.loads((args.evidence / "ai-smoke.json").read_text(encoding="utf-8"))
+    catalogue = json.loads((args.evidence / "catalogue.json").read_text(encoding="utf-8"))
+    matrix = json.loads((args.evidence / "autonomous-matrix.json").read_text(encoding="utf-8"))
+    smoke = json.loads((args.evidence / "real-ai-smoke.json").read_text(encoding="utf-8"))
+    benign = json.loads((args.evidence / "benign-matrix.json").read_text(encoding="utf-8"))
     if (
         manifest.get("source_commit") != args.require_source_commit
         or matrix.get("result") != "PASS"
         or smoke.get("result") != "PASS"
-        or assets.get("schema_version") != "lumi-eggcracker.ai-smoke-assets.v1"
+        or not isinstance(catalogue.get("digest"), str)
+        or benign.get("result") != "PASS"
         or len(smoke.get("repetitions", [])) != 5
     ):
         raise SystemExit("evidence does not meet release gate")

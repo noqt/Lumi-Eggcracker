@@ -80,6 +80,8 @@ def main() -> int:
         ROOT / "scripts" / "prepare_ai_smoke.py": "scripts/prepare_ai_smoke.py",
         ROOT / "scripts" / "ai_smoke_worker.py": "scripts/ai_smoke_worker.py",
         ROOT / "scripts" / "smoke_local_ai.py": "scripts/smoke_local_ai.py",
+        ROOT / "scripts" / "smoke_autonomous_ai.py": "scripts/smoke_autonomous_ai.py",
+        ROOT / "scripts" / "run_autonomous_matrix.py": "scripts/run_autonomous_matrix.py",
     }
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path, name in release_files.items():

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0
+
+- Add deterministic autonomous discovery of unapproved supported AI runtimes.
+- Add exact operator approvals, pidfd stop, quarantine cgroup capture and post-containment detection receipts.
+- Preserve selected-workload cgroup containment and exclude N1 networking from the product release path.
+
 ## 0.1.2
 
 - Add a pinned, opt-in external asset preparation path and five-run real-AI smoke demonstration.
