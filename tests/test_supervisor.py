@@ -29,7 +29,17 @@ class SupervisorTests(unittest.TestCase):
         value.start_lock = threading.Lock()
         value.completed = {}
         value.operations = []
+        value.discovery_active = set()
+        value.discovery_done = {}
+        value.discovery_lock = threading.Lock()
         return value
+
+    def test_recently_contained_identity_is_not_reenforced(self) -> None:
+        supervisor = self._instance()
+        identity = object()
+        with supervisor.discovery_lock:
+            supervisor.discovery_done[identity] = 1
+            self.assertIn(identity, supervisor.discovery_done)
 
     def test_containment_orders_direct_kill_before_receipt_state_and_cleanup(self) -> None:
         supervisor = self._instance()

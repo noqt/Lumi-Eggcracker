@@ -64,6 +64,7 @@ UNIT_PREFIX = "lumi-eggcracker-workload-"
 GATES_DIR = Path("/run/lumi-eggcracker/gates")
 MAX_TERMINAL_RECORDS = 128
 DETECTION_LIMIT = 1000
+RECENT_DISCOVERY_NS = 5_000_000_000
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -164,6 +165,7 @@ class Supervisor:
         self.operations: list[str] = []  # Test-visible ordering only.
         self.discovery_lock = threading.Lock()
         self.discovery_active: set[ProcessIdentity] = set()
+        self.discovery_done: dict[ProcessIdentity, int] = {}
         self.discovery_thread: threading.Thread | None = None
         self.digest_cache: dict[tuple[int, int, int, int], str] = {}
         self.observations = ObservationStore()
@@ -471,6 +473,13 @@ class Supervisor:
         finally:
             with self.discovery_lock:
                 self.discovery_active.discard(snapshot.identity)
+                now = time.monotonic_ns()
+                self.discovery_done[snapshot.identity] = now
+                self.discovery_done = {
+                    identity: completed
+                    for identity, completed in self.discovery_done.items()
+                    if now - completed <= RECENT_DISCOVERY_NS
+                }
 
     def _scan_once(self, *, synchronous: bool = False) -> None:
         try:
@@ -508,7 +517,13 @@ class Supervisor:
             if approved(snapshot, executable_sha256, approvals):
                 continue
             with self.discovery_lock:
-                if snapshot.identity in self.discovery_active:
+                now = time.monotonic_ns()
+                self.discovery_done = {
+                    identity: completed
+                    for identity, completed in self.discovery_done.items()
+                    if now - completed <= RECENT_DISCOVERY_NS
+                }
+                if snapshot.identity in self.discovery_active or snapshot.identity in self.discovery_done:
                     continue
                 self.discovery_active.add(snapshot.identity)
             event_id = os.urandom(12).hex()
