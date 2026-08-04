@@ -188,10 +188,16 @@ class Watchdog:
                     if credentials is None or credentials[1] != 0 or len(payload) != HEARTBEAT.size:
                         continue
                     magic, version, sequence = HEARTBEAT.unpack(payload)
-                    if magic != HEARTBEAT_MAGIC or version != 1 or sequence <= self.sequence:
+                    if magic != HEARTBEAT_MAGIC or version != 1:
+                        continue
+                    # A restarted supervisor starts a fresh local sequence.
+                    # Accept that reset only after a real heartbeat gap; rapid
+                    # duplicates or replays remain rejected.
+                    now = time.monotonic()
+                    if sequence <= self.sequence and now - self.last_heartbeat < 0.5:
                         continue
                     self.sequence = sequence
-                    self.last_heartbeat = time.monotonic()
+                    self.last_heartbeat = now
                 except TimeoutError:
                     pass
                 now = time.monotonic()
