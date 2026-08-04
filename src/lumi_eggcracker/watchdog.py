@@ -26,7 +26,11 @@ UNIT_RE = re.compile(r"^lumi-eggcracker-workload-[0-9a-f]{24}\.service$")
 HEARTBEAT = struct.Struct("!4sIQ")
 HEARTBEAT_MAGIC = b"LEHB"
 STARTUP_GRACE_SECONDS = 10.0
-HEARTBEAT_TIMEOUT_SECONDS = 2.0
+# A clean systemd restart briefly removes the heartbeat producer.  This is a
+# fail-closed availability bound, not containment latency: normal enforcement
+# remains immediate and the watchdog still kills owned workloads if recovery
+# does not restore a heartbeat within this window.
+HEARTBEAT_TIMEOUT_SECONDS = 10.0
 INTEGRITY_INTERVAL_SECONDS = 5.0
 
 
