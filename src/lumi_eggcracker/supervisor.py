@@ -65,7 +65,7 @@ GATES_DIR = Path("/run/lumi-eggcracker/gates")
 MAX_TERMINAL_RECORDS = 128
 DETECTION_LIMIT = 1000
 RECENT_DISCOVERY_NS = 5_000_000_000
-CONTENT_SCAN_INTERVAL = 5
+CONTENT_SCAN_INTERVAL = 2
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
