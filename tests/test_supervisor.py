@@ -67,6 +67,16 @@ class SupervisorTests(unittest.TestCase):
         stored.assert_called_once()
         self.assertEqual("COMPLETED_ALLOWED", item["state"])
 
+    def test_recovery_accepts_only_an_exact_empty_collected_cgroup(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(__import__("json").dumps(item), encoding="utf-8")
+            with patch.object(supervisor, "_contain", side_effect=JsonInputError("containment failed: owned cgroup is unavailable")), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(1, EmptyProof(True, 0, 0, []))), patch.object(supervisor, "_mark_completed") as completed:
+                supervisor._recover()
+        completed.assert_called_once_with(item)
+
     def test_status_is_read_only(self) -> None:
         supervisor = self._instance()
         item = record()

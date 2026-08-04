@@ -190,6 +190,7 @@ class Supervisor:
         self.discovery_failures = 0
         self.heartbeat_sequence = 0
         self.last_heartbeat_sent = 0.0
+        self.heartbeat_thread: threading.Thread | None = None
 
     @property
     def operator_uid(self) -> int:
@@ -611,6 +612,11 @@ class Supervisor:
             # The independent watchdog decides whether the missing heartbeat is fatal.
             pass
 
+    def _heartbeat_loop(self) -> None:
+        while not self.stop_event.is_set():
+            self._heartbeat()
+            self.stop_event.wait(0.05)
+
     def _cleanup(self, unit: str) -> dict[str, Any]:
         result = self._run(["/usr/bin/systemctl", "stop", unit])
         return {
@@ -938,7 +944,18 @@ class Supervisor:
                 continue
             recorded_ids.add(record["run_id"])
             if record["state"] in ACTIVE_STATES:
-                self._contain(record, "SUPERVISOR_RESTART_FAIL_CLOSED")
+                try:
+                    self._contain(record, "SUPERVISOR_RESTART_FAIL_CLOSED")
+                except JsonInputError as error:
+                    # The transient unit may have been collected after its
+                    # cgroup was proven empty but before the restart scan.
+                    # It is not a live workload and must not crash recovery.
+                    if "owned cgroup is unavailable" not in str(error):
+                        raise
+                    _empty_ns, proof = verify_empty(identity_from_run(record))
+                    if not proof.complete:
+                        raise
+                    self._mark_completed(record)
         root = Path("/sys/fs/cgroup/system.slice")
         if not root.is_dir():
             return
@@ -1057,6 +1074,8 @@ class Supervisor:
         self._prepare()
         self.discovery_thread = threading.Thread(target=self._discovery_loop, daemon=True)
         self.discovery_thread.start()
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self.heartbeat_thread.start()
         listeners: dict[socket.socket, Path] = {}
         try:
             for path in SOCKET_ACTIONS:
@@ -1069,7 +1088,6 @@ class Supervisor:
                 listeners[listener] = path
             while not self.stop_event.is_set():
                 ready, _, _ = select.select(listeners, [], [], 0.25)
-                self._heartbeat()
                 for listener in ready:
                     try:
                         connection, _ = listener.accept()
