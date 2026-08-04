@@ -111,6 +111,22 @@ def validate_path(path: Path) -> ArtifactEvidence | None:
         os.close(descriptor)
 
 
+def _looks_like_gguf(path: Path) -> bool:
+    """Use only a four-byte bounded probe before full artifact validation."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return False
+    try:
+        metadata = os.fstat(descriptor)
+        return stat.S_ISREG(metadata.st_mode) and os.read(descriptor, 4) == b"GGUF"
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+
+
 def from_process_fds(
     snapshot: object, *, proc: Path = Path("/proc")
 ) -> tuple[ArtifactEvidence, ...]:
@@ -152,10 +168,13 @@ def from_process_fds(
 def from_snapshot(snapshot: object, *, proc: Path = Path("/proc")) -> tuple[ArtifactEvidence, ...]:
     """Collect bounded GGUF evidence from open descriptors and mapped files."""
     result = list(from_process_fds(snapshot, proc=proc))
-    for raw in tuple(getattr(snapshot, "map_paths", ()))[:MAX_ARTIFACTS]:
+    for raw in tuple(getattr(snapshot, "map_paths", ())):
         if not isinstance(raw, str) or not raw.startswith("/"):
             continue
-        evidence = validate_path(Path(raw))
+        path = Path(raw)
+        evidence = validate_path(path) if _looks_like_gguf(path) else None
         if evidence is not None and evidence not in result:
             result.append(evidence)
+            if len(result) >= MAX_ARTIFACTS:
+                break
     return tuple(result[:MAX_ARTIFACTS])

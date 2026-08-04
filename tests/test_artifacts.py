@@ -34,6 +34,12 @@ class ArtifactTests(unittest.TestCase):
                 path.write_bytes(body)
                 self.assertIsNone(validate_path(path))
 
+    def test_ai_looking_filename_is_not_content_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "model.gguf"
+            path.write_bytes(b"not a model")
+            self.assertIsNone(validate_path(path))
+
     def test_symlink_and_non_regular_files_do_not_qualify(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

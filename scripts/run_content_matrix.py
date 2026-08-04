@@ -93,17 +93,17 @@ def main() -> int:
                 finally:
                     stop(process)
                     stop(canary)
+        results["latency_ms"] = {
+            "process_start_to_first_stop_p95": percentile(starts, 95),
+            "qualification_to_first_stop_p95": percentile(qualification, 95),
+            "trigger_to_empty_p95": percentile(empties, 95),
+        }
         if (
             percentile(starts, 95) >= 1000
             or percentile(qualification, 95) >= 100
             or percentile(empties, 95) >= 500
         ):
             raise RuntimeError("content latency gate failed")
-        results["latency_ms"] = {
-            "process_start_to_first_stop_p95": percentile(starts, 95),
-            "qualification_to_first_stop_p95": percentile(qualification, 95),
-            "trigger_to_empty_p95": percentile(empties, 95),
-        }
         results["result"] = "PASS"
         args.output.write_text(json.dumps(results, sort_keys=True) + "\n", encoding="utf-8")
         return 0

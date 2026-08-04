@@ -486,7 +486,7 @@ class Supervisor:
             first_seen_ns = time.monotonic_ns()
             if detected is None:
                 content = artifacts_from_snapshot(snapshot)
-                runtimes = runtime_from_snapshot(snapshot)
+                runtimes = runtime_from_snapshot(snapshot) if content else ()
                 supplied = {
                     "MODEL_CONTENT": {item.evidence_id for item in content},
                     "INFERENCE_RUNTIME": {item.evidence_id for item in runtimes},
