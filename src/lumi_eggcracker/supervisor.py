@@ -684,6 +684,9 @@ class Supervisor:
         events = events_from_fd(cgroup_events_fd)
         if events.get("populated") != 0:
             return False
+        return self._mark_completed(record)
+
+    def _mark_completed(self, record: dict[str, Any]) -> bool:
         lock = self._new_lock(record["run_id"])
         with lock:
             if record["state"] not in ACTIVE_STATES:
@@ -727,6 +730,14 @@ class Supervisor:
                 self._watch_once(record, ready)
                 return
             except (JsonInputError, OSError, RuntimeError) as error:
+                # A collected transient unit is accepted only through the same
+                # exact-empty proof used after a direct cgroup kill.  It is
+                # not inferred from systemd's inactive state.
+                if "owned cgroup is unavailable" in str(error):
+                    _empty_ns, proof = verify_empty(identity_from_run(record))
+                    if proof.complete:
+                        self._mark_completed(record)
+                        return
                 failure = error
                 if attempt == 0:
                     continue

@@ -59,6 +59,14 @@ class SupervisorTests(unittest.TestCase):
             self.assertTrue(supervisor._complete_allowed(record(), 42))
         self.assertEqual("COMPLETED_ALLOWED", saved[0]["state"])
 
+    def test_collected_empty_cgroup_allows_normal_completion_with_exact_proof(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        with patch.object(supervisor, "_watch_once", side_effect=JsonInputError("owned cgroup is unavailable")), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(1, EmptyProof(True, 0, 0, []))), patch.object(supervisor, "_store") as stored:
+            supervisor._watch(item)
+        stored.assert_called_once()
+        self.assertEqual("COMPLETED_ALLOWED", item["state"])
+
     def test_status_is_read_only(self) -> None:
         supervisor = self._instance()
         item = record()
