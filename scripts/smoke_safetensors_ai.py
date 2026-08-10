@@ -36,8 +36,12 @@ def load_assets(path: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
     python = Path(value["environment"]["path"])
     model = Path(value["model"]["path"])
     config = Path(value["model"]["config"])
-    if any(item.is_symlink() or not item.is_file() for item in (python, model, config)):
+    if any(item.is_symlink() or not item.is_file() for item in (model, config)):
         raise RuntimeError("Safetensors smoke assets are not regular files")
+    if python.is_symlink():
+        python = python.resolve()
+    if python.is_symlink() or not python.is_file() or not os.access(python, os.X_OK):
+        raise RuntimeError("Safetensors smoke interpreter is not executable")
     if digest(model) != value["model"]["sha256"] or digest(config) != value["model"]["config_sha256"]:
         raise RuntimeError("Safetensors smoke asset digest differs from manifest")
     return python, model, config, value
