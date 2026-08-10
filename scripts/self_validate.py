@@ -65,6 +65,7 @@ def main() -> int:
     )
     parser.add_argument("--operator", required=True)
     parser.add_argument("--assets-manifest", required=True, type=Path)
+    parser.add_argument("--safetensors-assets-manifest", required=True, type=Path)
     parser.add_argument("--evidence-dir", required=True, type=Path)
     args = parser.parse_args()
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
@@ -103,6 +104,18 @@ def main() -> int:
                     "smoke_content_ai.py",
                     "--assets-manifest",
                     str(args.assets_manifest),
+                    "--user",
+                    args.operator,
+                    "--repetitions",
+                    "5",
+                ],
+            ),
+            (
+                "safetensors-ai-smoke.json",
+                [
+                    "smoke_safetensors_ai.py",
+                    "--assets-manifest",
+                    str(args.safetensors_assets_manifest),
                     "--user",
                     args.operator,
                     "--repetitions",
@@ -196,7 +209,7 @@ def main() -> int:
         (evidence / "validation.json").write_text(
             json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8"
         )
-        report = "# Lumi Eggcracker local validation\n\nPASS: all precommitted local qualification matrices completed on the installed instance.\n"
+        report = "# Lumi Eggcracker local validation\n\nPASS: all precommitted 0.3.1 regression and 0.4 Safetensors/PyTorch qualification matrices completed on the installed instance.\n"
         (evidence / "report.md").write_text(report, encoding="utf-8")
         sums = "".join(
             f"{digest(path)}  {path.name}\n"

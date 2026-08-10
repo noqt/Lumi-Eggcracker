@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import struct
 import tempfile
@@ -11,6 +12,17 @@ from lumi_eggcracker.artifacts import validate_path
 
 def gguf(*, version: int = 3, tensors: int = 1, metadata: int = 0, padding: int = 64) -> bytes:
     return b"GGUF" + struct.pack("<IQQ", version, tensors, metadata) + b"\0" * padding
+
+
+def safetensors(*, dtype: str = "F32", shape: list[int] | None = None, offsets: tuple[int, int] = (0, 8), metadata: dict[str, str] | None = None) -> bytes:
+    value: dict[str, object] = {
+        "tensor": {"dtype": dtype, "shape": shape if shape is not None else [2], "data_offsets": list(offsets)}
+    }
+    if metadata is not None:
+        value["__metadata__"] = metadata
+    header = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    header += b" " * ((8 - len(header) % 8) % 8)
+    return struct.pack("<Q", len(header)) + header + b"\0" * max(0, offsets[1])
 
 
 class ArtifactTests(unittest.TestCase):
@@ -51,3 +63,38 @@ class ArtifactTests(unittest.TestCase):
             except OSError as error:
                 self.skipTest(f"symlinks unavailable: {error}")
             self.assertIsNone(validate_path(link))
+
+    def test_valid_safetensors_is_extension_and_metadata_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "opaque-input"
+            path.write_bytes(safetensors(metadata={"format": "pt"}))
+            evidence = validate_path(path)
+            self.assertIsNotNone(evidence)
+            assert evidence is not None
+            self.assertEqual("safetensors-v1", evidence.evidence_id)
+            self.assertEqual("SAFETENSORS", evidence.format)
+
+    def test_safetensors_rejects_duplicate_invalid_and_partial_headers(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            duplicate = b'{"tensor":{"dtype":"F32","shape":[2],"data_offsets":[0,8]},"tensor":{}}'
+            duplicate_file = root / "duplicate"
+            duplicate_file.write_bytes(struct.pack("<Q", len(duplicate)) + duplicate + b"\0" * 8)
+            invalid_dtype = root / "dtype"
+            invalid_dtype.write_bytes(safetensors(dtype="F128"))
+            invalid_range = root / "range"
+            invalid_range.write_bytes(safetensors(offsets=(0, 4)))
+            truncated = root / "truncated"
+            truncated.write_bytes(struct.pack("<Q", 1024) + b"{}")
+            for path in (duplicate_file, invalid_dtype, invalid_range, truncated):
+                self.assertIsNone(validate_path(path))
+
+    def test_safetensors_allows_scalar_and_zero_dimension_tensors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            scalar = root / "scalar"
+            scalar.write_bytes(safetensors(shape=[], offsets=(0, 4))[:-4] + b"\0" * 4)
+            zero = root / "zero"
+            zero.write_bytes(safetensors(shape=[0], offsets=(0, 0)))
+            self.assertIsNotNone(validate_path(scalar))
+            self.assertIsNotNone(validate_path(zero))

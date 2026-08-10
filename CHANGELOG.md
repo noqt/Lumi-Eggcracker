@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- Add bounded Safetensors structural validation and exact pinned CPU PyTorch/ATen build-ID-pair recognition.
+- Migrate content catalogue groups to `MODEL_RUNTIME` in schema v3 while preserving GGUF/llama behavior.
+- Contain unapproved complete Safetensors/PyTorch matches autonomously, including converters and inspectors; partial matches survive.
+
 ## 0.3.0
 
 - Add bounded name-independent `content.gguf-llama` recognition from validated GGUF content and two ELF runtime markers.

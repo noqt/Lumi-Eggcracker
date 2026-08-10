@@ -374,16 +374,26 @@ class Supervisor:
         result: AdoptionResult | None,
         error: str | None,
     ) -> dict[str, Any]:
+        trigger_kind = (
+            "UNAPPROVED_SAFETENSORS_PYTORCH"
+            if detected.profile == "content.safetensors-pytorch"
+            else "UNAPPROVED_AI_MATCH"
+        )
         detector: dict[str, Any] = {
-            "catalogue_schema": "lumi-eggcracker.detectors.v2",
+            "catalogue_schema": "lumi-eggcracker.detectors.v3",
             "detection_path": detected.path,
             "matched_evidence": list(detected.evidence),
             "matched_predicates": list(detected.evidence),
             "profile": detected.profile,
         }
         if detected.path == "CONTENT":
-            detector["model"] = content[0].public() if content else {}
-            detector["runtime"] = runtimes[0].public() if runtimes else {}
+            model = next((item for item in content if item.evidence_id == "safetensors-v1"), None)
+            runtime = next(
+                (item for item in runtimes if item.evidence_id == "pytorch-aten-pinned-cpu"),
+                None,
+            )
+            detector["model"] = (model or (content[0] if content else None)).public() if (model or content) else {}
+            detector["runtime"] = (runtime or (runtimes[0] if runtimes else None)).public() if (runtime or runtimes) else {}
             detector["observation"] = {
                 "first_seen_monotonic_ns": first_seen_ns,
                 "qualified_monotonic_ns": qualified_ns,
@@ -403,7 +413,7 @@ class Supervisor:
             "receipt_written_utc": None,
             "schema_version": "lumi-eggcracker.detection-receipt.v2",
             "source_commit": self.policy["source_commit"],
-            "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+            "trigger": {"kind": trigger_kind},
             "version": __version__,
         }
         if result is None:
@@ -433,7 +443,7 @@ class Supervisor:
                     "trigger_to_empty_ms": (result.empty_ns - result.first_stop_ns) / 1_000_000,
                 },
                 "trigger": {
-                    "kind": "UNAPPROVED_AI_MATCH",
+                    "kind": trigger_kind,
                     "observed_monotonic_ns": result.first_stop_ns,
                 },
             }
@@ -523,7 +533,7 @@ class Supervisor:
                 runtimes = runtime_from_snapshot(snapshot) if content else ()
                 supplied = {
                     "MODEL_CONTENT": {item.evidence_id for item in content},
-                    "INFERENCE_RUNTIME": {item.evidence_id for item in runtimes},
+                    "MODEL_RUNTIME": {item.evidence_id for item in runtimes},
                 }
                 observation = self.observations.observe(
                     snapshot.identity, set().union(*supplied.values())

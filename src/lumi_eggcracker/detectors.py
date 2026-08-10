@@ -11,10 +11,10 @@ from typing import Any, Protocol
 
 from .jsonio import JsonInputError, canonical_bytes
 
-SCHEMA = "lumi-eggcracker.detectors.v2"
+SCHEMA = "lumi-eggcracker.detectors.v3"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 KINDS = {"exe_basename", "argv_token", "argv_model_suffix", "open_model_suffix", "map_basename"}
-GROUPS = {"MODEL_CONTENT", "INFERENCE_RUNTIME"}
+GROUPS = {"MODEL_CONTENT", "MODEL_RUNTIME"}
 
 
 class Snapshot(Protocol):

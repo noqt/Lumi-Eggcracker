@@ -29,7 +29,8 @@ def run(argv: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[
 
 
 def call(operator: str, argv: list[str]) -> dict[str, Any]:
-    value = json.loads(run(["/usr/sbin/runuser", "-u", operator, "--", CLI, *argv]).stdout)
+    command = [CLI, *argv] if argv and argv[0] in {"approve", "revoke"} else ["/usr/sbin/runuser", "-u", operator, "--", CLI, *argv]
+    value = json.loads(run(command).stdout)
     if not isinstance(value, dict):
         raise TypeError("invalid Eggcracker response")
     return value

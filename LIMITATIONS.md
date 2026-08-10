@@ -1,10 +1,10 @@
 # Limitations
 
-Lumi Eggcracker 0.3.1 autonomously acts only on a complete match from its installed deterministic AI-runtime catalogue. Its content path currently supports only a regular GGUF v2/v3 artifact combined with a qualified llama.cpp/GGML ELF runtime exposing two valid symbol-table markers, or the release-pinned llama.cpp launcher ELF build ID. It does not recognise arbitrary, custom, fully stripped, encrypted, containerised, remote or otherwise unlisted AI/agent workloads.
+Lumi Eggcracker 0.4.0 autonomously acts only on a complete match from its installed deterministic AI-runtime catalogue. Its content path supports a regular GGUF v2/v3 artifact combined with a qualified llama.cpp/GGML ELF runtime, or a regular Safetensors artifact combined with the exact pinned CPU PyTorch bridge/ATen ELF build-ID pair. It does not recognise arbitrary, custom, fully stripped, encrypted, containerised, remote or otherwise unlisted AI/agent workloads.
 
 The observer uses bounded `/proc` polling. It has no kernel execution hook, eBPF programme or guarantee that a process which forks, daemonises or exits before discovery can be reconstructed as one complete historical tree. A successful receipt proves the exact captured quarantine cgroup is empty.
 
-The product does not kill generic Python, Node.js, Java, shell, GPU-intensive, memory-intensive or networked processes based on those generic properties. It does not use behavioural modelling, telemetry upload, network isolation, credential isolation, filesystem isolation, malware prevention or EDR functions.
+The product does not kill generic Python, Node.js, Java, shell, GPU-intensive, memory-intensive or networked processes based on those generic properties. It does not require or claim proof of inference: an unapproved converter, inspector, evaluator or trainer satisfying both evidence groups is an intended kill. It does not use behavioural modelling, telemetry upload, network isolation, credential isolation, filesystem isolation, malware prevention or EDR functions.
 
 Approvals are exact: UID, resolved executable identity and complete argv digest must all match. Changing any argument requires a new approval. Revoking an approval affects future detections, not a workload already running under that approval.
 

@@ -47,8 +47,9 @@ def assets(path: Path) -> tuple[Path, Path, dict[str, Any]]:
 
 
 def control(user: str, argv: list[str]) -> dict[str, Any]:
+    command = [CLI, *argv] if argv and argv[0] in {"approve", "revoke"} else ["/usr/sbin/runuser", "-u", user, "--", CLI, *argv]
     result = subprocess.run(
-        ["/usr/sbin/runuser", "-u", user, "--", CLI, *argv],
+        command,
         capture_output=True,
         text=True,
         check=False,

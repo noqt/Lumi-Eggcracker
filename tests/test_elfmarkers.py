@@ -4,8 +4,14 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from lumi_eggcracker.elfmarkers import PINNED_LLAMA_BUILD_IDS, inspect_path
+from lumi_eggcracker.elfmarkers import (
+    PINNED_LLAMA_BUILD_IDS,
+    from_snapshot,
+    inspect_path,
+    inspect_pytorch_path,
+)
 
 
 def elf(*, markers: tuple[str, ...], append_decoys: bool = False) -> bytes:
@@ -55,3 +61,55 @@ class ElfMarkerTests(unittest.TestCase):
 
     def test_build_id_fallback_is_explicitly_pinned(self) -> None:
         self.assertEqual({"7c2bca7f8ea49e1c6e86adb14861e721e041f95e"}, PINNED_LLAMA_BUILD_IDS)
+
+    def test_exact_pytorch_pair_uses_build_ids_not_names(self) -> None:
+        def build(identifier: bytes) -> bytes:
+            note = struct.pack("<III", 4, len(identifier), 3)
+            note += b"GNU\0" + b"\0" * 0
+            note += identifier
+            note += b"\0" * ((4 - len(identifier) % 4) % 4)
+            body = bytearray(128 + len(note))
+            body[:16] = b"\x7fELF\x02\x01\x01" + b"\0" * 9
+            body[16:64] = struct.pack(
+                "<HHIQQQIHHHHHH", 3, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0
+            )
+            body[64:120] = struct.pack("<IIQQQQQQ", 4, 0, 128, 0, 0, len(note), 0, 4)
+            body[128:] = note
+            return bytes(body)
+
+        bridge_id = bytes.fromhex("11" * 20)
+        aten_id = bytes.fromhex("22" * 20)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            bridge = root / "renamed-a"
+            aten = root / "renamed-b"
+            bridge.write_bytes(build(bridge_id))
+            aten.write_bytes(build(aten_id))
+            with patch(
+                "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_BRIDGE_BUILD_IDS",
+                {bridge_id.hex()},
+            ), patch(
+                "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_ATEN_BUILD_IDS",
+                {aten_id.hex()},
+            ):
+                self.assertEqual("pytorch-bridge-pinned-cpu", inspect_pytorch_path(bridge).evidence_id)
+                self.assertEqual("pytorch-aten-pinned-cpu", inspect_pytorch_path(aten).evidence_id)
+                sample = type("Snapshot", (), {"exe_path": "/bridge", "map_paths": ("/aten",)})()
+                bridge_evidence = inspect_pytorch_path(bridge)
+                aten_evidence = inspect_pytorch_path(aten)
+                with patch(
+                    "lumi_eggcracker.elfmarkers.inspect_pytorch_path",
+                    side_effect=lambda path: (
+                        bridge_evidence
+                        if path.name == "bridge"
+                        else aten_evidence
+                    ),
+                ):
+                    pair = from_snapshot(sample)
+                self.assertIn("pytorch-aten-pinned-cpu", {item.evidence_id for item in pair})
+
+    def test_pytorch_decoy_strings_do_not_qualify(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "decoy"
+            path.write_bytes(b"libtorch_python.so\0pytorch-aten-pinned-cpu\0")
+            self.assertIsNone(inspect_pytorch_path(path))

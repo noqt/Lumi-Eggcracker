@@ -10,7 +10,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 PREFIX = f"lumi-eggcracker-{VERSION}/"
 FORBIDDEN = (
     "/mnt/" + "f/",

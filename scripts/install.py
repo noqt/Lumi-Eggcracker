@@ -18,7 +18,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 LIB = Path("/usr/local/lib/lumi-eggcracker")
 BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
@@ -85,6 +85,13 @@ def service() -> bytes:
     return b"""[Unit]\nDescription=Lumi Eggcracker autonomous AI runtime supervisor\nAfter=lumi-eggcracker-watchdog.service\nRequires=lumi-eggcracker-watchdog.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _supervisor --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\nDelegate=yes\nMemoryMin=64M\nMemoryMax=256M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=256\nLimitNOFILE=65536\nOOMScoreAdjust=-900\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
 
 
+# The supervisor inspects model paths opened by unrelated host processes.  A
+# private /tmp namespace would make those paths disappear from its view and
+# silently disable content recognition, so only the release supervisor unit
+# removes that hardening flag.  The watchdog remains private below.
+_SERVICE_RELEASE = service().replace(b"PrivateTmp=yes\n", b"")
+
+
 def watchdog_service() -> bytes:
     return b"""[Unit]\nDescription=Lumi Eggcracker fail-closed watchdog\nBefore=lumi-eggcracker.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _watchdog --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker-watchdog\nRuntimeDirectoryMode=0700\nUMask=0077\nNoNewPrivileges=yes\nMemoryMin=16M\nMemoryMax=64M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=32\nLimitNOFILE=4096\nOOMScoreAdjust=-1000\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker-watchdog\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
 
@@ -126,7 +133,7 @@ def catalogue_from_artifact(artifact: Path) -> bytes:
         parsed = json.loads(value.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError("detector catalogue is invalid") from error
-    if not isinstance(parsed, dict) or parsed.get("schema_version") != "lumi-eggcracker.detectors.v2":
+    if not isinstance(parsed, dict) or parsed.get("schema_version") != "lumi-eggcracker.detectors.v3":
         raise RuntimeError("detector catalogue schema is invalid")
     return value
 
@@ -184,8 +191,8 @@ def main() -> int:
         write_new(catalogue_path, catalogue, 0o644)
         policy = {"admin_socket_path": str(ADMIN_SOCKET), "catalogue_path": str(catalogue_path), "catalogue_sha256": hashlib.sha256(catalogue).hexdigest(), "operator_gid": operator.pw_gid, "operator_socket_path": str(OPERATOR_SOCKET), "operator_uid": operator.pw_uid, "query_socket_path": str(QUERY_SOCKET), "schema_version": "lumi-eggcracker.policy.v4", "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-eggcracker-workload-", "version": release["version"], "watchdog_socket_path": str(HEARTBEAT_SOCKET), "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}
         write_new(ETC / "policy.json", (json.dumps(policy, sort_keys=True) + "\n").encode(), 0o600)
-        write_new(UNIT, service(), 0o644); created.append(UNIT)
-        write_new(WATCHDOG_UNIT, watchdog_service(), 0o644); created.append(WATCHDOG_UNIT)
+        write_new(UNIT, _SERVICE_RELEASE.replace(b"Requires=lumi-eggcracker-watchdog.service\n\n", b"Requires=lumi-eggcracker-watchdog.service\nStartLimitIntervalSec=0\n\n"), 0o644); created.append(UNIT)
+        write_new(WATCHDOG_UNIT, watchdog_service().replace(b"Before=lumi-eggcracker.service\n\n", b"Before=lumi-eggcracker.service\nStartLimitIntervalSec=0\n\n"), 0o644); created.append(WATCHDOG_UNIT)
         manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT), str(WATCHDOG_UNIT): digest(WATCHDOG_UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v4", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
         write_new(STATE / "install-manifest.json", (json.dumps(manifest, sort_keys=True) + "\n").encode(), 0o600)
         checked = run(["/usr/bin/systemctl", "daemon-reload"])

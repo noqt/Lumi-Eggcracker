@@ -1,6 +1,6 @@
-# Lumi Eggcracker 0.3.1
+# Lumi Eggcracker 0.4.0
 
-0.3.1 adds P0 self-protection to the existing qualified `content.gguf-llama` capability. The operator query/selected-workload plane and the root-only approval-administration plane now use separate Unix sockets. The workload identity is tested against all control sockets and cannot start a replacement workload. A separate root watchdog fail-closes Eggcracker-owned workload cgroups if supervisor heartbeats stop or installed-file digests drift.
+0.4.0 adds aggressive `content.safetensors-pytorch` recognition to the qualified 0.3.1 architecture. A valid bounded Safetensors header and the exact pinned CPU PyTorch/ATen ELF build-ID pair must coexist in one process snapshot; an unapproved complete match is immediately contained without requiring proof of a forward pass. The existing three-socket approval boundaries, watchdog and cgroup.kill containment remain unchanged.
 
 The release also applies bounded memory, CPU, I/O, task and descriptor limits to the supervisor, watchdog and selected workloads. Complete unapproved matches continue to use pidfd stop/capture and direct `cgroup.kill` as the authoritative complete-tree kill primitive.
 

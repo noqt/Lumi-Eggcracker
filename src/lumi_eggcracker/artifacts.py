@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import struct
@@ -15,6 +16,32 @@ MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 MAX_ARTIFACTS = 16
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_GGUF_ITEMS = 10_000_000
+MAX_SAFETENSORS_TENSORS = 100_000
+MAX_SAFETENSORS_DIMS = 64
+MAX_SAFETENSORS_DIM = 1 << 31
+MAX_SAFETENSORS_ELEMENTS = 1 << 60
+
+# This is deliberately a small, pinned set for the CPU MVP.  Unknown future
+# dtypes fail closed until a new release qualifies their byte semantics.
+SAFETENSORS_DTYPE_BYTES = {
+    "BOOL": 1,
+    "U8": 1,
+    "I8": 1,
+    "I16": 2,
+    "U16": 2,
+    "I32": 4,
+    "U32": 4,
+    "I64": 8,
+    "U64": 8,
+    "F8_E4M3": 1,
+    "F8_E5M2": 1,
+    "F16": 2,
+    "BF16": 2,
+    "F32": 4,
+    "F64": 8,
+    "C64": 8,
+    "C128": 16,
+}
 
 
 @dataclass(frozen=True)
@@ -46,9 +73,9 @@ def _size_bucket(size: int) -> str:
     return ">=8GiB"
 
 
-def _regular(descriptor: int) -> os.stat_result:
+def _regular(descriptor: int, *, minimum: int = 1) -> os.stat_result:
     metadata = os.fstat(descriptor)
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < 25:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < minimum:
         raise JsonInputError("candidate model artifact is not a usable regular file")
     return metadata
 
@@ -66,7 +93,7 @@ def _read_exact(descriptor: int, amount: int) -> bytes:
 
 def validate_gguf_fd(descriptor: int) -> ArtifactEvidence:
     """Validate the fixed GGUF v2/v3 header without reading a model body."""
-    before = _regular(descriptor)
+    before = _regular(descriptor, minimum=25)
     raw = _read_exact(descriptor, 24)
     if len(raw) != 24 or raw[:4] != b"GGUF":
         raise JsonInputError("candidate is not GGUF")
@@ -96,23 +123,129 @@ def validate_gguf_fd(descriptor: int) -> ArtifactEvidence:
     )
 
 
+def _json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise JsonInputError("Safetensors header contains duplicate JSON keys")
+        value[key] = item
+    return value
+
+
+def validate_safetensors_fd(descriptor: int) -> ArtifactEvidence:
+    """Validate one bounded Safetensors header through an opened descriptor."""
+    before = _regular(descriptor, minimum=8)
+    prefix = _read_exact(descriptor, 8)
+    if len(prefix) != 8:
+        raise JsonInputError("Safetensors header length is truncated")
+    header_length = struct.unpack("<Q", prefix)[0]
+    if not 1 <= header_length <= MAX_ARTIFACT_BYTES:
+        raise JsonInputError("Safetensors header length is outside the bounded budget")
+    if 8 + header_length > before.st_size:
+        raise JsonInputError("Safetensors header exceeds file size")
+    header = _read_exact(descriptor, header_length + 8)[8:]
+    if len(header) != header_length:
+        raise JsonInputError("Safetensors header is truncated")
+    try:
+        value = json.loads(header.decode("utf-8"), object_pairs_hook=_json_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError, JsonInputError) as error:
+        raise JsonInputError(f"Safetensors header JSON is invalid: {error}") from error
+    if not isinstance(value, dict) or not value:
+        raise JsonInputError("Safetensors header must be a non-empty JSON object")
+    metadata = value.pop("__metadata__", None)
+    if metadata is not None and (
+        not isinstance(metadata, dict)
+        or any(
+            not isinstance(key, str) or not isinstance(item, str)
+            for key, item in metadata.items()
+        )
+    ):
+        raise JsonInputError("Safetensors metadata must be string-to-string")
+    if not value or len(value) > MAX_SAFETENSORS_TENSORS:
+        raise JsonInputError("Safetensors tensor count is invalid")
+    data_start = 8 + header_length
+    data_size = before.st_size - data_start
+    previous_end = 0
+    for name, tensor in value.items():
+        if not isinstance(name, str) or not name or not isinstance(tensor, dict):
+            raise JsonInputError("Safetensors tensor entry is invalid")
+        if set(tensor) != {"dtype", "shape", "data_offsets"}:
+            raise JsonInputError("Safetensors tensor fields are invalid")
+        dtype = tensor["dtype"]
+        if not isinstance(dtype, str) or dtype not in SAFETENSORS_DTYPE_BYTES:
+            raise JsonInputError("Safetensors dtype is unsupported")
+        shape = tensor["shape"]
+        if (
+            not isinstance(shape, list)
+            or len(shape) > MAX_SAFETENSORS_DIMS
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or item < 0
+                or item > MAX_SAFETENSORS_DIM
+                for item in shape
+            )
+        ):
+            raise JsonInputError("Safetensors shape is invalid")
+        elements = 1
+        for dimension in shape:
+            elements *= dimension
+            if elements > MAX_SAFETENSORS_ELEMENTS:
+                raise JsonInputError("Safetensors shape exceeds arithmetic budget")
+        required_bytes = elements * SAFETENSORS_DTYPE_BYTES[dtype]
+        offsets = tensor["data_offsets"]
+        if (
+            not isinstance(offsets, list)
+            or len(offsets) != 2
+            or any(
+                isinstance(item, bool) or not isinstance(item, int) or item < 0
+                for item in offsets
+            )
+        ):
+            raise JsonInputError("Safetensors data offsets are invalid")
+        start, end = offsets
+        if start > end or start < previous_end or end > data_size or end - start != required_bytes:
+            raise JsonInputError("Safetensors data offsets do not match tensor shape")
+        previous_end = end
+    after = _regular(descriptor, minimum=8)
+    if (before.st_dev, before.st_ino, before.st_size) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+    ):
+        raise JsonInputError("candidate model artifact changed during validation")
+    return ArtifactEvidence(
+        "safetensors-v1",
+        "SAFETENSORS",
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        hashlib.sha256(header).hexdigest(),
+    )
+
+
 def validate_path(path: Path) -> ArtifactEvidence | None:
-    """Return strict GGUF evidence for one locally opened regular file."""
+    """Return strict GGUF or Safetensors evidence for one opened file."""
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError:
         return None
     try:
-        return validate_gguf_fd(descriptor)
+        for validator in (validate_gguf_fd, validate_safetensors_fd):
+            try:
+                return validator(descriptor)
+            except (JsonInputError, OSError):
+                continue
+        return None
     except (JsonInputError, OSError):
         return None
     finally:
         os.close(descriptor)
 
 
-def _looks_like_gguf(path: Path) -> bool:
-    """Use only a four-byte bounded probe before full artifact validation."""
+def _looks_like_artifact(path: Path) -> bool:
+    """Use only a bounded regular-file probe before full validation."""
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -120,7 +253,7 @@ def _looks_like_gguf(path: Path) -> bool:
         return False
     try:
         metadata = os.fstat(descriptor)
-        return stat.S_ISREG(metadata.st_mode) and os.read(descriptor, 4) == b"GGUF"
+        return stat.S_ISREG(metadata.st_mode) and metadata.st_size >= 8
     except OSError:
         return False
     finally:
@@ -151,7 +284,15 @@ def from_process_fds(
         except OSError:
             continue
         try:
-            evidence = validate_gguf_fd(descriptor)
+            evidence = None
+            for validator in (validate_gguf_fd, validate_safetensors_fd):
+                try:
+                    evidence = validator(descriptor)
+                    break
+                except (JsonInputError, OSError):
+                    continue
+            if evidence is None:
+                continue
             header_bytes = min(os.fstat(descriptor).st_size, MAX_ARTIFACT_BYTES)
             if consumed + header_bytes > MAX_TOTAL_BYTES:
                 break
@@ -172,7 +313,7 @@ def from_snapshot(snapshot: object, *, proc: Path = Path("/proc")) -> tuple[Arti
         if not isinstance(raw, str) or not raw.startswith("/"):
             continue
         path = Path(raw)
-        evidence = validate_path(path) if _looks_like_gguf(path) else None
+        evidence = validate_path(path) if _looks_like_artifact(path) else None
         if evidence is not None and evidence not in result:
             result.append(evidence)
             if len(result) >= MAX_ARTIFACTS:

@@ -43,7 +43,8 @@ def assets_from_manifest(path: Path) -> tuple[Path, Path, dict[str, Any]]:
 
 
 def call(user: str, argv: list[str]) -> dict[str, Any]:
-    result = subprocess.run(["/usr/sbin/runuser", "-u", user, "--", CLI, *argv], capture_output=True, text=True, check=False, timeout=30)
+    command = [CLI, *argv] if argv and argv[0] in {"approve", "revoke"} else ["/usr/sbin/runuser", "-u", user, "--", CLI, *argv]
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Eggcracker control command failed")
     value = json.loads(result.stdout)

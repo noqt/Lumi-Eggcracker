@@ -21,6 +21,12 @@ LLAMA_MARKERS = frozenset(
     }
 )
 PINNED_LLAMA_BUILD_IDS = frozenset({"7c2bca7f8ea49e1c6e86adb14861e721e041f95e"})
+# Exact GNU build IDs from the pinned CPU-only PyTorch 2.5.1 wheel used by the
+# real smoke environment.  Names and paths are deliberately not part of the
+# qualification rule.
+PINNED_PYTORCH_BRIDGE_BUILD_IDS = frozenset({"0ba50bfa63eb5fd0dd19cabca2ee1de77c4c1398"})
+PINNED_PYTORCH_ATEN_BUILD_IDS = frozenset({"ad9ab6eeec3b28a0ec3f12f266627610de90813b"})
+MAX_RUNTIME_CANDIDATES = 128
 
 
 @dataclass(frozen=True)
@@ -46,7 +52,7 @@ def _read(descriptor: int, offset: int, count: int) -> bytes:
 
 def _symbols(descriptor: int, size: int) -> set[str]:
     header = _read(descriptor, 0, 64)
-    if header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01":
+    if header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01" or header[18:20] != struct.pack("<H", 62):
         raise JsonInputError("candidate runtime is not little-endian ELF64")
     (
         _type,
@@ -117,7 +123,7 @@ def _symbols(descriptor: int, size: int) -> set[str]:
 def _build_id(descriptor: int, size: int) -> str | None:
     """Return a GNU build ID from a bounded ELF program-note segment."""
     header = _read(descriptor, 0, 64)
-    if header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01":
+    if header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01" or header[18:20] != struct.pack("<H", 62):
         raise JsonInputError("candidate runtime is not little-endian ELF64")
     values = struct.unpack("<HHIQQQIHHHHHH", header[16:])
     program_offset, entry_size, count = values[4], values[8], values[9]
@@ -188,12 +194,58 @@ def inspect_path(path: Path) -> RuntimeEvidence | None:
         os.close(descriptor)
 
 
+def inspect_pytorch_path(path: Path) -> RuntimeEvidence | None:
+    """Recognise one exact pinned PyTorch bridge/ATen ELF identity."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size < 64:
+            return None
+        build_id = _build_id(descriptor, before.st_size)
+        after = os.fstat(descriptor)
+        if (before.st_dev, before.st_ino, before.st_size) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+        ):
+            return None
+        if build_id in PINNED_PYTORCH_BRIDGE_BUILD_IDS:
+            return RuntimeEvidence(
+                "pytorch-bridge-pinned-cpu", "PyTorch/ATen", "BUILD_ID", ()
+            )
+        if build_id in PINNED_PYTORCH_ATEN_BUILD_IDS:
+            return RuntimeEvidence(
+                "pytorch-aten-pinned-cpu", "PyTorch/ATen", "BUILD_ID", ()
+            )
+        return None
+    except (JsonInputError, OSError, struct.error):
+        return None
+    finally:
+        os.close(descriptor)
+
+
 def from_snapshot(snapshot: object) -> tuple[RuntimeEvidence, ...]:
     """Inspect executable and mapped regular files; their names are ignored."""
     candidates = [getattr(snapshot, "exe_path", ""), *getattr(snapshot, "map_paths", ())]
     result: list[RuntimeEvidence] = []
-    for raw in candidates[:513]:
+    bridge = False
+    aten = False
+    for raw in candidates[:MAX_RUNTIME_CANDIDATES]:
         evidence = inspect_path(Path(raw)) if isinstance(raw, str) and raw.startswith("/") else None
         if evidence is not None and evidence not in result:
             result.append(evidence)
+        pytorch = (
+            inspect_pytorch_path(Path(raw))
+            if isinstance(raw, str) and raw.startswith("/")
+            else None
+        )
+        if pytorch is not None:
+            bridge |= pytorch.evidence_id == "pytorch-bridge-pinned-cpu"
+            aten |= pytorch.evidence_id == "pytorch-aten-pinned-cpu"
+    if bridge and aten:
+        result.append(RuntimeEvidence("pytorch-aten-pinned-cpu", "PyTorch/ATen", "BUILD_ID_PAIR", ()))
     return tuple(result)

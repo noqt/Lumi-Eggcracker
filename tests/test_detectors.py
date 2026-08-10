@@ -30,13 +30,13 @@ class DetectorTests(unittest.TestCase):
         catalogue = load_bundled()
         sample = Sample("unfamiliar", ("anything",))
         self.assertIsNone(match(catalogue, sample, evidence={"MODEL_CONTENT": {"gguf-v3"}}))
-        self.assertIsNone(match(catalogue, sample, evidence={"INFERENCE_RUNTIME": {"llama-elf"}}))
+        self.assertIsNone(match(catalogue, sample, evidence={"MODEL_RUNTIME": {"llama-elf"}}))
         self.assertEqual(
             DetectionMatch("content.gguf-llama", "CONTENT", ("gguf-v3", "llama-elf")),
             match(
                 catalogue,
                 sample,
-                evidence={"MODEL_CONTENT": {"gguf-v3"}, "INFERENCE_RUNTIME": {"llama-elf"}},
+                evidence={"MODEL_CONTENT": {"gguf-v3"}, "MODEL_RUNTIME": {"llama-elf"}},
             ),
         )
 
@@ -47,14 +47,39 @@ class DetectorTests(unittest.TestCase):
         )
         self.assertIsNone(match(catalogue, Sample("node", ("node", "agent.js"))))
 
+    def test_safetensors_pytorch_profile_is_complete_only(self) -> None:
+        catalogue = load_bundled()
+        sample = Sample("opaque-python", ("opaque-python", "worker"))
+        self.assertIsNone(
+            match(catalogue, sample, evidence={"MODEL_CONTENT": {"safetensors-v1"}})
+        )
+        self.assertIsNone(
+            match(catalogue, sample, evidence={"MODEL_RUNTIME": {"pytorch-aten-pinned-cpu"}})
+        )
+        self.assertEqual(
+            DetectionMatch(
+                "content.safetensors-pytorch",
+                "CONTENT",
+                ("safetensors-v1", "pytorch-aten-pinned-cpu"),
+            ),
+            match(
+                catalogue,
+                sample,
+                evidence={
+                    "MODEL_CONTENT": {"safetensors-v1"},
+                    "MODEL_RUNTIME": {"pytorch-aten-pinned-cpu"},
+                },
+            ),
+        )
+
     def test_catalogue_rejects_unknown_predicate_and_incomplete_content_group(self) -> None:
         unknown = b'{"schema_version":"lumi-eggcracker.detectors.v2","profiles":[{"id":"bad","path":"FAST_NAME","all":[{"kind":"unknown","values":["x"]}]}]}'
-        incomplete = b'{"schema_version":"lumi-eggcracker.detectors.v2","profiles":[{"id":"bad","path":"CONTENT","require_all_groups":[{"group":"MODEL_CONTENT","any":["gguf-v3"]}]}]}'
+        incomplete = b'{"schema_version":"lumi-eggcracker.detectors.v3","profiles":[{"id":"bad","path":"CONTENT","require_all_groups":[{"group":"MODEL_CONTENT","any":["gguf-v3"]}]}]}'
         for raw in (unknown, incomplete):
             with self.assertRaises(JsonInputError):
                 load_catalogue(raw)
 
     def test_catalogue_digest_is_exact(self) -> None:
-        raw = b'{"schema_version":"lumi-eggcracker.detectors.v2","profiles":[{"id":"one","path":"FAST_NAME","all":[{"kind":"exe_basename","values":["one"]}]}]}'
+        raw = b'{"schema_version":"lumi-eggcracker.detectors.v3","profiles":[{"id":"one","path":"FAST_NAME","all":[{"kind":"exe_basename","values":["one"]}]}]}'
         with self.assertRaises(JsonInputError):
             load_catalogue(raw, expected_digest="0" * 64)

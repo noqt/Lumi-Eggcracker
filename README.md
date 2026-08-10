@@ -2,7 +2,7 @@
 
 Lumi Eggcracker is a local Linux kill switch for unapproved, supported AI and agent runtimes.
 
-> Eggcracker monitors a Linux host for supported local AI inference workloads. It recognises installed fast-name profiles and, for qualified GGUF/llama.cpp combinations, validated model content plus inference-runtime binary evidence. When a complete match has no exact operator approval, it automatically stops the process, captures its discovered process tree in a root-owned cgroup, and kills that cgroup.
+> Eggcracker monitors a Linux host for supported local AI workloads. It recognises installed fast-name profiles and qualified model/runtime combinations. When a complete match has no exact root-admin approval, it automatically stops the process, captures its discovered process tree in a root-owned cgroup, and kills that cgroup.
 
 There is no alert-only phase for an unapproved catalogue match. Containment begins with a pidfd stop signal; the explanation and receipt are written only after cgroup containment completes.
 
@@ -11,6 +11,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 - continuously scans host processes and performs a startup scan before accepting control commands;
 - detects published local-runtime profiles including llama.cpp, Ollama, vLLM, Text Generation Inference, LocalAI, llamafile and selected agent CLIs;
 - recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a structurally valid GGUF v2/v3 artifact and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
+- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge/ATen ELF build-ID pair coexist in one process snapshot;
 - lets the configured operator approve one exact executable, UID and invocation before it is run;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
@@ -31,11 +32,11 @@ A successful receipt proves the captured quarantine cgroup is empty. It does not
 
 ## Quick start
 
-Download and extract `lumi-eggcracker-0.3.1-linux.zip`, then run as root:
+Download and extract `lumi-eggcracker-0.4.0-linux.zip`, then run as root:
 
 ```sh
-cd lumi-eggcracker-0.3.1
-sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.3.1.pyz
+cd lumi-eggcracker-0.4.0
+sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.4.0.pyz
 eggcracker doctor
 eggcracker approvals
 ```
@@ -68,6 +69,7 @@ The release bundle can prepare a pinned external llama.cpp runner and Qwen GGUF 
 
 ```sh
 sudo python3 scripts/prepare_ai_smoke.py --workspace /opt/lumi-eggcracker-ai-smoke --accept-third-party-downloads
+sudo python3 scripts/prepare_safetensors_smoke.py --workspace /opt/lumi-eggcracker-safetensors-smoke --accept-third-party-downloads
 sudo python3 scripts/smoke_autonomous_ai.py \
   --assets-manifest /opt/lumi-eggcracker-ai-smoke/ai-smoke-assets.json \
   --user "$USER" --repetitions 5 --output ./autonomous-ai-smoke.json
@@ -89,6 +91,7 @@ Run a complete local qualification after installation. It uses the pinned extern
 sudo python3 scripts/self_validate.py \
   --operator "$USER" \
   --assets-manifest /opt/lumi-eggcracker-ai-smoke/ai-smoke-assets.json \
+  --safetensors-assets-manifest /opt/lumi-eggcracker-safetensors-smoke/safetensors-ai-smoke-assets.json \
   --evidence-dir /opt/lumi-eggcracker-evidence
 ```
 
