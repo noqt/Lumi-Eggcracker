@@ -130,7 +130,11 @@ def launch(user: str, wrapper: Path, argv: list[str], output: Path) -> subproces
 def one(runner: Path, model: Path, user: str, index: int) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="lumi-content-smoke-", dir="/tmp") as raw:
         root = Path(raw)
-        os.chmod(root, 0o755)
+        # The unprivileged workload must be able to materialise its copied
+        # runtime beside the unfamiliar launcher; the harness remains the
+        # owner of the files it creates and the directory is not searchable
+        # by unrelated users.
+        os.chmod(root, 0o733)
         disguised_runner = root / secrets.token_hex(12)
         disguised_model = root / secrets.token_hex(12)
         wrapper = root / f"{secrets.token_hex(8)}.py"
