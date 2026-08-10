@@ -83,8 +83,12 @@ def main() -> int:
     if args.discoveries != 100 or args.approved != 50 or args.benign < 200 or args.output.exists() or args.output.is_symlink() or not args.output.parent.is_dir():
         raise SystemExit("qualification counts or output path are invalid")
     install = json.loads(Path("/var/lib/lumi-eggcracker/install-manifest.json").read_text(encoding="utf-8"))
-    operator, user = str(install["operator"]), str(install["operator"])
-    uid = pwd.getpwnam(user).pw_uid
+    operator = str(install["operator"])
+    user = str(install["workload_user"])
+    account = pwd.getpwnam(user)
+    if account.pw_uid != int(install["workload_uid"]) or account.pw_uid == pwd.getpwnam(operator).pw_uid:
+        raise RuntimeError("installed workload identity is not isolated from the operator")
+    uid = account.pw_uid
     results: dict[str, Any] = {"approved": [], "benign": 0, "canary_survival": 0, "discoveries": [], "result": "FAIL"}
     starts: list[float] = []
     empties: list[float] = []

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import platform
+import pwd
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -82,6 +83,9 @@ def main() -> int:
         policy = json.loads(POLICY.read_text(encoding="utf-8"))
         if policy.get("operator_uid") is None or policy.get("source_commit") is None:
             raise RuntimeError("installed policy is invalid")
+        workload = pwd.getpwuid(int(policy["workload_uid"])).pw_name
+        if workload == args.operator:
+            raise RuntimeError("installed workload identity must differ from operator")
         checked = doctor(args.operator)
         environment = {
             "catalogue": checked["catalogue"],
@@ -105,7 +109,7 @@ def main() -> int:
                     "--assets-manifest",
                     str(args.assets_manifest),
                     "--user",
-                    args.operator,
+                    workload,
                     "--repetitions",
                     "5",
                 ],
@@ -117,7 +121,7 @@ def main() -> int:
                     "--assets-manifest",
                     str(args.safetensors_assets_manifest),
                     "--user",
-                    args.operator,
+                    workload,
                     "--repetitions",
                     "5",
                 ],
@@ -129,7 +133,7 @@ def main() -> int:
                     "--assets-manifest",
                     str(args.assets_manifest),
                     "--user",
-                    args.operator,
+                    workload,
                     "--repetitions",
                     "100",
                 ],
@@ -141,7 +145,7 @@ def main() -> int:
                     "--assets-manifest",
                     str(args.assets_manifest),
                     "--user",
-                    args.operator,
+                    workload,
                     "--repetitions",
                     "300",
                 ],
@@ -153,7 +157,7 @@ def main() -> int:
                     "--assets-manifest",
                     str(args.assets_manifest),
                     "--user",
-                    args.operator,
+                    workload,
                     "--tree-repetitions",
                     "100",
                     "--startup-repetitions",
