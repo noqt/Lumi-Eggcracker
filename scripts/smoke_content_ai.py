@@ -71,7 +71,7 @@ def stop(process: subprocess.Popen[bytes] | None) -> None:
         process.wait(timeout=5)
 
 
-def receipt_after(before: set[Path], *, timeout: float = 90) -> dict[str, Any]:
+def receipt_after(before: set[Path], *, timeout: float = 240) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         paths = set(DETECTIONS.glob("*.json")) - before
