@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .adoption import AdoptionResult, contain, pidfd_available
+from .adoption import AdoptionResult, contain, open_pidfd, pidfd_available
 from .approvals import approved, revoke
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
@@ -460,12 +460,15 @@ class Supervisor:
         qualified_ns: int,
         executable_sha256: str,
         event_id: str,
+        pidfd: int | None = None,
     ) -> None:
+        containment_started = False
         try:
             if self.quarantine_root is None:
                 raise JsonInputError("quarantine root is unavailable")
             self.operations.append("pidfd.stop")
-            result = contain(snapshot.identity, self.quarantine_root, event_id)
+            containment_started = True
+            result = contain(snapshot.identity, self.quarantine_root, event_id, pidfd=pidfd)
             self.operations.append("cgroup.kill")
             receipt = self._detection_receipt(
                 event_id=event_id,
@@ -504,6 +507,10 @@ class Supervisor:
             except (JsonInputError, OSError):
                 pass
         finally:
+            # ``contain`` owns and closes a handed-off pidfd.  If the
+            # precondition above prevents the hand-off, close it here.
+            if pidfd is not None and not containment_started:
+                os.close(pidfd)
             with self.discovery_lock:
                 self.discovery_active.discard(snapshot.identity)
                 now = time.monotonic_ns()
@@ -562,6 +569,15 @@ class Supervisor:
                     continue
                 self.discovery_active.add(snapshot.identity)
             event_id = os.urandom(12).hex()
+            try:
+                # Bind the identity before handing enforcement to a worker
+                # thread. Reopening /proc later leaves a race in which a
+                # forked or reparented process can vanish before first stop.
+                pidfd = open_pidfd(snapshot.identity)
+            except (JsonInputError, OSError, ProcessLookupError):
+                with self.discovery_lock:
+                    self.discovery_active.discard(snapshot.identity)
+                continue
             if synchronous:
                 self._enforce_discovery(
                     snapshot,
@@ -572,22 +588,30 @@ class Supervisor:
                     qualified_ns,
                     executable_sha256,
                     event_id,
+                    pidfd,
                 )
             else:
-                threading.Thread(
-                    target=self._enforce_discovery,
-                    args=(
-                        snapshot,
-                        detected,
-                        content,
-                        runtimes,
-                        first_seen_ns,
-                        qualified_ns,
-                        executable_sha256,
-                        event_id,
-                    ),
-                    daemon=True,
-                ).start()
+                try:
+                    threading.Thread(
+                        target=self._enforce_discovery,
+                        args=(
+                            snapshot,
+                            detected,
+                            content,
+                            runtimes,
+                            first_seen_ns,
+                            qualified_ns,
+                            executable_sha256,
+                            event_id,
+                            pidfd,
+                        ),
+                        daemon=True,
+                    ).start()
+                except RuntimeError:
+                    os.close(pidfd)
+                    with self.discovery_lock:
+                        self.discovery_active.discard(snapshot.identity)
+                    raise
 
     def _discovery_loop(self) -> None:
         while not self.stop_event.is_set():

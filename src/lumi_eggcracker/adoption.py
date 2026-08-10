@@ -45,8 +45,8 @@ def _same(value: ProcessIdentity, *, proc: Path = PROC) -> bool:
     return identity(value.pid, proc=proc) == value
 
 
-def stop(value: ProcessIdentity, *, proc: Path = PROC) -> int:
-    """Stop one revalidated identity through a pidfd; return completion time."""
+def open_pidfd(value: ProcessIdentity, *, proc: Path = PROC) -> int:
+    """Open and revalidate a pidfd before asynchronous enforcement begins."""
     if not pidfd_available():
         raise JsonInputError("pidfd_send_signal is unavailable")
     if not _same(value, proc=proc):
@@ -55,8 +55,35 @@ def stop(value: ProcessIdentity, *, proc: Path = PROC) -> int:
     try:
         if not _same(value, proc=proc):
             raise ProcessLookupError(errno.ESRCH, "process identity changed")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def stop_pidfd(value: ProcessIdentity, descriptor: int, *, proc: Path = PROC) -> int:
+    """Stop the identity bound by a previously opened pidfd.
+
+    The descriptor is the identity proof.  Do not reopen ``/proc`` here: a
+    second PID/start-time lookup would recreate the fork/reparent race this
+    path is intended to close.
+    """
+    if not pidfd_available():
+        raise JsonInputError("pidfd_send_signal is unavailable")
+    try:
         signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
-        return time.monotonic_ns()
+    except OSError as error:
+        if error.errno == errno.ESRCH:
+            raise ProcessLookupError(errno.ESRCH, "process identity vanished") from error
+        raise
+    return time.monotonic_ns()
+
+
+def stop(value: ProcessIdentity, *, proc: Path = PROC) -> int:
+    """Stop one revalidated identity through a pidfd; return completion time."""
+    descriptor = open_pidfd(value, proc=proc)
+    try:
+        return stop_pidfd(value, descriptor, proc=proc)
     finally:
         os.close(descriptor)
 
@@ -187,14 +214,24 @@ def _remove(value: QuarantineIdentity, root: Path) -> None:
     path.rmdir()
 
 
-def contain(target: ProcessIdentity, root: Path, event_id: str, *, proc: Path = PROC) -> AdoptionResult:
-    """The first durable operation happens only after pidfd stop and cgroup kill."""
+def contain(
+    target: ProcessIdentity,
+    root: Path,
+    event_id: str,
+    *,
+    proc: Path = PROC,
+    pidfd: int | None = None,
+) -> AdoptionResult:
+    """Stop through a match-time pidfd, then adopt and directly kill the tree."""
     trigger_deadline = time.monotonic() + MAX_CAPTURE_SECONDS
-    first_stop = stop(target, proc=proc)
+    descriptor = pidfd
     captured: set[ProcessIdentity] = {target}
     fixed = 0
     quarantine: QuarantineIdentity | None = None
     try:
+        if descriptor is None:
+            descriptor = open_pidfd(target, proc=proc)
+        first_stop = stop_pidfd(target, descriptor, proc=proc)
         quarantine = create_quarantine(root, event_id)
         while True:
             captured = descendants(captured, proc=proc)
@@ -237,3 +274,6 @@ def contain(target: ProcessIdentity, root: Path, event_id: str, *, proc: Path = 
         except (JsonInputError, OSError):
             pass
         raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
