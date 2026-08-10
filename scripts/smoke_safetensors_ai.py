@@ -110,7 +110,9 @@ def launch(python: Path, user: str, wrapper: Path, weights: Path, config: Path, 
 def one(python: Path, model: Path, config: Path, user: str, index: int) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="lumi-safetensors-smoke-", dir="/tmp") as raw:
         root = Path(raw)
-        os.chmod(root, 0o755)
+        # The unprivileged workload must be able to write its bounded smoke
+        # output, while model/config/wrapper inputs remain read-only files.
+        os.chmod(root, 0o733)
         weights = root / "weights"
         config_copy = root / "config.json"
         wrapper = root / secrets.token_hex(12)
