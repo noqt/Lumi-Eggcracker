@@ -40,8 +40,14 @@ class RuntimeEvidence:
         return {"family": self.family, "method": self.method}
 
 
-def _read(descriptor: int, offset: int, count: int) -> bytes:
-    if offset < 0 or count < 0 or offset + count > MAX_ELF_BYTES:
+def _read(descriptor: int, offset: int, count: int, *, allow_distant_offset: bool = False) -> bytes:
+    if offset < 0 or count < 0 or count > MAX_ELF_BYTES:
+        raise JsonInputError("ELF read exceeds bounded inspection window")
+    # GNU build-id notes in large shared objects (for example libtorch_cpu)
+    # may live far beyond the first bounded window.  The read itself remains
+    # bounded; only the seek offset is allowed to be distant after the file
+    # size was checked by the caller.
+    if not allow_distant_offset and offset + count > MAX_ELF_BYTES:
         raise JsonInputError("ELF read exceeds bounded inspection window")
     os.lseek(descriptor, offset, os.SEEK_SET)
     value = os.read(descriptor, count)
@@ -140,9 +146,9 @@ def _build_id(descriptor: int, size: int) -> str | None:
         kind, _flags, offset, _virtual, _physical, length, _memory, _align = struct.unpack(
             "<IIQQQQQQ", entry
         )
-        if kind != 4 or not length or offset + length > size or offset + length > MAX_ELF_BYTES:
+        if kind != 4 or not length or length > MAX_ELF_BYTES or offset + length > size:
             continue
-        note = _read(descriptor, offset, length)
+        note = _read(descriptor, offset, length, allow_distant_offset=True)
         cursor = 0
         while cursor + 12 <= len(note):
             names, descriptor_size, note_type = struct.unpack("<III", note[cursor : cursor + 12])

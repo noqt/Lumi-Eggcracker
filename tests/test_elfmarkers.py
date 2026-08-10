@@ -108,6 +108,49 @@ class ElfMarkerTests(unittest.TestCase):
                     pair = from_snapshot(sample)
                 self.assertIn("pytorch-aten-pinned-cpu", {item.evidence_id for item in pair})
 
+    def test_runtime_candidate_cap_deduplicates_repeated_map_segments(self) -> None:
+        bridge = type("Evidence", (), {"evidence_id": "pytorch-bridge-pinned-cpu"})()
+        aten = type("Evidence", (), {"evidence_id": "pytorch-aten-pinned-cpu"})()
+        sample = type(
+            "Snapshot",
+            (),
+            {"exe_path": "/exe", "map_paths": ("/decoy",) * 200 + ("/bridge", "/aten")},
+        )()
+        with patch(
+            "lumi_eggcracker.elfmarkers.inspect_pytorch_path",
+            side_effect=lambda path: {"bridge": bridge, "aten": aten}.get(path.name),
+        ):
+            pair = from_snapshot(sample)
+        self.assertIn("pytorch-aten-pinned-cpu", {item.evidence_id for item in pair})
+
+    def test_large_shared_object_build_id_note_stays_bounded(self) -> None:
+        identifier = bytes.fromhex("33" * 20)
+        note = struct.pack("<III", 4, len(identifier), 3) + b"GNU\0" + identifier
+        note += b"\0" * ((4 - len(identifier) % 4) % 4)
+        note_offset = 5 * 1024 * 1024
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "large-runtime"
+            header = bytearray(120)
+            header[:16] = b"\x7fELF\x02\x01\x01" + b"\0" * 9
+            header[16:64] = struct.pack(
+                "<HHIQQQIHHHHHH", 3, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0
+            )
+            header[64:120] = struct.pack(
+                "<IIQQQQQQ", 4, 0, note_offset, 0, 0, len(note), 0, 4
+            )
+            with path.open("wb") as handle:
+                handle.write(header)
+                handle.seek(note_offset)
+                handle.write(note)
+            with patch(
+                "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_BRIDGE_BUILD_IDS",
+                {identifier.hex()},
+            ):
+                evidence = inspect_pytorch_path(path)
+            self.assertIsNotNone(evidence)
+            assert evidence is not None
+            self.assertEqual("pytorch-bridge-pinned-cpu", evidence.evidence_id)
+
     def test_pytorch_decoy_strings_do_not_qualify(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "decoy"
