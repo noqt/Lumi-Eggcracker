@@ -230,7 +230,16 @@ def inspect_pytorch_path(path: Path) -> RuntimeEvidence | None:
 
 def from_snapshot(snapshot: object) -> tuple[RuntimeEvidence, ...]:
     """Inspect executable and mapped regular files; their names are ignored."""
-    candidates = [getattr(snapshot, "exe_path", ""), *getattr(snapshot, "map_paths", ())]
+    # ``/proc/<pid>/maps`` repeats each shared object once per mapped segment.
+    # Deduplicate before applying the bounded candidate cap; otherwise a busy
+    # Python/AI process can exhaust the cap on unrelated NumPy/locale segments
+    # and hide the exact PyTorch bridge/ATen objects that are mapped later.
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for raw in (getattr(snapshot, "exe_path", ""), *getattr(snapshot, "map_paths", ())):
+        if isinstance(raw, str) and raw not in seen:
+            seen.add(raw)
+            candidates.append(raw)
     result: list[RuntimeEvidence] = []
     bridge = False
     aten = False
