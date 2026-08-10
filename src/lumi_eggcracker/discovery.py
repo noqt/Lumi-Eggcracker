@@ -42,13 +42,20 @@ def _read(path: Path, limit: int = MAX_READ) -> bytes:
     descriptor = os.open(
         path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     )
+    chunks: list[bytes] = []
+    total = 0
     try:
-        value = os.read(descriptor, limit + 1)
+        while total <= limit:
+            value = os.read(descriptor, min(64 * 1024, limit + 1 - total))
+            if not value:
+                break
+            chunks.append(value)
+            total += len(value)
     finally:
         os.close(descriptor)
-    if len(value) > limit:
+    if total > limit:
         raise JsonInputError(f"bounded proc read exceeded for {path.name}")
-    return value
+    return b"".join(chunks)
 
 
 def parse_stat(raw: str) -> tuple[int, int]:
