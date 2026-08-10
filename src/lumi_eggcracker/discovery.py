@@ -13,6 +13,7 @@ from .jsonio import JsonInputError
 
 PROC = Path("/proc")
 MAX_READ = 64 * 1024
+MAX_MAP_BYTES = 256 * 1024
 MAX_FDS = 256
 MAX_MAPS = 512
 
@@ -121,7 +122,7 @@ def _fd_entries(directory: Path, *, limit: int) -> tuple[tuple[int, str], ...]:
 
 def _maps(path: Path) -> tuple[str, ...]:
     try:
-        raw = _read(path).decode("utf-8", errors="replace")
+        raw = _read(path, MAX_MAP_BYTES).decode("utf-8", errors="replace")
     except OSError:
         return ()
     values: list[str] = []
@@ -134,7 +135,7 @@ def _maps(path: Path) -> tuple[str, ...]:
 
 def _map_paths(path: Path) -> tuple[str, ...]:
     try:
-        raw = _read(path).decode("utf-8", errors="replace")
+        raw = _read(path, MAX_MAP_BYTES).decode("utf-8", errors="replace")
     except OSError:
         return ()
     values: list[str] = []

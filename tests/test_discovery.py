@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lumi_eggcracker.discovery import ProcessIdentity, argv_digest, identity, parse_stat
+from lumi_eggcracker.discovery import ProcessIdentity, _map_paths, argv_digest, identity, parse_stat
 from lumi_eggcracker.jsonio import JsonInputError
 
 
@@ -30,3 +30,17 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(ProcessIdentity(42, 100), identity(42, proc=proc))
             (entry / "stat").write_text("42 (x) S 1 " + "0 " * 17 + "101\n", encoding="utf-8")
             self.assertEqual(ProcessIdentity(42, 101), identity(42, proc=proc))
+
+    def test_long_maps_file_keeps_bounded_first_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "maps"
+            path.write_text(
+                "".join(
+                    f"7b{i:08x}-7b{i + 1:08x} r-xp 00000000 08:30 1 /opt/runtime/{i:04d}-" + "x" * 150 + "\n"
+                    for i in range(700)
+                ),
+                encoding="utf-8",
+            )
+            values = _map_paths(path)
+            self.assertEqual(512, len(values))
+            self.assertTrue(values[0].startswith("/opt/runtime/"))
