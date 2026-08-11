@@ -42,6 +42,12 @@ def require_success(argv: list[str]) -> None:
         raise SystemExit(result.stderr.strip() or result.stdout.strip() or f"command failed: {argv[1]}")
 
 
+def reset_failed(unit: str) -> None:
+    result = run(["/usr/bin/systemctl", "reset-failed", unit])
+    if result.returncode and "not loaded" not in result.stderr.lower():
+        raise SystemExit(result.stderr.strip() or result.stdout.strip() or "cannot reset unit state")
+
+
 def owned_cgroups_empty() -> bool:
     root = Path("/sys/fs/cgroup/system.slice")
     if not root.is_dir():
@@ -104,8 +110,8 @@ def main() -> int:
         require_success(["/usr/bin/systemctl", "disable", WATCHDOG])
         if not owned_cgroups_empty() or not quarantine_empty():
             raise SystemExit("refusing uninstall because cgroups remained populated after stop")
-        require_success(["/usr/bin/systemctl", "reset-failed", SUPERVISOR])
-        require_success(["/usr/bin/systemctl", "reset-failed", WATCHDOG])
+        reset_failed(SUPERVISOR)
+        reset_failed(WATCHDOG)
         for path in (UNIT, WATCHDOG_UNIT, BIN, LIB, ETC, STATE, RUNTIME, WATCHDOG_RUNTIME):
             if path.exists() and not path.is_symlink():
                 shutil.rmtree(path) if path.is_dir() else path.unlink()
