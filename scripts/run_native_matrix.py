@@ -79,6 +79,9 @@ def start_workload(operator: str, args: list[str]) -> dict[str, Any]:
         return {"result": "STARTED", "response_recovered": True}
 
 
+RESTART_RECOVERY_TIMEOUT_SECONDS = 25
+
+
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("native matrix must run as root")
@@ -165,7 +168,13 @@ def main() -> int:
             # not race a naturally completed 30-second sleep.
             start_workload(operator, ["start", "--name", name, "--max-pids", "8", "--", "/bin/sleep", "300"])
             run(["/usr/bin/systemctl", "kill", "--kill-who=main", "-s", "SIGKILL", "lumi-eggcracker.service"])
-            state = wait_state(operator, name, "TERMINATED", timeout=12)
+            # The supervisor socket is intentionally absent while systemd
+            # restarts the service.  Allow the full bounded recovery window,
+            # which remains below the independent watchdog's 30-second
+            # heartbeat fail-closed timeout.
+            state = wait_state(
+                operator, name, "TERMINATED", timeout=RESTART_RECOVERY_TIMEOUT_SECONDS
+            )
             receipt_files = sorted(Path("/var/lib/lumi-eggcracker/receipts").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
             receipt = json.loads(receipt_files[-1].read_text(encoding="utf-8"))
             if receipt["trigger"]["kind"] != "SUPERVISOR_RESTART_FAIL_CLOSED":
