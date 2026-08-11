@@ -1,8 +1,8 @@
-# Lumi Eggcracker
+# Eggcracker
 
 **Deterministic containment for unapproved local AI workloads on Linux.**
 
-Lumi Eggcracker is a privileged Linux enforcement daemon for a narrow,
+Eggcracker is a privileged Linux enforcement daemon for a narrow,
 published catalogue of locally observed AI workloads.
 
 > Engineering preview: when a complete qualified match has no exact root approval,
