@@ -71,8 +71,21 @@ def quarantine_empty() -> bool:
         return True
     if root.is_symlink() or not root.is_dir():
         return False
+    events = root / "cgroup.events"
+    try:
+        populated = dict(
+            line.split(" ", 1) for line in events.read_text(encoding="ascii").splitlines()
+        ).get("populated")
+    except OSError:
+        return False
+    if populated != "0":
+        return False
     for path in root.iterdir():
-        if path.is_symlink() or not path.is_dir() or len(path.name) != 24 or any(item not in "0123456789abcdef" for item in path.name):
+        if not path.is_dir():
+            continue
+        if path.is_symlink() or len(path.name) != 24 or any(
+            item not in "0123456789abcdef" for item in path.name
+        ):
             return False
         events = path / "cgroup.events"
         try:
