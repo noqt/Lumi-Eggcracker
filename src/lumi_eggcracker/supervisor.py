@@ -44,7 +44,7 @@ from .discovery import (
     executable_metadata_for_identity,
     scan,
 )
-from .elfmarkers import RuntimeEvidence
+from .elfmarkers import RuntimeEvidence, with_pytorch_pair
 from .elfmarkers import from_snapshot as runtime_from_snapshot
 from .jsonio import JsonInputError, load_regular_json
 from .observation import ObservationStore
@@ -549,7 +549,7 @@ class Supervisor:
         if detected.path == "CONTENT":
             model = next((item for item in content if item.evidence_id == "safetensors-v1"), None)
             runtime = next(
-                (item for item in runtimes if item.evidence_id == "pytorch-aten-pinned-cpu"),
+                (item for item in runtimes if item.evidence_id == "pytorch-bridge-aten-pair-pinned-cpu"),
                 None,
             )
             detector["model"] = (model or (content[0] if content else None)).public() if (model or content) else {}
@@ -787,6 +787,7 @@ class Supervisor:
                 for evidence in candidate.runtimes:
                     if evidence not in aggregate_runtimes:
                         aggregate_runtimes.append(evidence)
+            aggregate_runtimes = list(with_pytorch_pair(aggregate_runtimes))
             supplied = {
                 "MODEL_CONTENT": {item.evidence_id for item in aggregate_content},
                 "MODEL_RUNTIME": {item.evidence_id for item in aggregate_runtimes},

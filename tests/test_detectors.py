@@ -50,20 +50,23 @@ class DetectorTests(unittest.TestCase):
             match(catalogue, sample, evidence={"MODEL_CONTENT": {"safetensors-v1"}})
         )
         self.assertIsNone(
-            match(catalogue, sample, evidence={"MODEL_RUNTIME": {"pytorch-aten-pinned-cpu"}})
+            match(catalogue, sample, evidence={"MODEL_RUNTIME": {"pytorch-aten-build-id-pinned-cpu"}})
+        )
+        self.assertIsNone(
+            match(catalogue, sample, evidence={"MODEL_RUNTIME": {"pytorch-bridge-build-id-pinned-cpu"}})
         )
         self.assertEqual(
             DetectionMatch(
                 "content.safetensors-pytorch",
                 "CONTENT",
-                ("safetensors-v1", "pytorch-aten-pinned-cpu"),
+                ("safetensors-v1", "pytorch-bridge-aten-pair-pinned-cpu"),
             ),
             match(
                 catalogue,
                 sample,
                 evidence={
                     "MODEL_CONTENT": {"safetensors-v1"},
-                    "MODEL_RUNTIME": {"pytorch-aten-pinned-cpu"},
+                    "MODEL_RUNTIME": {"pytorch-bridge-aten-pair-pinned-cpu"},
                 },
             ),
         )

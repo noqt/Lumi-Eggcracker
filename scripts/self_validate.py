@@ -127,6 +127,18 @@ def main() -> int:
                 ],
             ),
             (
+                "safetensors-aten-negative.json",
+                [
+                    "smoke_safetensors_aten_negative.py",
+                    "--assets-manifest",
+                    str(args.safetensors_assets_manifest),
+                    "--user",
+                    workload,
+                    "--repetitions",
+                    "5",
+                ],
+            ),
+            (
                 "content-matrix.json",
                 [
                     "run_content_matrix.py",

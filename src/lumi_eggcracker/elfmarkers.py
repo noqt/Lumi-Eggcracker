@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import struct
-from collections.abc import MutableMapping
+from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +27,9 @@ PINNED_LLAMA_BUILD_IDS = frozenset({"7c2bca7f8ea49e1c6e86adb14861e721e041f95e"})
 # qualification rule.
 PINNED_PYTORCH_BRIDGE_BUILD_IDS = frozenset({"0ba50bfa63eb5fd0dd19cabca2ee1de77c4c1398"})
 PINNED_PYTORCH_ATEN_BUILD_IDS = frozenset({"ad9ab6eeec3b28a0ec3f12f266627610de90813b"})
+PYTORCH_BRIDGE_EVIDENCE_ID = "pytorch-bridge-build-id-pinned-cpu"
+PYTORCH_ATEN_EVIDENCE_ID = "pytorch-aten-build-id-pinned-cpu"
+PYTORCH_PAIR_EVIDENCE_ID = "pytorch-bridge-aten-pair-pinned-cpu"
 MAX_RUNTIME_CANDIDATES = 128
 
 
@@ -236,11 +239,11 @@ def inspect_pytorch_path(path: Path) -> RuntimeEvidence | None:
             return None
         if build_id in PINNED_PYTORCH_BRIDGE_BUILD_IDS:
             return RuntimeEvidence(
-                "pytorch-bridge-pinned-cpu", "PyTorch/ATen", "BUILD_ID", ()
+                PYTORCH_BRIDGE_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID", ()
             )
         if build_id in PINNED_PYTORCH_ATEN_BUILD_IDS:
             return RuntimeEvidence(
-                "pytorch-aten-pinned-cpu", "PyTorch/ATen", "BUILD_ID", ()
+                PYTORCH_ATEN_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID", ()
             )
         return None
     except (JsonInputError, OSError, struct.error):
@@ -260,6 +263,19 @@ def _inspect_candidate(path: Path) -> tuple[RuntimeEvidence, ...]:
     return tuple(values)
 
 
+def with_pytorch_pair(values: Iterable[RuntimeEvidence]) -> tuple[RuntimeEvidence, ...]:
+    """Add the composite identity only when both raw pinned identities exist."""
+    result = list(values)
+    evidence_ids = {item.evidence_id for item in result}
+    if (
+        PYTORCH_BRIDGE_EVIDENCE_ID in evidence_ids
+        and PYTORCH_ATEN_EVIDENCE_ID in evidence_ids
+        and PYTORCH_PAIR_EVIDENCE_ID not in evidence_ids
+    ):
+        result.append(RuntimeEvidence(PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID_PAIR", ()))
+    return tuple(result)
+
+
 def from_snapshot(
     snapshot: object, *, cache: RuntimeCache | None = None
 ) -> tuple[RuntimeEvidence, ...]:
@@ -275,8 +291,6 @@ def from_snapshot(
             seen.add(raw)
             candidates.append(raw)
     result: list[RuntimeEvidence] = []
-    bridge = False
-    aten = False
     for raw in candidates[:MAX_RUNTIME_CANDIDATES]:
         if not isinstance(raw, str) or not raw.startswith("/"):
             continue
@@ -296,8 +310,4 @@ def from_snapshot(
         for evidence in values:
             if evidence not in result:
                 result.append(evidence)
-            bridge |= evidence.evidence_id == "pytorch-bridge-pinned-cpu"
-            aten |= evidence.evidence_id == "pytorch-aten-pinned-cpu"
-    if bridge and aten:
-        result.append(RuntimeEvidence("pytorch-aten-pinned-cpu", "PyTorch/ATen", "BUILD_ID_PAIR", ()))
-    return tuple(result)
+    return with_pytorch_pair(result)

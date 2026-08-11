@@ -17,7 +17,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 - continuously scans host processes and performs a startup scan before accepting control commands;
 - detects only the two publicly qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
 - recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
-- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge/ATen ELF build-ID pair appear in one process or across a bounded related workload (the same unprivileged UID with a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
+- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
 - lets the configured operator approve one exact executable, UID and invocation before it is run;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
@@ -34,7 +34,7 @@ A successful receipt proves the captured quarantine cgroup is empty. It does not
 | Profile | Exact qualification | Active in 0.4.0 |
 | --- | --- | --- |
 | `content.gguf-llama` | Renamed llama.cpp runner, extensionless GGUF path, bounded GGUF header, qualified ELF identity | Yes |
-| `content.safetensors-pytorch` | Pinned CPU PyTorch/ATen build IDs, valid contiguous Safetensors layout, real model smoke | Yes |
+| `content.safetensors-pytorch` | Pinned CPU PyTorch bridge-plus-ATen pair, valid contiguous Safetensors layout, real model smoke and ATen-only negative control | Yes |
 | Ollama, vLLM, TGI, LocalAI, llamafile and agent CLIs | Invocation-specific fixtures and launcher identity still require qualification | No |
 
 ## Requirements
@@ -109,7 +109,7 @@ sudo python3 scripts/self_validate.py \
   --evidence-dir /opt/lumi-eggcracker-evidence
 ```
 
-It runs the real-AI approval smoke, renamed content matrix, benign model-handling matrix, descendants/startup/restart checks, autonomous regression, selected-workload security regression, and the host-overhead benchmark. The resulting `overhead-benchmark.json` is included in the checksum-verified evidence pack.
+It runs the real-AI approval smoke, Safetensors approval smoke, ATen-only negative control, renamed content matrix, benign model-handling matrix, descendants/startup/restart checks, autonomous regression, selected-workload security regression, and the host-overhead benchmark. The resulting `overhead-benchmark.json` is included in the checksum-verified evidence pack.
 
 Measure host cost separately in the disposable qualification VM:
 
@@ -121,5 +121,11 @@ sudo python3 scripts/benchmark_overhead.py \
 
 This records scan duration, CPU time, read counters, resident memory and
 context switches at approximately 50, 200 and 1,000 host processes.
+
+On the qualification WSL2 Ubuntu environment, warmed-cache scan p95 was
+approximately 251 ms with 50 synthetic children, 650 ms with 200, and 2.9
+seconds with 1,000. Content inspection occurs on alternating scans, so high
+process density can create multi-second observation delay. Results are
+host-specific; run the bundled benchmark before deployment.
 
 See [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md), and [QUALIFICATION.md](QUALIFICATION.md) before using this engineering preview.

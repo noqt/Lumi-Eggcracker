@@ -108,6 +108,7 @@ def main() -> int:
             "scripts/smoke_autonomous_ai.py",
             "scripts/smoke_content_ai.py",
             "scripts/smoke_safetensors_ai.py",
+            "scripts/smoke_safetensors_aten_negative.py",
             "scripts/run_content_matrix.py",
             "scripts/run_content_benign_matrix.py",
             "scripts/run_content_adversarial_matrix.py",

@@ -13,6 +13,7 @@ REQUIRED = {
     "doctor.json",
     "real-ai-smoke.json",
     "safetensors-ai-smoke.json",
+    "safetensors-aten-negative.json",
     "content-matrix.json",
     "benign-model-matrix.json",
     "content-adversarial-matrix.json",

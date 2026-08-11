@@ -114,6 +114,7 @@ def main() -> int:
         ROOT / "scripts" / "smoke_autonomous_ai.py": "scripts/smoke_autonomous_ai.py",
         ROOT / "scripts" / "smoke_content_ai.py": "scripts/smoke_content_ai.py",
         ROOT / "scripts" / "smoke_safetensors_ai.py": "scripts/smoke_safetensors_ai.py",
+        ROOT / "scripts" / "smoke_safetensors_aten_negative.py": "scripts/smoke_safetensors_aten_negative.py",
         ROOT / "scripts" / "run_content_matrix.py": "scripts/run_content_matrix.py",
         ROOT / "scripts" / "run_content_benign_matrix.py": "scripts/run_content_benign_matrix.py",
         ROOT / "scripts" / "run_content_adversarial_matrix.py": "scripts/run_content_adversarial_matrix.py",

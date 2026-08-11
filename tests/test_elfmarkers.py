@@ -9,9 +9,14 @@ from unittest.mock import patch
 
 from lumi_eggcracker.elfmarkers import (
     PINNED_LLAMA_BUILD_IDS,
+    PYTORCH_ATEN_EVIDENCE_ID,
+    PYTORCH_BRIDGE_EVIDENCE_ID,
+    PYTORCH_PAIR_EVIDENCE_ID,
+    RuntimeEvidence,
     from_snapshot,
     inspect_path,
     inspect_pytorch_path,
+    with_pytorch_pair,
 )
 
 
@@ -93,8 +98,8 @@ class ElfMarkerTests(unittest.TestCase):
                 "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_ATEN_BUILD_IDS",
                 {aten_id.hex()},
             ):
-                self.assertEqual("pytorch-bridge-pinned-cpu", inspect_pytorch_path(bridge).evidence_id)
-                self.assertEqual("pytorch-aten-pinned-cpu", inspect_pytorch_path(aten).evidence_id)
+                self.assertEqual(PYTORCH_BRIDGE_EVIDENCE_ID, inspect_pytorch_path(bridge).evidence_id)
+                self.assertEqual(PYTORCH_ATEN_EVIDENCE_ID, inspect_pytorch_path(aten).evidence_id)
                 sample = type("Snapshot", (), {"exe_path": "/bridge", "map_paths": ("/aten",)})()
                 bridge_evidence = inspect_pytorch_path(bridge)
                 aten_evidence = inspect_pytorch_path(aten)
@@ -107,11 +112,24 @@ class ElfMarkerTests(unittest.TestCase):
                     ),
                 ):
                     pair = from_snapshot(sample)
-                self.assertIn("pytorch-aten-pinned-cpu", {item.evidence_id for item in pair})
+                self.assertEqual(
+                    {PYTORCH_BRIDGE_EVIDENCE_ID, PYTORCH_ATEN_EVIDENCE_ID, PYTORCH_PAIR_EVIDENCE_ID},
+                    {item.evidence_id for item in pair},
+                )
+
+    def test_pytorch_pair_requires_both_raw_identities(self) -> None:
+        bridge = RuntimeEvidence(PYTORCH_BRIDGE_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID", ())
+        aten = RuntimeEvidence(PYTORCH_ATEN_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID", ())
+        self.assertEqual((bridge,), with_pytorch_pair((bridge,)))
+        self.assertEqual((aten,), with_pytorch_pair((aten,)))
+        self.assertEqual(
+            {PYTORCH_BRIDGE_EVIDENCE_ID, PYTORCH_ATEN_EVIDENCE_ID, PYTORCH_PAIR_EVIDENCE_ID},
+            {item.evidence_id for item in with_pytorch_pair((bridge, aten))},
+        )
 
     def test_runtime_candidate_cap_deduplicates_repeated_map_segments(self) -> None:
-        bridge = type("Evidence", (), {"evidence_id": "pytorch-bridge-pinned-cpu"})()
-        aten = type("Evidence", (), {"evidence_id": "pytorch-aten-pinned-cpu"})()
+        bridge = type("Evidence", (), {"evidence_id": PYTORCH_BRIDGE_EVIDENCE_ID})()
+        aten = type("Evidence", (), {"evidence_id": PYTORCH_ATEN_EVIDENCE_ID})()
         sample = type(
             "Snapshot",
             (),
@@ -122,7 +140,7 @@ class ElfMarkerTests(unittest.TestCase):
             side_effect=lambda path: {"bridge": bridge, "aten": aten}.get(path.name),
         ):
             pair = from_snapshot(sample)
-        self.assertIn("pytorch-aten-pinned-cpu", {item.evidence_id for item in pair})
+        self.assertIn(PYTORCH_PAIR_EVIDENCE_ID, {item.evidence_id for item in pair})
 
     @unittest.skipUnless(os.name == "posix", "stable absolute paths are Linux-only")
     def test_runtime_cache_reuses_stable_inode_result(self) -> None:
@@ -167,7 +185,7 @@ class ElfMarkerTests(unittest.TestCase):
                 evidence = inspect_pytorch_path(path)
             self.assertIsNotNone(evidence)
             assert evidence is not None
-            self.assertEqual("pytorch-bridge-pinned-cpu", evidence.evidence_id)
+            self.assertEqual(PYTORCH_BRIDGE_EVIDENCE_ID, evidence.evidence_id)
 
     def test_pytorch_decoy_strings_do_not_qualify(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
