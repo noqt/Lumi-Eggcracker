@@ -206,12 +206,18 @@ def main() -> int:
         started = run(["/usr/bin/systemctl", "enable", "--now", "lumi-eggcracker.service"])
         if checked.returncode or started.returncode or started_watchdog.returncode:
             raise RuntimeError((checked.stderr + started.stderr + started_watchdog.stderr).strip() or "cannot start supervisor")
-        deadline = time.monotonic() + 15
+        # A cold bounded discovery scan may take several seconds on a loaded
+        # qualification host.  Wait long enough for the supervisor to complete
+        # that startup scan, while still failing before an operator mistakes a
+        # non-starting installation for a ready one.
+        deadline = time.monotonic() + 45
         while time.monotonic() < deadline and not all(path.exists() for path in (QUERY_SOCKET, OPERATOR_SOCKET, ADMIN_SOCKET, HEARTBEAT_SOCKET)):
             time.sleep(0.02)
         for path, mode, gid in ((QUERY_SOCKET, 0o660, operator.pw_gid), (OPERATOR_SOCKET, 0o660, operator.pw_gid), (ADMIN_SOCKET, 0o600, 0), (HEARTBEAT_SOCKET, 0o600, 0)):
+            if not path.exists() or path.is_symlink():
+                raise RuntimeError(f"required Eggcracker socket was not created: {path}")
             metadata = path.stat()
-            if not path.exists() or stat.S_IMODE(metadata.st_mode) != mode or metadata.st_uid != 0 or metadata.st_gid != gid:
+            if stat.S_IMODE(metadata.st_mode) != mode or metadata.st_uid != 0 or metadata.st_gid != gid:
                 raise RuntimeError("socket ownership contract failed")
         print(json.dumps({"result": "INSTALLED", "service": "lumi-eggcracker.service", "workload_uid": account.pw_uid}, sort_keys=True))
         return 0
