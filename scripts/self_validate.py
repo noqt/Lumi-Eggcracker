@@ -170,6 +170,8 @@ def main() -> int:
                 "autonomous-regression.json",
                 [
                     "run_autonomous_matrix.py",
+                    "--assets-manifest",
+                    str(args.assets_manifest),
                     "--discoveries",
                     "100",
                     "--approved",

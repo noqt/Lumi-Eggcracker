@@ -7,16 +7,15 @@ import json
 import os
 import pwd
 import secrets
-import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+from smoke_content_ai import assets, command
+
 CLI = "/usr/local/bin/eggcracker"
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 
@@ -60,21 +59,20 @@ def percentile(values: list[float], percent: int) -> float:
     return ordered[max(0, (len(ordered) * percent + 99) // 100 - 1)]
 
 
-def launch(user: str, runner: Path, fixture: Path, model: Path) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(["/usr/sbin/runuser", "-u", user, "--", str(runner), str(fixture), "-m", str(model.with_suffix(".model"))], start_new_session=True)
-
-
-def fixture_runner(root: Path) -> Path:
-    runner = root / "llama-cli"
-    shutil.copyfile(Path(sys.executable).resolve(), runner)
-    runner.chmod(0o755)
-    return runner
+def launch(user: str, argv: list[str]) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        ["/usr/sbin/runuser", "-u", user, "--", *argv],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("autonomous matrix must run as root")
     parser = argparse.ArgumentParser()
+    parser.add_argument("--assets-manifest", required=True, type=Path)
     parser.add_argument("--discoveries", required=True, type=int)
     parser.add_argument("--approved", required=True, type=int)
     parser.add_argument("--benign", required=True, type=int)
@@ -92,9 +90,9 @@ def main() -> int:
     results: dict[str, Any] = {"approved": [], "benign": 0, "canary_survival": 0, "discoveries": [], "result": "FAIL"}
     starts: list[float] = []
     empties: list[float] = []
-    with tempfile.TemporaryDirectory(prefix="lumi-eggcracker-autonomous-", dir="/tmp") as raw:
-        root = Path(raw); os.chmod(root, 0o755); runner = fixture_runner(root); model = root / "fixture.gguf"; model.write_bytes(b"fixture")
-        fixture = ROOT / "tests" / "fixtures" / "discovery_fork_race.py"
+    try:
+        runner, model, _manifest = assets(args.assets_manifest)
+        argv = command(runner, model)
         try:
             doctor = call(operator, ["doctor"])
             if doctor.get("result") != "PASS" or not doctor.get("autonomous_discovery"):
@@ -104,10 +102,10 @@ def main() -> int:
                 process: subprocess.Popen[bytes] | None = None
                 try:
                     before = set(DETECTIONS.glob("*.json")); started = time.monotonic_ns()
-                    process = launch(user, runner, fixture, model)
+                    process = launch(user, argv)
                     receipt = new_receipt(before)
                     stop(process)
-                    if receipt.get("detector", {}).get("profile") != "llama.cpp-open-model" or canary.poll() is not None or receipt.get("containment", {}).get("surviving_pids"):
+                    if receipt.get("detector", {}).get("profile") != "content.gguf-llama" or canary.poll() is not None or receipt.get("containment", {}).get("surviving_pids"):
                         raise RuntimeError("autonomous fixture containment or canary proof failed")
                     starts.append((receipt["containment"]["first_stop_monotonic_ns"] - started) / 1_000_000)
                     empties.append(float(receipt["containment"]["trigger_to_empty_ms"]))
@@ -118,12 +116,12 @@ def main() -> int:
                     stop(canary)
             for index in range(args.approved):
                 name = f"allow-{secrets.token_hex(6)}"
-                argv = [str(runner), str(fixture), "-m", str(model.with_suffix(".model"))]
                 call(operator, ["approve", "--name", name, "--uid", str(uid), "--", *argv])
-                process = launch(user, runner, fixture, model)
+                before = set(DETECTIONS.glob("*.json"))
+                process = launch(user, argv)
                 try:
                     time.sleep(0.2)
-                    if process.poll() is not None:
+                    if set(DETECTIONS.glob("*.json")) - before:
                         raise RuntimeError("exact approved invocation was killed")
                     results["approved"].append(name)
                 finally:
@@ -148,6 +146,11 @@ def main() -> int:
             if not args.output.exists():
                 args.output.write_text(json.dumps(results, sort_keys=True) + "\n", encoding="utf-8")
             raise
+    except Exception as error:
+        results["error"] = str(error)
+        if not args.output.exists():
+            args.output.write_text(json.dumps(results, sort_keys=True) + "\n", encoding="utf-8")
+        raise
 
 
 if __name__ == "__main__":
