@@ -15,7 +15,11 @@ from .discovery import PROC, ProcessIdentity, identity
 from .jsonio import JsonInputError
 
 MAX_CAPTURED = 4096
-MAX_CAPTURE_SECONDS = 0.5
+# Keep the capture phase bounded, but allow one scheduler interval for a real
+# model runner's helper process to settle under loaded qualification hosts.
+# Direct cgroup.kill remains the authoritative primitive and the release gate
+# still measures post-qualification trigger-to-empty latency separately.
+MAX_CAPTURE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
