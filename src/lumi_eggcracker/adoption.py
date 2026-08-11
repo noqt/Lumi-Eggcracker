@@ -6,6 +6,7 @@ import errno
 import os
 import signal
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,7 @@ class AdoptionResult:
     kill_complete_ns: int
     empty_ns: int
     proof: EmptyProof
+    roots: tuple[ProcessIdentity, ...] = ()
 
 
 def pidfd_available() -> bool:
@@ -214,24 +216,43 @@ def _remove(value: QuarantineIdentity, root: Path) -> None:
     path.rmdir()
 
 
-def contain(
-    target: ProcessIdentity,
+def contain_many(
+    targets: set[ProcessIdentity],
     root: Path,
     event_id: str,
     *,
     proc: Path = PROC,
-    pidfd: int | None = None,
+    pidfds: Mapping[ProcessIdentity, int] | None = None,
 ) -> AdoptionResult:
-    """Stop through a match-time pidfd, then adopt and directly kill the tree."""
+    """Contain bounded evidence roots and their descendants in one quarantine.
+
+    Every root is bound to a live PID/start-time identity before the first
+    stop.  The roots may be split across cgroups; only those identities and
+    their descendants are moved into the supervisor-owned quarantine.  A
+    broad ancestor cgroup is never selected.
+    """
+    if not targets:
+        raise JsonInputError("containment target set is empty")
+    roots = tuple(sorted(targets))
     trigger_deadline = time.monotonic() + MAX_CAPTURE_SECONDS
-    descriptor = pidfd
-    captured: set[ProcessIdentity] = {target}
+    descriptors: dict[ProcessIdentity, int] = {}
+    captured: set[ProcessIdentity] = set(targets)
     fixed = 0
     quarantine: QuarantineIdentity | None = None
     try:
-        if descriptor is None:
-            descriptor = open_pidfd(target, proc=proc)
-        first_stop = stop_pidfd(target, descriptor, proc=proc)
+        supplied = dict(pidfds or {})
+        for target in roots:
+            descriptor = supplied.pop(target, None)
+            descriptors[target] = descriptor if descriptor is not None else open_pidfd(target, proc=proc)
+        if supplied:
+            for descriptor in supplied.values():
+                os.close(descriptor)
+            raise JsonInputError("pidfd map contains an unrelated identity")
+        stop_times = [stop_pidfd(target, descriptors[target], proc=proc) for target in roots]
+        first_stop = min(stop_times)
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        descriptors.clear()
         quarantine = create_quarantine(root, event_id)
         while True:
             captured = descendants(captured, proc=proc)
@@ -260,7 +281,17 @@ def contain(
         empty_ns, proof = verify_empty(quarantine, root)
         if not proof.complete:
             raise JsonInputError("quarantine cgroup did not become empty")
-        result = AdoptionResult(quarantine, tuple(sorted(captured)), fixed, first_stop, kill_started, kill_complete, empty_ns, proof)
+        result = AdoptionResult(
+            quarantine,
+            tuple(sorted(captured)),
+            fixed,
+            first_stop,
+            kill_started,
+            kill_complete,
+            empty_ns,
+            proof,
+            roots,
+        )
         _remove(quarantine, root)
         return result
     except Exception:
@@ -275,5 +306,23 @@ def contain(
             pass
         raise
     finally:
-        if descriptor is not None:
+        for descriptor in descriptors.values():
             os.close(descriptor)
+
+
+def contain(
+    target: ProcessIdentity,
+    root: Path,
+    event_id: str,
+    *,
+    proc: Path = PROC,
+    pidfd: int | None = None,
+) -> AdoptionResult:
+    """Compatibility wrapper for one-root containment."""
+    return contain_many(
+        {target},
+        root,
+        event_id,
+        proc=proc,
+        pidfds={target: pidfd} if pidfd is not None else None,
+    )

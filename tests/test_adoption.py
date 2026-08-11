@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lumi_eggcracker import adoption
-from lumi_eggcracker.adoption import children, descendants
+from lumi_eggcracker.adoption import QuarantineIdentity, children, contain_many, descendants
 from lumi_eggcracker.discovery import ProcessIdentity
 
 
@@ -52,3 +52,16 @@ class AdoptionTests(unittest.TestCase):
             root = ProcessIdentity(10, 100)
             self.assertEqual({ProcessIdentity(11, 101), ProcessIdentity(12, 102)}, children(root, proc=proc))
             self.assertEqual({root, ProcessIdentity(11, 101), ProcessIdentity(12, 102)}, descendants({root}, proc=proc))
+
+    def test_contain_many_binds_all_evidence_roots_before_kill(self) -> None:
+        first = ProcessIdentity(10, 100)
+        second = ProcessIdentity(11, 101)
+        roots = {first, second}
+        identity = QuarantineIdentity(Path("/quarantine/aa"), 1, 2, "a" * 24)
+        proof = adoption.EmptyProof(True, 1, 0, [])
+        with patch.object(adoption, "open_pidfd", side_effect=[17, 18]) as opened, patch.object(adoption, "stop_pidfd", side_effect=[20, 21]) as stopped, patch.object(adoption, "stop"), patch.object(adoption, "descendants", side_effect=[roots, roots, roots, roots]), patch.object(adoption, "_move"), patch.object(adoption, "create_quarantine", return_value=identity), patch.object(adoption, "_validate", return_value=identity.path), patch.object(adoption, "kill_path", return_value=(30, 31)), patch.object(adoption, "verify_empty", return_value=(32, proof)), patch.object(adoption, "_remove"), patch.object(adoption.os, "close") as close:
+            result = contain_many(roots, Path("/quarantine"), "a" * 24)
+        self.assertEqual(roots, set(result.roots))
+        self.assertEqual(2, opened.call_count)
+        self.assertEqual(2, stopped.call_count)
+        self.assertEqual({17, 18}, {call.args[0] for call in close.call_args_list})

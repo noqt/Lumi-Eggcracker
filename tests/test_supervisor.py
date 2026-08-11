@@ -6,10 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lumi_eggcracker.artifacts import ArtifactEvidence
 from lumi_eggcracker.containment import EmptyProof
+from lumi_eggcracker.discovery import ProcessIdentity, ProcessSnapshot
+from lumi_eggcracker.elfmarkers import RuntimeEvidence
 from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.records import RUN_SCHEMA, command_summary
-from lumi_eggcracker.supervisor import Supervisor
+from lumi_eggcracker.supervisor import Supervisor, _EvidenceCandidate
 
 
 def record() -> dict[str, object]:
@@ -105,3 +108,42 @@ class SupervisorTests(unittest.TestCase):
             item["state"] = "TERMINATED"
             supervisor._store(item)
             self.assertFalse((supervisor.names / "demo.json").exists())
+
+    def test_correlation_requires_live_same_uid_parent_or_sibling_relation(self) -> None:
+        supervisor = self._instance()
+        root = ProcessIdentity(10, 100)
+        left_identity = ProcessIdentity(11, 101)
+        right_identity = ProcessIdentity(12, 102)
+        left = ProcessSnapshot(left_identity, 2001, "/usr/bin/python3", "python3", ("python3",), (), (), (), parent=root)
+        right = ProcessSnapshot(right_identity, 2001, "/usr/bin/python3", "python3", ("python3",), (), (), (), parent=root)
+        root_snapshot = ProcessSnapshot(root, 2001, "/usr/bin/worker", "worker", ("worker",), (), (), ())
+        content = ArtifactEvidence("safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64)
+        runtime = RuntimeEvidence("pytorch-aten-pinned-cpu", "PyTorch/ATen", "BUILD_ID_PAIR", ())
+        left_candidate = _EvidenceCandidate(left, (content,), (), 1)
+        right_candidate = _EvidenceCandidate(right, (), (runtime,), 2)
+        related, boundary = supervisor._related(left_candidate, right_candidate, {root: root_snapshot, left_identity: left, right_identity: right})
+        self.assertTrue(related)
+        self.assertEqual("sibling", boundary)
+        unrelated_root = ProcessIdentity(1, 1)
+        right_unrelated = ProcessSnapshot(right_identity, 2001, "/usr/bin/python3", "python3", ("python3",), (), (), (), parent=unrelated_root)
+        root_snapshot = ProcessSnapshot(unrelated_root, 0, "/sbin/init", "init", ("init",), (), (), ())
+        related, _boundary = supervisor._related(left_candidate, _EvidenceCandidate(right_unrelated, (), (runtime,), 2), {unrelated_root: root_snapshot, left_identity: left, right_identity: right_unrelated})
+        self.assertFalse(related)
+
+    def test_unrelated_same_uid_partial_candidates_do_not_join_by_common_root(self) -> None:
+        supervisor = self._instance()
+        common = ProcessIdentity(1, 1)
+        left_id = ProcessIdentity(21, 201)
+        right_id = ProcessIdentity(22, 202)
+        left = ProcessSnapshot(left_id, 2001, "/usr/bin/python3", "python3", ("python3",), (), (), (), parent=common)
+        right = ProcessSnapshot(right_id, 2001, "/usr/bin/python3", "python3", ("python3",), (), (), (), parent=common)
+        root = ProcessSnapshot(common, 0, "/sbin/init", "init", ("init",), (), (), ())
+        content = ArtifactEvidence("safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64)
+        runtime = RuntimeEvidence("pytorch-aten-pinned-cpu", "PyTorch/ATen", "BUILD_ID_PAIR", ())
+        with patch.object(supervisor, "_owned_cgroup", return_value=None):
+            groups = supervisor._correlate(
+                [_EvidenceCandidate(left, (content,), (), 1), _EvidenceCandidate(right, (), (runtime,), 2)],
+                {common: root, left_id: left, right_id: right},
+            )
+        self.assertEqual(2, len(groups))
+        self.assertTrue(all(len(value[0]) == 1 for value in groups))

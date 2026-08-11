@@ -36,6 +36,7 @@ class ProcessSnapshot:
     map_basenames: tuple[str, ...]
     fd_entries: tuple[tuple[int, str], ...] = ()
     map_paths: tuple[str, ...] = ()
+    parent: ProcessIdentity | None = None
 
 
 def _read(path: Path, limit: int = MAX_READ) -> bytes:
@@ -159,6 +160,7 @@ def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | 
         return None
     root = proc / str(value.pid)
     try:
+        parent_pid, _start = parse_stat(_read(root / "stat", 4096).decode("utf-8"))
         exe = os.readlink(root / "exe")
         command = tuple(
             item for item in _read(root / "cmdline").decode("utf-8").split("\0") if item
@@ -174,6 +176,7 @@ def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | 
     if not command or not exe or len(exe) > 4096:
         return None
     maps = _map_paths(root / "maps")
+    parent = identity(parent_pid, proc=proc) if parent_pid > 0 else None
     return ProcessSnapshot(
         value,
         uid,
@@ -185,6 +188,7 @@ def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | 
         tuple(Path(item).name for item in maps),
         fd_entries,
         maps,
+        parent,
     )
 
 

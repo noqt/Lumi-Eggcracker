@@ -17,11 +17,12 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .adoption import AdoptionResult, contain, open_pidfd, pidfd_available
+from .adoption import AdoptionResult, contain_many, open_pidfd, pidfd_available
 from .approvals import approved, revoke
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
@@ -75,6 +76,16 @@ MAX_TERMINAL_RECORDS = 128
 DETECTION_LIMIT = 1000
 RECENT_DISCOVERY_NS = 5_000_000_000
 CONTENT_SCAN_INTERVAL = 2
+MAX_CORRELATED_PROCESSES = 64
+
+
+@dataclass(frozen=True)
+class _EvidenceCandidate:
+    snapshot: ProcessSnapshot
+    content: tuple[ArtifactEvidence, ...]
+    runtimes: tuple[RuntimeEvidence, ...]
+    first_seen_ns: int
+    fast_match: DetectionMatch | None = None
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -337,6 +348,97 @@ class Supervisor:
                 return True
         return False
 
+    def _owned_cgroup(self, snapshot: ProcessSnapshot) -> str | None:
+        """Return one exact supervisor-owned child cgroup, never an ancestor."""
+        prefix = "/system.slice/lumi-eggcracker.service/"
+        for line in snapshot.cgroups:
+            if not line.startswith("0::"):
+                continue
+            value = line[3:]
+            if not value.startswith(prefix):
+                continue
+            relative = value.removeprefix(prefix)
+            if not relative or relative.startswith("quarantine/"):
+                continue
+            path = Path("/sys/fs/cgroup").joinpath(*value.lstrip("/").split("/"))
+            if (
+                path.is_symlink()
+                or not path.is_dir()
+                or not all((path / item).is_file() for item in ("cgroup.events", "cgroup.procs", "cgroup.kill"))
+            ):
+                continue
+            return value
+        return None
+
+    def _related(
+        self,
+        left: _EvidenceCandidate,
+        right: _EvidenceCandidate,
+        snapshots: dict[ProcessIdentity, ProcessSnapshot],
+    ) -> tuple[bool, str]:
+        """Establish a live bounded relation between two evidence roles."""
+        if left.snapshot.uid != self.policy["workload_uid"] or right.snapshot.uid != self.policy["workload_uid"]:
+            return False, ""
+        left_cgroup = self._owned_cgroup(left.snapshot)
+        right_cgroup = self._owned_cgroup(right.snapshot)
+        if left_cgroup is not None and left_cgroup == right_cgroup:
+            return True, "owned-cgroup"
+        left_parent = left.snapshot.parent
+        right_parent = right.snapshot.parent
+        if left_parent == right.snapshot.identity or right_parent == left.snapshot.identity:
+            return True, "parent-child"
+        if left_parent is not None and left_parent == right_parent:
+            parent = snapshots.get(left_parent)
+            if parent is not None and parent.uid == self.policy["workload_uid"]:
+                return True, "sibling"
+        return False, ""
+
+    def _correlate(
+        self,
+        candidates: list[_EvidenceCandidate],
+        snapshots: dict[ProcessIdentity, ProcessSnapshot],
+    ) -> list[tuple[tuple[_EvidenceCandidate, ...], str]]:
+        """Union only small evidence sets joined by an exact live relation."""
+        if not candidates:
+            return []
+        parent = list(range(len(candidates)))
+        boundaries: dict[tuple[int, int], str] = {}
+
+        def find(value: int) -> int:
+            while parent[value] != value:
+                parent[value] = parent[parent[value]]
+                value = parent[value]
+            return value
+
+        def union(left: int, right: int, boundary: str) -> None:
+            one, two = find(left), find(right)
+            if one == two:
+                return
+            parent[two] = one
+            boundaries[(min(one, two), max(one, two))] = boundary
+
+        for left in range(len(candidates)):
+            for right in range(left + 1, len(candidates)):
+                related, boundary = self._related(candidates[left], candidates[right], snapshots)
+                if related:
+                    union(left, right, boundary)
+        groups: dict[int, list[int]] = {}
+        for index in range(len(candidates)):
+            groups.setdefault(find(index), []).append(index)
+        result: list[tuple[tuple[_EvidenceCandidate, ...], str]] = []
+        for indexes in groups.values():
+            if len(indexes) > MAX_CORRELATED_PROCESSES:
+                continue
+            values = tuple(candidates[index] for index in indexes)
+            boundary_types = {
+                value
+                for (left, right), value in boundaries.items()
+                if left in indexes or right in indexes
+            }
+            boundary = next(iter(boundary_types), "same-process") if len(values) > 1 else "same-process"
+            result.append((values, boundary))
+        return result
+
     def _cached_executable_digest(self, snapshot: ProcessSnapshot) -> str:
         path = Path(snapshot.exe_path)
         metadata = path.stat(follow_symlinks=False)
@@ -373,6 +475,8 @@ class Supervisor:
         executable_sha256: str,
         result: AdoptionResult | None,
         error: str | None,
+        correlated: tuple[_EvidenceCandidate, ...] = (),
+        boundary_type: str = "same-process",
     ) -> dict[str, Any]:
         trigger_kind = (
             "UNAPPROVED_SAFETENSORS_PYTORCH"
@@ -415,6 +519,35 @@ class Supervisor:
             "source_commit": self.policy["source_commit"],
             "trigger": {"kind": trigger_kind},
             "version": __version__,
+        }
+        evidence_roles: list[dict[str, Any]] = []
+        for candidate in correlated or (
+            _EvidenceCandidate(snapshot, content, runtimes, first_seen_ns, detected),
+        ):
+            roles: list[str] = []
+            if candidate.content:
+                roles.append("MODEL_CONTENT")
+            if candidate.runtimes:
+                roles.append("MODEL_RUNTIME")
+            evidence_roles.append(
+                {
+                    "pid": candidate.snapshot.identity.pid,
+                    "start_time": candidate.snapshot.identity.start_time,
+                    "uid": candidate.snapshot.uid,
+                    "parent": (
+                        {
+                            "pid": candidate.snapshot.parent.pid,
+                            "start_time": candidate.snapshot.parent.start_time,
+                        }
+                        if candidate.snapshot.parent is not None
+                        else None
+                    ),
+                    "roles": roles,
+                }
+            )
+        value["correlation"] = {
+            "boundary": boundary_type,
+            "evidence_bearing": evidence_roles,
         }
         if result is None:
             value["result"] = "CONTAINMENT_FAILED"
@@ -461,14 +594,24 @@ class Supervisor:
         executable_sha256: str,
         event_id: str,
         pidfd: int | None = None,
+        targets: set[ProcessIdentity] | None = None,
+        correlated: tuple[_EvidenceCandidate, ...] = (),
+        boundary_type: str = "same-process",
     ) -> None:
         containment_started = False
+        managed_targets = targets or {snapshot.identity}
         try:
             if self.quarantine_root is None:
                 raise JsonInputError("quarantine root is unavailable")
             self.operations.append("pidfd.stop")
             containment_started = True
-            result = contain(snapshot.identity, self.quarantine_root, event_id, pidfd=pidfd)
+            target_set = targets or {snapshot.identity}
+            result = contain_many(
+                target_set,
+                self.quarantine_root,
+                event_id,
+                pidfds={snapshot.identity: pidfd} if pidfd is not None else None,
+            )
             self.operations.append("cgroup.kill")
             receipt = self._detection_receipt(
                 event_id=event_id,
@@ -481,6 +624,8 @@ class Supervisor:
                 executable_sha256=executable_sha256,
                 result=result,
                 error=None,
+                correlated=correlated,
+                boundary_type=boundary_type,
             )
             receipt["receipt_written_utc"] = (
                 dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
@@ -498,6 +643,8 @@ class Supervisor:
                 executable_sha256=executable_sha256,
                 result=None,
                 error=str(error),
+                correlated=correlated,
+                boundary_type=boundary_type,
             )
             receipt["receipt_written_utc"] = (
                 dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
@@ -512,9 +659,10 @@ class Supervisor:
             if pidfd is not None and not containment_started:
                 os.close(pidfd)
             with self.discovery_lock:
-                self.discovery_active.discard(snapshot.identity)
+                self.discovery_active.difference_update(managed_targets)
                 now = time.monotonic_ns()
-                self.discovery_done[snapshot.identity] = now
+                for identity in managed_targets:
+                    self.discovery_done[identity] = now
                 self.discovery_done = {
                     identity: completed
                     for identity, completed in self.discovery_done.items()
@@ -528,36 +676,76 @@ class Supervisor:
             approvals = load_approvals(self.approvals)
         except JsonInputError:
             approvals = []  # A corrupt approval never authorizes a matching workload.
-        for snapshot in scan(
+        snapshots = scan(
             exclude=lambda item: item.identity.pid == os.getpid() or self._managed(item)
-        ):
-            detected = match(self.catalogue, snapshot)
+        )
+        snapshot_map = {item.identity: item for item in snapshots}
+        candidates: list[_EvidenceCandidate] = []
+        for snapshot in snapshots:
+            fast_match = match(self.catalogue, snapshot)
             content: tuple[ArtifactEvidence, ...] = ()
             runtimes: tuple[RuntimeEvidence, ...] = ()
             first_seen_ns = time.monotonic_ns()
-            if detected is None and content_due:
+            if content_due:
                 content = artifacts_from_snapshot(snapshot)
-                runtimes = runtime_from_snapshot(snapshot) if content else ()
+                # Runtime evidence is intentionally collected independently so
+                # it can be correlated with content held by a bounded peer.
+                runtimes = runtime_from_snapshot(snapshot)
                 supplied = {
                     "MODEL_CONTENT": {item.evidence_id for item in content},
                     "MODEL_RUNTIME": {item.evidence_id for item in runtimes},
                 }
-                observation = self.observations.observe(
-                    snapshot.identity, set().union(*supplied.values())
-                )
-                first_seen_ns = observation.first_seen_ns
-                # Both groups must be valid in this snapshot. Observations only
-                # provide bounded timing, never stale evidence joining.
-                detected = match(self.catalogue, snapshot, evidence=supplied)
+                if content or runtimes:
+                    observation = self.observations.observe(
+                        snapshot.identity, set().union(*supplied.values())
+                    )
+                    first_seen_ns = observation.first_seen_ns
+            if fast_match is None and not content and not runtimes:
+                continue
+            candidates.append(
+                _EvidenceCandidate(snapshot, content, runtimes, first_seen_ns, fast_match)
+            )
+
+        content_groups = self._correlate(
+            [item for item in candidates if (item.content or item.runtimes) and item.fast_match is None], snapshot_map
+        )
+        groups = content_groups + [
+            ((item,), "same-process")
+            for item in candidates
+            if item.fast_match is not None
+        ]
+        for group, boundary_type in groups:
+            trigger_candidate = group[0]
+            aggregate_content: list[ArtifactEvidence] = []
+            aggregate_runtimes: list[RuntimeEvidence] = []
+            for candidate in group:
+                for evidence in candidate.content:
+                    if evidence not in aggregate_content:
+                        aggregate_content.append(evidence)
+                for evidence in candidate.runtimes:
+                    if evidence not in aggregate_runtimes:
+                        aggregate_runtimes.append(evidence)
+            supplied = {
+                "MODEL_CONTENT": {item.evidence_id for item in aggregate_content},
+                "MODEL_RUNTIME": {item.evidence_id for item in aggregate_runtimes},
+            }
+            detected = trigger_candidate.fast_match or match(
+                self.catalogue, trigger_candidate.snapshot, evidence=supplied
+            )
             if detected is None:
                 continue
             qualified_ns = time.monotonic_ns()
-            try:
-                executable_sha256 = self._cached_executable_digest(snapshot)
-            except (JsonInputError, OSError):
+            unapproved: list[_EvidenceCandidate] = []
+            for candidate in group:
+                try:
+                    executable_sha256 = self._cached_executable_digest(candidate.snapshot)
+                except (JsonInputError, OSError):
+                    continue
+                if not approved(candidate.snapshot, executable_sha256, approvals):
+                    unapproved.append(candidate)
+            if not unapproved:
                 continue
-            if approved(snapshot, executable_sha256, approvals):
-                continue
+            target_set = {candidate.snapshot.identity for candidate in group}
             with self.discovery_lock:
                 now = time.monotonic_ns()
                 self.discovery_done = {
@@ -565,30 +753,38 @@ class Supervisor:
                     for identity, completed in self.discovery_done.items()
                     if now - completed <= RECENT_DISCOVERY_NS
                 }
-                if snapshot.identity in self.discovery_active or snapshot.identity in self.discovery_done:
+                if target_set & (self.discovery_active | set(self.discovery_done)):
                     continue
-                self.discovery_active.add(snapshot.identity)
+                self.discovery_active.update(target_set)
             event_id = os.urandom(12).hex()
+            snapshot = unapproved[0].snapshot
             try:
-                # Bind the identity before handing enforcement to a worker
-                # thread. Reopening /proc later leaves a race in which a
-                # forked or reparented process can vanish before first stop.
+                # Bind one evidence identity before handing enforcement to a
+                # worker; contain_many binds all remaining roots immediately.
                 pidfd = open_pidfd(snapshot.identity)
             except (JsonInputError, OSError, ProcessLookupError):
                 with self.discovery_lock:
-                    self.discovery_active.discard(snapshot.identity)
+                    self.discovery_active.difference_update(target_set)
                 continue
+            executable_sha256 = self._cached_executable_digest(snapshot)
+            first_seen_ns = min(candidate.first_seen_ns for candidate in group)
+            kwargs = {
+                "targets": target_set,
+                "correlated": tuple(group),
+                "boundary_type": boundary_type,
+            }
             if synchronous:
                 self._enforce_discovery(
                     snapshot,
                     detected,
-                    content,
-                    runtimes,
+                    tuple(aggregate_content),
+                    tuple(aggregate_runtimes),
                     first_seen_ns,
                     qualified_ns,
                     executable_sha256,
                     event_id,
                     pidfd,
+                    **kwargs,
                 )
             else:
                 try:
@@ -597,20 +793,21 @@ class Supervisor:
                         args=(
                             snapshot,
                             detected,
-                            content,
-                            runtimes,
+                            tuple(aggregate_content),
+                            tuple(aggregate_runtimes),
                             first_seen_ns,
                             qualified_ns,
                             executable_sha256,
                             event_id,
                             pidfd,
                         ),
+                        kwargs=kwargs,
                         daemon=True,
                     ).start()
                 except RuntimeError:
                     os.close(pidfd)
                     with self.discovery_lock:
-                        self.discovery_active.discard(snapshot.identity)
+                        self.discovery_active.difference_update(target_set)
                     raise
 
     def _discovery_loop(self) -> None:
