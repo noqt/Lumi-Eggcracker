@@ -194,6 +194,14 @@ def main() -> int:
                     "100",
                 ],
             ),
+            (
+                "overhead-benchmark.json",
+                [
+                    "benchmark_overhead.py",
+                    "--policy",
+                    str(POLICY),
+                ],
+            ),
         )
         for filename, arguments in jobs:
             run(
@@ -215,7 +223,7 @@ def main() -> int:
         (evidence / "validation.json").write_text(
             json.dumps(summary, sort_keys=True) + "\n", encoding="utf-8"
         )
-        report = "# Lumi Eggcracker local validation\n\nPASS: all precommitted 0.3.1 regression and 0.4 Safetensors/PyTorch qualification matrices completed on the installed instance.\n"
+        report = "# Lumi Eggcracker local validation\n\nPASS: all precommitted 0.3.1 regression, 0.4 Safetensors/PyTorch qualification matrices, and the host-overhead benchmark completed on the installed instance.\n"
         (evidence / "report.md").write_text(report, encoding="utf-8")
         sums = "".join(
             f"{digest(path)}  {path.name}\n"

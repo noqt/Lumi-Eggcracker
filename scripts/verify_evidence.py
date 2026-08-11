@@ -18,6 +18,7 @@ REQUIRED = {
     "content-adversarial-matrix.json",
     "autonomous-regression.json",
     "selected-workload-regression.json",
+    "overhead-benchmark.json",
     "validation.json",
     "SHA256SUMS",
     "report.md",
