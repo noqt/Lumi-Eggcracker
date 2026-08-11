@@ -1,6 +1,6 @@
 # Lumi Eggcracker 0.4.0
 
-0.4.0 adds aggressive `content.safetensors-pytorch` recognition to the qualified 0.3.1 architecture. A valid bounded Safetensors header and the exact pinned CPU PyTorch/ATen ELF build-ID pair must coexist in one process snapshot; an unapproved complete match is immediately contained without requiring proof of a forward pass. The existing three-socket approval boundaries, watchdog and cgroup.kill containment remain unchanged.
+0.4.0 adds aggressive `content.safetensors-pytorch` recognition to the qualified 0.3.1 control plane. A valid bounded Safetensors header and the exact pinned CPU PyTorch/ATen ELF build-ID pair may appear in one process or across a bounded related workload: the same unprivileged UID with a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup. Unrelated same-UID or common-init processes are not joined. There is no guarantee for evidence that escaped before observation, unobserved processes, or containerised or remote workloads. An unapproved complete match is immediately contained without requiring proof of a forward pass. The three-socket approval boundaries, watchdog and direct cgroup.kill containment remain qualified release properties.
 
 The release also applies bounded memory, CPU, I/O, task and descriptor limits to the supervisor, watchdog and selected workloads. Complete unapproved matches continue to use pidfd stop/capture and direct `cgroup.kill` as the authoritative complete-tree kill primitive.
 

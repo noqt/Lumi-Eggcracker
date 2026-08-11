@@ -11,7 +11,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 - continuously scans host processes and performs a startup scan before accepting control commands;
 - detects published local-runtime profiles including llama.cpp, Ollama, vLLM, Text Generation Inference, LocalAI, llamafile and selected agent CLIs;
 - recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a structurally valid GGUF v2/v3 artifact and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
-- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge/ATen ELF build-ID pair coexist in one process snapshot;
+- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge/ATen ELF build-ID pair appear in one process or across a bounded related workload (the same unprivileged UID with a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
 - lets the configured operator approve one exact executable, UID and invocation before it is run;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
@@ -19,7 +19,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 
 ## What it does not do
 
-Eggcracker does not identify every possible AI implementation. Content recognition currently excludes stripped or bespoke runtimes without the qualified markers, custom/encrypted model formats, containerised and remote API-only workloads. It does not claim general malware or intrusion detection. It does not use a behavioural model, isolate host networking, credentials or filesystems, or replace EDR.
+Eggcracker does not identify every possible AI implementation. Content recognition currently excludes stripped or bespoke runtimes without the qualified markers, custom/encrypted model formats, containerised and remote API-only workloads. It does not guarantee detection of evidence that escaped before observation, an unobserved process, or a workload hidden behind a container or remote service. It does not claim general malware or intrusion detection. It does not use a behavioural model, isolate host networking, credentials or filesystems, or replace EDR.
 
 A successful receipt proves the captured quarantine cgroup is empty. It does not prove that a process which escaped before detection never existed.
 
