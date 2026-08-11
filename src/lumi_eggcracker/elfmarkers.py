@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import struct
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -38,6 +39,20 @@ class RuntimeEvidence:
 
     def public(self) -> dict[str, object]:
         return {"family": self.family, "method": self.method}
+
+
+RuntimeCacheKey = tuple[int, int, int, int, int]
+RuntimeCache = MutableMapping[RuntimeCacheKey, tuple[RuntimeEvidence, ...]]
+
+
+def _cache_key(metadata: os.stat_result) -> RuntimeCacheKey:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _read(descriptor: int, offset: int, count: int, *, allow_distant_offset: bool = False) -> bytes:
@@ -234,7 +249,20 @@ def inspect_pytorch_path(path: Path) -> RuntimeEvidence | None:
         os.close(descriptor)
 
 
-def from_snapshot(snapshot: object) -> tuple[RuntimeEvidence, ...]:
+def _inspect_candidate(path: Path) -> tuple[RuntimeEvidence, ...]:
+    values: list[RuntimeEvidence] = []
+    evidence = inspect_path(path)
+    if evidence is not None:
+        values.append(evidence)
+    pytorch = inspect_pytorch_path(path)
+    if pytorch is not None and pytorch not in values:
+        values.append(pytorch)
+    return tuple(values)
+
+
+def from_snapshot(
+    snapshot: object, *, cache: RuntimeCache | None = None
+) -> tuple[RuntimeEvidence, ...]:
     """Inspect executable and mapped regular files; their names are ignored."""
     # ``/proc/<pid>/maps`` repeats each shared object once per mapped segment.
     # Deduplicate before applying the bounded candidate cap; otherwise a busy
@@ -250,17 +278,26 @@ def from_snapshot(snapshot: object) -> tuple[RuntimeEvidence, ...]:
     bridge = False
     aten = False
     for raw in candidates[:MAX_RUNTIME_CANDIDATES]:
-        evidence = inspect_path(Path(raw)) if isinstance(raw, str) and raw.startswith("/") else None
-        if evidence is not None and evidence not in result:
-            result.append(evidence)
-        pytorch = (
-            inspect_pytorch_path(Path(raw))
-            if isinstance(raw, str) and raw.startswith("/")
-            else None
-        )
-        if pytorch is not None:
-            bridge |= pytorch.evidence_id == "pytorch-bridge-pinned-cpu"
-            aten |= pytorch.evidence_id == "pytorch-aten-pinned-cpu"
+        if not isinstance(raw, str) or not raw.startswith("/"):
+            continue
+        path = Path(raw)
+        if cache is None:
+            values = _inspect_candidate(path)
+        else:
+            try:
+                key = _cache_key(path.stat())
+            except OSError:
+                continue
+            if key in cache:
+                values = cache[key]
+            else:
+                values = _inspect_candidate(path)
+                cache[key] = values
+        for evidence in values:
+            if evidence not in result:
+                result.append(evidence)
+            bridge |= evidence.evidence_id == "pytorch-bridge-pinned-cpu"
+            aten |= evidence.evidence_id == "pytorch-aten-pinned-cpu"
     if bridge and aten:
         result.append(RuntimeEvidence("pytorch-aten-pinned-cpu", "PyTorch/ATen", "BUILD_ID_PAIR", ()))
     return tuple(result)

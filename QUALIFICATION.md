@@ -7,3 +7,16 @@ Mandatory autonomous gates are: 100/100 unapproved fixture discoveries and compl
 The self-protection gates additionally require zero workload connections to each query, operator and administrative socket; zero workload replacement launches; root-only approval administration; restart recovery; a watchdog lost-heartbeat containment; a watchdog installed-file-digest containment; bounded supervisor/watchdog resources; and clean removal of both units and runtime directories.
 
 The candidate must also run five renamed-runner, extensionless-model unapproved/approved/unapproved real llama.cpp/Qwen sequences and five real pinned PyTorch/Safetensors sequences, 100 complete-profile kills per family, 100 canary survivals, 50 exact disguised approvals and at least 300 benign or partial model-handling launches with zero kills. It must cleanly install with discovery armed and completely uninstall. Evidence is specific to the tested commit and host; it does not establish universal AI identification or inference detection. Only the two content profiles listed in the README are active release claims; other catalogue ideas remain unqualified research work.
+
+The host-overhead gate is measured with the bundled root-only benchmark. It
+creates only sleeping disposable children and records scan duration, CPU time,
+read counters (including kernel read characters), resident memory and context
+switches at approximately 50, 200 and 1,000 host processes. The resulting JSON
+is release evidence; it is not a
+claim that every host will have the same cost.
+
+```sh
+sudo python3 scripts/benchmark_overhead.py \
+  --policy /etc/lumi-eggcracker/policy.json \
+  --output ./overhead-benchmark.json
+```

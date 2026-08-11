@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import struct
 import tempfile
 import unittest
@@ -122,6 +123,23 @@ class ElfMarkerTests(unittest.TestCase):
         ):
             pair = from_snapshot(sample)
         self.assertIn("pytorch-aten-pinned-cpu", {item.evidence_id for item in pair})
+
+    @unittest.skipUnless(os.name == "posix", "stable absolute paths are Linux-only")
+    def test_runtime_cache_reuses_stable_inode_result(self) -> None:
+        evidence = type("Evidence", (), {"evidence_id": "cached-runtime"})()
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "runtime"
+            path.write_bytes(b"runtime")
+            sample = type("Snapshot", (), {"exe_path": str(path), "map_paths": (str(path),)})()
+            cache: dict[tuple[int, int, int, int, int], tuple[object, ...]] = {}
+            with patch(
+                "lumi_eggcracker.elfmarkers._inspect_candidate",
+                return_value=(evidence,),
+            ) as inspect:
+                first = from_snapshot(sample, cache=cache)
+                second = from_snapshot(sample, cache=cache)
+            self.assertEqual(first, second)
+            inspect.assert_called_once_with(path)
 
     def test_large_shared_object_build_id_note_stays_bounded(self) -> None:
         identifier = bytes.fromhex("33" * 20)

@@ -111,4 +111,15 @@ sudo python3 scripts/self_validate.py \
 
 It runs the real-AI approval smoke, renamed content matrix, benign model-handling matrix, descendants/startup/restart checks, autonomous regression and selected-workload security regression.
 
+Measure host cost separately in the disposable qualification VM:
+
+```sh
+sudo python3 scripts/benchmark_overhead.py \
+  --policy /etc/lumi-eggcracker/policy.json \
+  --output ./overhead-benchmark.json
+```
+
+This records scan duration, CPU time, read counters, resident memory and
+context switches at approximately 50, 200 and 1,000 host processes.
+
 See [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md), and [QUALIFICATION.md](QUALIFICATION.md) before using this engineering preview.

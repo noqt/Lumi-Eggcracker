@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import struct
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +62,20 @@ class ArtifactEvidence:
             "header_sha256": self.header_sha256,
             "size_bucket": _size_bucket(self.size),
         }
+
+
+ArtifactCacheKey = tuple[int, int, int, int, int]
+ArtifactCache = MutableMapping[ArtifactCacheKey, ArtifactEvidence | None]
+
+
+def _cache_key(metadata: os.stat_result) -> ArtifactCacheKey:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _size_bucket(size: int) -> str:
@@ -273,7 +288,10 @@ def _looks_like_artifact(path: Path) -> bool:
 
 
 def from_process_fds(
-    snapshot: object, *, proc: Path = Path("/proc")
+    snapshot: object,
+    *,
+    proc: Path = Path("/proc"),
+    cache: ArtifactCache | None = None,
 ) -> tuple[ArtifactEvidence, ...]:
     """Inspect a bounded set of currently open target descriptors.
 
@@ -296,6 +314,12 @@ def from_process_fds(
         except OSError:
             continue
         try:
+            key = _cache_key(os.fstat(descriptor))
+            if cache is not None and key in cache:
+                evidence = cache[key]
+                if evidence is not None and evidence not in result:
+                    result.append(evidence)
+                continue
             evidence = None
             for validator in (validate_gguf_fd, validate_safetensors_fd):
                 try:
@@ -303,6 +327,8 @@ def from_process_fds(
                     break
                 except (JsonInputError, OSError):
                     continue
+            if cache is not None:
+                cache[key] = evidence
             if evidence is None:
                 continue
             header_bytes = min(os.fstat(descriptor).st_size, MAX_ARTIFACT_BYTES)
@@ -318,14 +344,29 @@ def from_process_fds(
     return tuple(result)
 
 
-def from_snapshot(snapshot: object, *, proc: Path = Path("/proc")) -> tuple[ArtifactEvidence, ...]:
+def from_snapshot(
+    snapshot: object,
+    *,
+    proc: Path = Path("/proc"),
+    cache: ArtifactCache | None = None,
+) -> tuple[ArtifactEvidence, ...]:
     """Collect bounded GGUF evidence from open descriptors and mapped files."""
-    result = list(from_process_fds(snapshot, proc=proc))
+    result = list(from_process_fds(snapshot, proc=proc, cache=cache))
     for raw in tuple(getattr(snapshot, "map_paths", ())):
         if not isinstance(raw, str) or not raw.startswith("/"):
             continue
         path = Path(raw)
-        evidence = validate_path(path) if _looks_like_artifact(path) else None
+        try:
+            metadata = path.stat()
+            key = _cache_key(metadata)
+        except OSError:
+            continue
+        if cache is not None and key in cache:
+            evidence = cache[key]
+        else:
+            evidence = validate_path(path) if _looks_like_artifact(path) else None
+            if cache is not None:
+                cache[key] = evidence
         if evidence is not None and evidence not in result:
             result.append(evidence)
             if len(result) >= MAX_ARTIFACTS:

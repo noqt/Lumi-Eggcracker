@@ -203,13 +203,25 @@ class Supervisor:
         self.discovery_active: set[ProcessIdentity] = set()
         self.discovery_done: dict[ProcessIdentity, int] = {}
         self.discovery_thread: threading.Thread | None = None
+        self.active_cgroups: set[str] = set()
         self.digest_cache: dict[tuple[int, int, int, int, int], str] = {}
         self.executable_metadata: dict[ProcessIdentity, tuple[int, int]] = {}
+        # Deep content/runtime inspection is keyed by stable inode metadata so
+        # shared libraries and model files are parsed once per scan window,
+        # rather than once for every process that maps them.  Entries are
+        # bounded and naturally invalidated when a file is replaced or
+        # modified.
+        self.artifact_cache: dict[tuple[int, int, int, int, int], ArtifactEvidence | None] = {}
+        self.runtime_cache: dict[
+            tuple[int, int, int, int, int], tuple[RuntimeEvidence, ...]
+        ] = {}
         self.enforcement_slots = threading.BoundedSemaphore(MAX_ENFORCEMENT_TASKS)
         self.observations = ObservationStore()
         self.content_scan_tick = 0
         self.last_scan_completed_ns = 0
+        self.last_scan_duration_ns = 0
         self.discovery_failures = 0
+        self.enforcement_saturation_until_ns = 0
         self.heartbeat_sequence = 0
         self.last_heartbeat_sent = 0.0
         self.heartbeat_thread: threading.Thread | None = None
@@ -249,6 +261,12 @@ class Supervisor:
 
     def _store(self, record: dict[str, Any]) -> None:
         record = validate_run(record)
+        if not hasattr(self, "active_cgroups"):
+            self.active_cgroups = set()
+        if record["state"] in ACTIVE_STATES:
+            self.active_cgroups.add(record["cgroup"])
+        else:
+            self.active_cgroups.discard(record["cgroup"])
         self.operations.append("durable-state")
         write_atomic(run_path(self.runs, record["run_id"]), record)
         pointer = name_path(self.names, record["name"])
@@ -348,16 +366,12 @@ class Supervisor:
         return root
 
     def _managed(self, snapshot: ProcessSnapshot) -> bool:
-        for path in self.runs.glob("*.json"):
-            try:
-                record = load_run(self.runs, path.stem)
-            except JsonInputError:
-                continue
-            if record["state"] in ACTIVE_STATES and any(
-                line.endswith(":" + record["cgroup"]) for line in snapshot.cgroups
-            ):
-                return True
-        return False
+        active_cgroups = getattr(self, "active_cgroups", None)
+        if active_cgroups is None:
+            return False
+        return any(
+            line.startswith("0::") and line[3:] in active_cgroups for line in snapshot.cgroups
+        )
 
     def _owned_cgroup(self, snapshot: ProcessSnapshot) -> str | None:
         """Return one exact supervisor-owned child cgroup, never an ancestor."""
@@ -475,6 +489,11 @@ class Supervisor:
                 self.digest_cache.pop(next(iter(self.digest_cache)))
         self.executable_metadata[snapshot.identity] = (metadata.st_dev, metadata.st_ino)
         return value
+
+    def _trim_evidence_caches(self) -> None:
+        for cache in (self.artifact_cache, self.runtime_cache):
+            while len(cache) > 2048:
+                cache.pop(next(iter(cache)))
 
     def _detection_path(self, event_id: str) -> Path:
         if not RUN_ID.fullmatch(event_id):
@@ -730,10 +749,10 @@ class Supervisor:
             runtimes: tuple[RuntimeEvidence, ...] = ()
             first_seen_ns = time.monotonic_ns()
             if content_due:
-                content = artifacts_from_snapshot(snapshot)
+                content = artifacts_from_snapshot(snapshot, cache=self.artifact_cache)
                 # Runtime evidence is intentionally collected independently so
                 # it can be correlated with content held by a bounded peer.
-                runtimes = runtime_from_snapshot(snapshot)
+                runtimes = runtime_from_snapshot(snapshot, cache=self.runtime_cache)
                 supplied = {
                     "MODEL_CONTENT": {item.evidence_id for item in content},
                     "MODEL_RUNTIME": {item.evidence_id for item in runtimes},
@@ -856,6 +875,7 @@ class Supervisor:
                     # Admission is bounded.  If the queue is saturated, keep
                     # containment decisive by running this task inline rather
                     # than allowing the detector to create unbounded threads.
+                    self.enforcement_saturation_until_ns = time.monotonic_ns() + 1_000_000_000
                     self._enforce_discovery(*task_args, **kwargs)
                     continue
 
@@ -873,14 +893,18 @@ class Supervisor:
                 except RuntimeError:
                     self.enforcement_slots.release()
                     self._enforce_discovery(*task_args, **kwargs)
+        self._trim_evidence_caches()
 
     def _discovery_loop(self) -> None:
         while not self.stop_event.is_set():
+            started = time.monotonic_ns()
             try:
                 self._scan_once()
-                self.last_scan_completed_ns = time.monotonic_ns()
+                completed = time.monotonic_ns()
+                self.last_scan_completed_ns = completed
+                self.last_scan_duration_ns = completed - started
                 self.discovery_failures = 0
-            except (JsonInputError, OSError) as error:
+            except (JsonInputError, OSError, RuntimeError) as error:
                 self.discovery_failures += 1
                 print(f"eggcracker discovery scan failed: {error}", file=sys.stderr, flush=True)
             self.stop_event.wait(0.1)
@@ -896,6 +920,7 @@ class Supervisor:
             or self.last_scan_completed_ns <= 0
             or time.monotonic_ns() - self.last_scan_completed_ns > SCAN_HEALTH_TIMEOUT_NS
             or self.discovery_failures >= MAX_DISCOVERY_FAILURES
+            or time.monotonic_ns() < self.enforcement_saturation_until_ns
         ):
             return
         self.heartbeat_sequence += 1
@@ -1084,13 +1109,7 @@ class Supervisor:
             gate.unlink(missing_ok=True)
 
     def _active_exists(self) -> bool:
-        for path in self.runs.glob("*.json"):
-            try:
-                if load_run(self.runs, path.stem)["state"] in ACTIVE_STATES:
-                    return True
-            except JsonInputError:
-                raise JsonInputError("run record is invalid")
-        return False
+        return bool(getattr(self, "active_cgroups", set()))
 
     def _start(self, args: dict[str, Any]) -> dict[str, Any]:
         if set(args) != {"argv", "cpu_quota_percent", "max_memory_mib", "max_pids", "name"}:
@@ -1237,6 +1256,9 @@ class Supervisor:
 
     def _recover(self) -> None:
         recorded_ids: set[str] = set()
+        if not hasattr(self, "active_cgroups"):
+            self.active_cgroups = set()
+        self.active_cgroups.clear()
         for path in self.runs.glob("*.json"):
             try:
                 record = load_run(self.runs, path.stem)
@@ -1244,6 +1266,7 @@ class Supervisor:
                 continue
             recorded_ids.add(record["run_id"])
             if record["state"] in ACTIVE_STATES:
+                self.active_cgroups.add(record["cgroup"])
                 try:
                     self._contain(record, "SUPERVISOR_RESTART_FAIL_CLOSED")
                 except JsonInputError as error:
@@ -1295,6 +1318,12 @@ class Supervisor:
                 "backend": "root-supervisor",
                 "catalogue": public_catalogue(self.catalogue),
                 "cgroup_v2": available,
+                "discovery": {
+                    "consecutive_failures": self.discovery_failures,
+                    "last_scan_duration_ms": self.last_scan_duration_ns / 1_000_000,
+                    "last_scan_completed": self.last_scan_completed_ns > 0,
+                    "scan_health_timeout_ms": SCAN_HEALTH_TIMEOUT_NS / 1_000_000,
+                },
                 "pidfd": pidfd_available(),
                 "result": "PASS" if ready else "UNSUPPORTED",
                 "version": __version__,

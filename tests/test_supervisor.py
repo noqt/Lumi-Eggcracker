@@ -46,6 +46,22 @@ class SupervisorTests(unittest.TestCase):
             supervisor.discovery_done[identity] = 1
             self.assertIn(identity, supervisor.discovery_done)
 
+    def test_managed_processes_use_reconciled_in_memory_cgroups(self) -> None:
+        supervisor = self._instance()
+        cgroup = "/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service"
+        supervisor.active_cgroups = {cgroup}
+        snapshot = ProcessSnapshot(
+            ProcessIdentity(10, 100),
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + cgroup,),
+            (),
+            (),
+        )
+        self.assertTrue(supervisor._managed(snapshot))
+
     def test_heartbeat_stops_when_no_scan_completed_within_health_bound(self) -> None:
         supervisor = self._instance()
         supervisor.discovery_thread = type(

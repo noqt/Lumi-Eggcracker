@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lumi_eggcracker.artifacts import validate_path
+from lumi_eggcracker.artifacts import from_snapshot, validate_path
 
 
 def gguf(*, version: int = 3, tensors: int = 1, metadata: int = 0, padding: int = 64) -> bytes:
@@ -143,3 +143,19 @@ class ArtifactTests(unittest.TestCase):
             self.assertIsNone(validate_path(trailing))
             self.assertIsNone(validate_path(overlap))
             self.assertIsNotNone(validate_path(out_of_order))
+
+    @unittest.skipUnless(os.name == "posix", "stable absolute paths are Linux-only")
+    def test_artifact_cache_reuses_stable_inode_result(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "model"
+            path.write_bytes(gguf())
+            sample = type(
+                "Snapshot",
+                (),
+                {"identity": object(), "fd_entries": (), "map_paths": (str(path),)},
+            )()
+            cache: dict[tuple[int, int, int, int, int], object] = {}
+            first = from_snapshot(sample, cache=cache)
+            second = from_snapshot(sample, cache=cache)
+            self.assertEqual(first, second)
+            self.assertEqual(1, len(cache))
