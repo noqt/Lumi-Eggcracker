@@ -1,4 +1,4 @@
-"""Strict deterministic fast-name and content-evidence detector catalogue."""
+"""Strict deterministic content-evidence detector catalogue."""
 
 from __future__ import annotations
 

@@ -109,7 +109,7 @@ sudo python3 scripts/self_validate.py \
   --evidence-dir /opt/lumi-eggcracker-evidence
 ```
 
-It runs the real-AI approval smoke, renamed content matrix, benign model-handling matrix, descendants/startup/restart checks, autonomous regression and selected-workload security regression.
+It runs the real-AI approval smoke, renamed content matrix, benign model-handling matrix, descendants/startup/restart checks, autonomous regression, selected-workload security regression, and the host-overhead benchmark. The resulting `overhead-benchmark.json` is included in the checksum-verified evidence pack.
 
 Measure host cost separately in the disposable qualification VM:
 
