@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 from pathlib import Path
 
 REQUIRED = {
-    "environment.json", "catalogue.json", "autonomous-matrix.json",
-    "real-ai-smoke.json", "benign-matrix.json", "install-cycle.json", "release-manifest.json",
-    "SHA256SUMS", "report.md",
+    "environment.json",
+    "doctor.json",
+    "real-ai-smoke.json",
+    "safetensors-ai-smoke.json",
+    "content-matrix.json",
+    "benign-model-matrix.json",
+    "content-adversarial-matrix.json",
+    "autonomous-regression.json",
+    "selected-workload-regression.json",
+    "validation.json",
+    "SHA256SUMS",
+    "report.md",
 }
 
 
@@ -21,20 +32,38 @@ def main() -> int:
     found = {item.name for item in args.evidence.iterdir()} if args.evidence.is_dir() else set()
     if found != REQUIRED:
         raise SystemExit(f"evidence pack files differ: {sorted(found)}")
-    manifest = json.loads((args.evidence / "release-manifest.json").read_text(encoding="utf-8"))
-    catalogue = json.loads((args.evidence / "catalogue.json").read_text(encoding="utf-8"))
-    matrix = json.loads((args.evidence / "autonomous-matrix.json").read_text(encoding="utf-8"))
-    smoke = json.loads((args.evidence / "real-ai-smoke.json").read_text(encoding="utf-8"))
-    benign = json.loads((args.evidence / "benign-matrix.json").read_text(encoding="utf-8"))
+    values = {
+        name: json.loads((args.evidence / name).read_text(encoding="utf-8"))
+        for name in REQUIRED
+        if name.endswith(".json")
+    }
+    environment = values["environment.json"]
+    validation = values["validation.json"]
     if (
-        manifest.get("source_commit") != args.require_source_commit
-        or matrix.get("result") != "PASS"
-        or smoke.get("result") != "PASS"
-        or not isinstance(catalogue.get("digest"), str)
-        or benign.get("result") != "PASS"
-        or len(smoke.get("repetitions", [])) != 5
+        environment.get("source_commit") != args.require_source_commit
+        or validation.get("source_commit") != args.require_source_commit
+        or validation.get("result") != "PASS"
+        or not isinstance(environment.get("catalogue"), dict)
     ):
         raise SystemExit("evidence does not meet release gate")
+    for name, value in values.items():
+        if name in {"environment.json", "doctor.json", "validation.json"}:
+            continue
+        if value.get("result") != "PASS":
+            raise SystemExit(f"evidence job did not pass: {name}")
+    checksums: dict[str, str] = {}
+    for line in (args.evidence / "SHA256SUMS").read_text(encoding="ascii").splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or not re.fullmatch(r"[0-9a-f]{64}", fields[0]):
+            raise SystemExit("evidence checksum line is invalid")
+        checksums[fields[1].removeprefix("*")] = fields[0]
+    expected = {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in args.evidence.iterdir()
+        if path.name != "SHA256SUMS"
+    }
+    if checksums != expected:
+        raise SystemExit("evidence checksums do not match")
     print(json.dumps({"result": "PASS"}, sort_keys=True))
     return 0
 

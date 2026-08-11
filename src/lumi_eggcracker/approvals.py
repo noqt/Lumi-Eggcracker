@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -78,13 +79,33 @@ def load_all(root: Path) -> list[dict[str, Any]]:
     return values
 
 
-def approved(snapshot: Any, digest: str, approvals: list[dict[str, Any]]) -> bool:
+def approved(
+    snapshot: Any,
+    digest: str,
+    approvals: list[dict[str, Any]],
+    *,
+    executable_metadata: os.stat_result | tuple[int, int] | None = None,
+) -> bool:
     command_hash = argv_digest(snapshot.argv)
-    try:
-        metadata = Path(snapshot.exe_path).stat(follow_symlinks=False)
-    except OSError:
-        return False
-    return any(item["uid"] == snapshot.uid and item["executable"] == snapshot.exe_path and item["executable_device"] == metadata.st_dev and item["executable_inode"] == metadata.st_ino and item["executable_sha256"] == digest and item["argv_count"] == len(snapshot.argv) and item["argv_sha256"] == command_hash for item in approvals)
+    if executable_metadata is None:
+        try:
+            metadata = Path(snapshot.exe_path).stat(follow_symlinks=False)
+        except OSError:
+            return False
+    else:
+        metadata = executable_metadata
+    device = metadata.st_dev if hasattr(metadata, "st_dev") else metadata[0]
+    inode = metadata.st_ino if hasattr(metadata, "st_ino") else metadata[1]
+    return any(
+        item["uid"] == snapshot.uid
+        and item["executable"] == snapshot.exe_path
+        and item["executable_device"] == device
+        and item["executable_inode"] == inode
+        and item["executable_sha256"] == digest
+        and item["argv_count"] == len(snapshot.argv)
+        and item["argv_sha256"] == command_hash
+        for item in approvals
+    )
 
 
 def revoke(root: Path, name: str) -> dict[str, Any]:

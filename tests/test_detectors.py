@@ -16,14 +16,10 @@ class Sample:
 
 
 class DetectorTests(unittest.TestCase):
-    def test_llama_cpp_fast_path_requires_model_argument(self) -> None:
+    def test_unqualified_fast_name_profiles_are_not_active(self) -> None:
         catalogue = load_bundled()
-        self.assertIsNone(match(catalogue, Sample("llama-cli", ("/usr/bin/llama-cli", "--help"))))
-        value = match(
-            catalogue, Sample("llama-cli", ("/usr/bin/llama-cli", "-m", "/models/tiny.gguf"))
-        )
-        self.assertEqual(
-            DetectionMatch("llama.cpp", "FAST_NAME", ("exe_basename", "argv_model_suffix")), value
+        self.assertIsNone(
+            match(catalogue, Sample("llama-cli", ("/usr/bin/llama-cli", "-m", "/models/tiny.gguf")))
         )
 
     def test_content_profile_requires_both_independent_groups(self) -> None:

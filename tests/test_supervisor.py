@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -44,6 +45,18 @@ class SupervisorTests(unittest.TestCase):
         with supervisor.discovery_lock:
             supervisor.discovery_done[identity] = 1
             self.assertIn(identity, supervisor.discovery_done)
+
+    def test_heartbeat_stops_when_no_scan_completed_within_health_bound(self) -> None:
+        supervisor = self._instance()
+        supervisor.discovery_thread = type(
+            "LiveThread", (), {"is_alive": lambda _self: True}
+        )()
+        supervisor.last_heartbeat_sent = 0.0
+        supervisor.last_scan_completed_ns = time.monotonic_ns() - 2_000_000_000
+        supervisor.discovery_failures = 0
+        with patch("lumi_eggcracker.supervisor.socket.socket") as socket_factory:
+            supervisor._heartbeat()
+        socket_factory.assert_not_called()
 
     def test_containment_orders_direct_kill_before_receipt_state_and_cleanup(self) -> None:
         supervisor = self._instance()

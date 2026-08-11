@@ -36,6 +36,12 @@ def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60)
 
 
+def require_success(argv: list[str]) -> None:
+    result = run(argv)
+    if result.returncode:
+        raise SystemExit(result.stderr.strip() or result.stdout.strip() or f"command failed: {argv[1]}")
+
+
 def owned_cgroups_empty() -> bool:
     root = Path("/sys/fs/cgroup/system.slice")
     if not root.is_dir():
@@ -85,34 +91,48 @@ def main() -> int:
         path = Path(name)
         if path.is_symlink() or not path.is_file() or digest(path) != expected:
             raise SystemExit(f"refusing uninstall because installed file drifted: {path}")
-    run(["/usr/bin/systemctl", "disable", "--now", SUPERVISOR])
-    run(["/usr/bin/systemctl", "disable", "--now", WATCHDOG])
     if not owned_cgroups_empty() or not quarantine_empty():
         raise SystemExit("refusing uninstall with populated or uncertain Eggcracker cgroups")
-    run(["/usr/bin/systemctl", "reset-failed", SUPERVISOR])
-    run(["/usr/bin/systemctl", "reset-failed", WATCHDOG])
-    for path in (UNIT, WATCHDOG_UNIT, BIN, LIB, ETC, STATE, RUNTIME, WATCHDOG_RUNTIME):
-        if path.exists() and not path.is_symlink():
-            shutil.rmtree(path) if path.is_dir() else path.unlink()
-    if manifest.get("created_workload_user"):
-        try:
-            account = pwd.getpwnam(str(manifest["workload_user"]))
-        except KeyError:
-            account = None
-        if account and account.pw_uid == manifest.get("workload_uid"):
-            result = run(["/usr/sbin/userdel", account.pw_name])
-            if result.returncode:
-                raise SystemExit(result.stderr.strip() or "cannot remove created workload account")
-    if manifest.get("created_workload_group"):
-        try:
-            group = grp.getgrnam(str(manifest.get("workload_group", "")))
-        except KeyError:
-            group = None
-        if group:
-            result = run(["/usr/sbin/groupdel", group.gr_name])
-            if result.returncode:
-                raise SystemExit(result.stderr.strip() or "cannot remove created workload group")
-    run(["/usr/bin/systemctl", "daemon-reload"])
+    supervisor_stopped = False
+    watchdog_stopped = False
+    try:
+        require_success(["/usr/bin/systemctl", "stop", SUPERVISOR])
+        supervisor_stopped = True
+        require_success(["/usr/bin/systemctl", "disable", SUPERVISOR])
+        require_success(["/usr/bin/systemctl", "stop", WATCHDOG])
+        watchdog_stopped = True
+        require_success(["/usr/bin/systemctl", "disable", WATCHDOG])
+        if not owned_cgroups_empty() or not quarantine_empty():
+            raise SystemExit("refusing uninstall because cgroups remained populated after stop")
+        require_success(["/usr/bin/systemctl", "reset-failed", SUPERVISOR])
+        require_success(["/usr/bin/systemctl", "reset-failed", WATCHDOG])
+        for path in (UNIT, WATCHDOG_UNIT, BIN, LIB, ETC, STATE, RUNTIME, WATCHDOG_RUNTIME):
+            if path.exists() and not path.is_symlink():
+                shutil.rmtree(path) if path.is_dir() else path.unlink()
+        if manifest.get("created_workload_user"):
+            try:
+                account = pwd.getpwnam(str(manifest["workload_user"]))
+            except KeyError:
+                account = None
+            if account and account.pw_uid == manifest.get("workload_uid"):
+                require_success(["/usr/sbin/userdel", account.pw_name])
+        if manifest.get("created_workload_group"):
+            try:
+                group = grp.getgrnam(str(manifest.get("workload_group", "")))
+            except KeyError:
+                group = None
+            if group:
+                require_success(["/usr/sbin/groupdel", group.gr_name])
+        require_success(["/usr/bin/systemctl", "daemon-reload"])
+    except BaseException:
+        # A refused or interrupted transaction must not leave protection
+        # disabled.  Best-effort restoration is deliberately attempted for
+        # both units, regardless of which stop/disable operation failed.
+        if supervisor_stopped or watchdog_stopped:
+            run(["/usr/bin/systemctl", "daemon-reload"])
+            run(["/usr/bin/systemctl", "enable", "--now", WATCHDOG])
+            run(["/usr/bin/systemctl", "enable", "--now", SUPERVISOR])
+        raise
     print(json.dumps({"result": "UNINSTALLED"}, sort_keys=True))
     return 0
 

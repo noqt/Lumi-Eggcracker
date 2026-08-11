@@ -1,16 +1,22 @@
 # Lumi Eggcracker
 
-Lumi Eggcracker is a local Linux kill switch for unapproved, supported AI and agent runtimes.
+**Deterministic containment for unapproved local AI workloads on Linux.**
 
-> Eggcracker monitors a Linux host for supported local AI workloads. It recognises installed fast-name profiles and qualified model/runtime combinations. When a complete match has no exact root-admin approval, it automatically stops the process, captures its discovered process tree in a root-owned cgroup, and kills that cgroup.
+Lumi Eggcracker is a privileged Linux enforcement daemon for a narrow,
+published catalogue of locally observed AI workloads.
+
+> Engineering preview: when a complete qualified match has no exact root approval,
+> Eggcracker stops the process, captures the bounded related workload, and kills
+> its root-owned cgroup. Validate this exact release in a disposable Ubuntu VM
+> before installing it on a workstation or server.
 
 There is no alert-only phase for an unapproved catalogue match. Containment begins with a pidfd stop signal; the explanation and receipt are written only after cgroup containment completes.
 
 ## What it does
 
 - continuously scans host processes and performs a startup scan before accepting control commands;
-- detects published local-runtime profiles including llama.cpp, Ollama, vLLM, Text Generation Inference, LocalAI, llamafile and selected agent CLIs;
-- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a structurally valid GGUF v2/v3 artifact and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
+- detects only the two publicly qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
+- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
 - recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge/ATen ELF build-ID pair appear in one process or across a bounded related workload (the same unprivileged UID with a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
 - lets the configured operator approve one exact executable, UID and invocation before it is run;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
@@ -22,6 +28,14 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 Eggcracker does not identify every possible AI implementation. Content recognition currently excludes stripped or bespoke runtimes without the qualified markers, custom/encrypted model formats, containerised and remote API-only workloads. It does not guarantee detection of evidence that escaped before observation, an unobserved process, or a workload hidden behind a container or remote service. It does not claim general malware or intrusion detection. It does not use a behavioural model, isolate host networking, credentials or filesystems, or replace EDR.
 
 A successful receipt proves the captured quarantine cgroup is empty. It does not prove that a process which escaped before detection never existed.
+
+## Publicly qualified profiles
+
+| Profile | Exact qualification | Active in 0.4.0 |
+| --- | --- | --- |
+| `content.gguf-llama` | Renamed llama.cpp runner, extensionless GGUF path, bounded GGUF header, qualified ELF identity | Yes |
+| `content.safetensors-pytorch` | Pinned CPU PyTorch/ATen build IDs, valid contiguous Safetensors layout, real model smoke | Yes |
+| Ollama, vLLM, TGI, LocalAI, llamafile and agent CLIs | Invocation-specific fixtures and launcher identity still require qualification | No |
 
 ## Requirements
 
@@ -41,7 +55,7 @@ eggcracker doctor
 eggcracker approvals
 ```
 
-An unapproved complete fast-name or content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, approve it before launch. The approval stores hashes, not its raw arguments:
+An unapproved complete qualified content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, approve it before launch. The approval stores hashes, not its raw arguments:
 
 ```sh
 sudo eggcracker approve --name local-qwen --uid "$(id -u)" -- \

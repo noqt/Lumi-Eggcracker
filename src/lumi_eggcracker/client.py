@@ -28,9 +28,15 @@ SOCKETS = {
 
 
 def _receive(connection: socket.socket) -> dict[str, Any]:
-    header = connection.recv(4)
-    if len(header) != 4:
-        raise JsonInputError("truncated supervisor response")
+    header_chunks: list[bytes] = []
+    remaining = 4
+    while remaining:
+        chunk = connection.recv(remaining)
+        if not chunk:
+            raise JsonInputError("truncated supervisor response")
+        header_chunks.append(chunk)
+        remaining -= len(chunk)
+    header = b"".join(header_chunks)
     length = struct.unpack("!I", header)[0]
     if not 1 <= length <= MAX_FRAME:
         raise JsonInputError("invalid supervisor response frame")

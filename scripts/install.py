@@ -18,7 +18,6 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.4.0"
 LIB = Path("/usr/local/lib/lumi-eggcracker")
 BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
@@ -62,8 +61,15 @@ def manifest_for(artifact: Path) -> dict[str, Any]:
     expected = {"artifact", "sha256", "source_archive", "source_archive_sha256", "source_commit", "version"}
     if set(value) != expected or value["artifact"] != artifact.name or value["sha256"] != digest(artifact):
         raise RuntimeError("release artifact identity does not match manifest")
-    if value["version"] != VERSION or len(value["source_commit"]) != 40:
+    if (
+        not isinstance(value["version"], str)
+        or not value["version"]
+        or len(value["source_commit"]) != 40
+    ):
         raise RuntimeError("release manifest version or source identity is invalid")
+    version_check = run(["/usr/bin/python3", str(artifact), "version"])
+    if version_check.returncode or version_check.stdout.strip() != value["version"]:
+        raise RuntimeError("release artifact version does not match manifest")
     return value
 
 

@@ -37,7 +37,13 @@ from .containment import (
     verify_empty,
 )
 from .detectors import Catalogue, DetectionMatch, load_catalogue, match, public_catalogue
-from .discovery import ProcessIdentity, ProcessSnapshot, executable_digest, scan
+from .discovery import (
+    ProcessIdentity,
+    ProcessSnapshot,
+    executable_digest_for_identity,
+    executable_metadata_for_identity,
+    scan,
+)
 from .elfmarkers import RuntimeEvidence
 from .elfmarkers import from_snapshot as runtime_from_snapshot
 from .jsonio import JsonInputError, load_regular_json
@@ -77,6 +83,9 @@ DETECTION_LIMIT = 1000
 RECENT_DISCOVERY_NS = 5_000_000_000
 CONTENT_SCAN_INTERVAL = 2
 MAX_CORRELATED_PROCESSES = 64
+SCAN_HEALTH_TIMEOUT_NS = 1_000_000_000
+MAX_DISCOVERY_FAILURES = 3
+MAX_ENFORCEMENT_TASKS = 16
 
 
 @dataclass(frozen=True)
@@ -194,10 +203,12 @@ class Supervisor:
         self.discovery_active: set[ProcessIdentity] = set()
         self.discovery_done: dict[ProcessIdentity, int] = {}
         self.discovery_thread: threading.Thread | None = None
-        self.digest_cache: dict[tuple[int, int, int, int], str] = {}
+        self.digest_cache: dict[tuple[int, int, int, int, int], str] = {}
+        self.executable_metadata: dict[ProcessIdentity, tuple[int, int]] = {}
+        self.enforcement_slots = threading.BoundedSemaphore(MAX_ENFORCEMENT_TASKS)
         self.observations = ObservationStore()
         self.content_scan_tick = 0
-        self.last_scan_completed_ns = time.monotonic_ns()
+        self.last_scan_completed_ns = 0
         self.discovery_failures = 0
         self.heartbeat_sequence = 0
         self.last_heartbeat_sent = 0.0
@@ -440,13 +451,29 @@ class Supervisor:
         return result
 
     def _cached_executable_digest(self, snapshot: ProcessSnapshot) -> str:
-        path = Path(snapshot.exe_path)
-        metadata = path.stat(follow_symlinks=False)
-        key = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+        metadata = executable_metadata_for_identity(snapshot.identity)
+        key = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
         value = self.digest_cache.get(key)
         if value is None:
-            value = executable_digest(path)
-            self.digest_cache = {key: value}
+            value, hashed_metadata = executable_digest_for_identity(snapshot.identity)
+            if (
+                hashed_metadata.st_dev,
+                hashed_metadata.st_ino,
+                hashed_metadata.st_size,
+                hashed_metadata.st_mtime_ns,
+                hashed_metadata.st_ctime_ns,
+            ) != key:
+                raise JsonInputError("executable changed during cached hashing")
+            self.digest_cache[key] = value
+            while len(self.digest_cache) > 256:
+                self.digest_cache.pop(next(iter(self.digest_cache)))
+        self.executable_metadata[snapshot.identity] = (metadata.st_dev, metadata.st_ino)
         return value
 
     def _detection_path(self, event_id: str) -> Path:
@@ -462,6 +489,16 @@ class Supervisor:
         for path in records[DETECTION_LIMIT:]:
             path.unlink(missing_ok=True)
 
+    def _detection_sort_key(self, path: Path) -> tuple[int, str]:
+        try:
+            value = load_regular_json(path)
+            observed = value.get("trigger", {}).get("observed_monotonic_ns", 0)
+            if isinstance(observed, int) and observed >= 0:
+                return observed, path.name
+        except (JsonInputError, OSError):
+            pass
+        return 0, path.name
+
     def _detection_receipt(
         self,
         *,
@@ -472,7 +509,7 @@ class Supervisor:
         runtimes: tuple[RuntimeEvidence, ...],
         first_seen_ns: int,
         qualified_ns: int,
-        executable_sha256: str,
+        executable_sha256: str | None,
         result: AdoptionResult | None,
         error: str | None,
         correlated: tuple[_EvidenceCandidate, ...] = (),
@@ -502,11 +539,17 @@ class Supervisor:
                 "first_seen_monotonic_ns": first_seen_ns,
                 "qualified_monotonic_ns": qualified_ns,
             }
+        executable_record: dict[str, Any] = {
+            "basename": snapshot.exe_basename,
+            "sha256": executable_sha256,
+        }
+        if executable_sha256 is None:
+            executable_record["digest_status"] = "UNAVAILABLE"
         value: dict[str, Any] = {
             "catalogue_sha256": self.catalogue.digest,
             "detector": detector,
             "event_id": event_id,
-            "executable": {"basename": snapshot.exe_basename, "sha256": executable_sha256},
+            "executable": executable_record,
             "observed": {
                 "argv_count": len(snapshot.argv),
                 "argv_sha256": hashlib.sha256("\0".join(snapshot.argv).encode("utf-8")).hexdigest(),
@@ -591,7 +634,7 @@ class Supervisor:
         runtimes: tuple[RuntimeEvidence, ...],
         first_seen_ns: int,
         qualified_ns: int,
-        executable_sha256: str,
+        executable_sha256: str | None,
         event_id: str,
         pidfd: int | None = None,
         targets: set[ProcessIdentity] | None = None,
@@ -736,12 +779,23 @@ class Supervisor:
                 continue
             qualified_ns = time.monotonic_ns()
             unapproved: list[_EvidenceCandidate] = []
+            executable_digests: dict[ProcessIdentity, str | None] = {}
             for candidate in group:
                 try:
                     executable_sha256 = self._cached_executable_digest(candidate.snapshot)
                 except (JsonInputError, OSError):
+                    executable_digests[candidate.snapshot.identity] = None
+                    unapproved.append(candidate)
                     continue
-                if not approved(candidate.snapshot, executable_sha256, approvals):
+                executable_digests[candidate.snapshot.identity] = executable_sha256
+                if not approved(
+                    candidate.snapshot,
+                    executable_sha256,
+                    approvals,
+                    executable_metadata=getattr(self, "executable_metadata", {}).get(
+                        candidate.snapshot.identity
+                    ),
+                ):
                     unapproved.append(candidate)
             if not unapproved:
                 continue
@@ -766,7 +820,7 @@ class Supervisor:
                 with self.discovery_lock:
                     self.discovery_active.difference_update(target_set)
                 continue
-            executable_sha256 = self._cached_executable_digest(snapshot)
+            executable_sha256 = executable_digests.get(snapshot.identity)
             first_seen_ns = min(candidate.first_seen_ns for candidate in group)
             kwargs = {
                 "targets": target_set,
@@ -787,28 +841,38 @@ class Supervisor:
                     **kwargs,
                 )
             else:
+                task_args = (
+                    snapshot,
+                    detected,
+                    tuple(aggregate_content),
+                    tuple(aggregate_runtimes),
+                    first_seen_ns,
+                    qualified_ns,
+                    executable_sha256,
+                    event_id,
+                    pidfd,
+                )
+                if not self.enforcement_slots.acquire(blocking=False):
+                    # Admission is bounded.  If the queue is saturated, keep
+                    # containment decisive by running this task inline rather
+                    # than allowing the detector to create unbounded threads.
+                    self._enforce_discovery(*task_args, **kwargs)
+                    continue
+
+                def enforce_bounded(
+                    task_args: tuple[Any, ...] = task_args,
+                    task_kwargs: dict[str, Any] = kwargs,
+                ) -> None:
+                    try:
+                        self._enforce_discovery(*task_args, **task_kwargs)
+                    finally:
+                        self.enforcement_slots.release()
+
                 try:
-                    threading.Thread(
-                        target=self._enforce_discovery,
-                        args=(
-                            snapshot,
-                            detected,
-                            tuple(aggregate_content),
-                            tuple(aggregate_runtimes),
-                            first_seen_ns,
-                            qualified_ns,
-                            executable_sha256,
-                            event_id,
-                            pidfd,
-                        ),
-                        kwargs=kwargs,
-                        daemon=True,
-                    ).start()
+                    threading.Thread(target=enforce_bounded, daemon=True).start()
                 except RuntimeError:
-                    os.close(pidfd)
-                    with self.discovery_lock:
-                        self.discovery_active.difference_update(target_set)
-                    raise
+                    self.enforcement_slots.release()
+                    self._enforce_discovery(*task_args, **kwargs)
 
     def _discovery_loop(self) -> None:
         while not self.stop_event.is_set():
@@ -829,6 +893,9 @@ class Supervisor:
         if (
             thread is None
             or not thread.is_alive()
+            or self.last_scan_completed_ns <= 0
+            or time.monotonic_ns() - self.last_scan_completed_ns > SCAN_HEALTH_TIMEOUT_NS
+            or self.discovery_failures >= MAX_DISCOVERY_FAILURES
         ):
             return
         self.heartbeat_sequence += 1
@@ -1264,7 +1331,9 @@ class Supervisor:
             }
         if action == "detections" and not args:
             values: list[dict[str, Any]] = []
-            for path in sorted(self.detections.glob("*.json"), reverse=True):
+            for path in sorted(
+                self.detections.glob("*.json"), key=self._detection_sort_key, reverse=True
+            ):
                 try:
                     value = load_regular_json(path)
                     values.append(

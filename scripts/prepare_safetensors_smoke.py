@@ -28,7 +28,7 @@ def digest(path: Path) -> str:
 def download(url: str, destination: Path) -> None:
     if not url.startswith("https://"):
         raise RuntimeError("external assets must use HTTPS")
-    request = urllib.request.Request(url, headers={"User-Agent": "Lumi-Eggcracker-0.4.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "Lumi-Eggcracker"})
     with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as handle:
         while True:
             block = response.read(1024 * 1024)

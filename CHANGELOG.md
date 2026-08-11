@@ -5,6 +5,10 @@
 - Add bounded Safetensors structural validation and exact pinned CPU PyTorch/ATen build-ID-pair recognition.
 - Migrate content catalogue groups to `MODEL_RUNTIME` in schema v3 while preserving GGUF/llama behavior.
 - Contain unapproved complete Safetensors/PyTorch matches autonomously, including converters and inspectors; partial matches survive.
+- Limit the active public catalogue to the two qualified content profiles; withhold unqualified name-only runtime entries.
+- Bind executable approval hashing to the live `/proc/<pid>/exe` descriptor and PID/start-time identity.
+- Tie supervisor heartbeats to recent successful scan completion and bound enforcement admission.
+- Preflight cgroups before uninstall and validate every published release checksum.
 
 ## 0.3.0
 

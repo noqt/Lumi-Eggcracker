@@ -119,6 +119,7 @@ def main() -> int:
         ROOT / "scripts" / "run_content_adversarial_matrix.py": "scripts/run_content_adversarial_matrix.py",
         ROOT / "scripts" / "self_validate.py": "scripts/self_validate.py",
         ROOT / "scripts" / "run_autonomous_matrix.py": "scripts/run_autonomous_matrix.py",
+        ROOT / "scripts" / "verify_evidence.py": "scripts/verify_evidence.py",
     }
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path, name in release_files.items():

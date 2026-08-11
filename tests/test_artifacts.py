@@ -98,3 +98,48 @@ class ArtifactTests(unittest.TestCase):
             zero.write_bytes(safetensors(shape=[0], offsets=(0, 0)))
             self.assertIsNotNone(validate_path(scalar))
             self.assertIsNotNone(validate_path(zero))
+
+    def test_safetensors_requires_complete_contiguous_data_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+
+            def write(value: dict[str, object], body: bytes, name: str) -> Path:
+                header = json.dumps(value, separators=(",", ":")).encode("utf-8")
+                header += b" " * ((8 - len(header) % 8) % 8)
+                path = root / name
+                path.write_bytes(struct.pack("<Q", len(header)) + header + body)
+                return path
+
+            hole = write(
+                {
+                    "left": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+                    "right": {"dtype": "F32", "shape": [1], "data_offsets": [8, 12]},
+                },
+                b"\0" * 12,
+                "hole",
+            )
+            trailing = write(
+                {"tensor": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}},
+                b"\0" * 8,
+                "trailing",
+            )
+            overlap = write(
+                {
+                    "left": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+                    "right": {"dtype": "F32", "shape": [1], "data_offsets": [2, 6]},
+                },
+                b"\0" * 6,
+                "overlap",
+            )
+            out_of_order = write(
+                {
+                    "right": {"dtype": "F32", "shape": [1], "data_offsets": [4, 8]},
+                    "left": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+                },
+                b"\0" * 8,
+                "out-of-order",
+            )
+            self.assertIsNone(validate_path(hole))
+            self.assertIsNone(validate_path(trailing))
+            self.assertIsNone(validate_path(overlap))
+            self.assertIsNotNone(validate_path(out_of_order))

@@ -4,7 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lumi_eggcracker.discovery import ProcessIdentity, _map_paths, argv_digest, identity, parse_stat
+from lumi_eggcracker.discovery import (
+    ProcessIdentity,
+    _map_paths,
+    argv_digest,
+    executable_digest_for_identity,
+    identity,
+    parse_stat,
+)
 from lumi_eggcracker.jsonio import JsonInputError
 
 
@@ -44,3 +51,18 @@ class DiscoveryTests(unittest.TestCase):
             values = _map_paths(path)
             self.assertEqual(512, len(values))
             self.assertTrue(values[0].startswith("/opt/runtime/"))
+
+    def test_process_executable_is_hashed_from_bound_proc_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            entry = proc / "42"
+            entry.mkdir()
+            (entry / "stat").write_text(
+                "42 (runner) S 1 " + "0 " * 17 + "100\n", encoding="utf-8"
+            )
+            (entry / "exe").write_bytes(b"live executable")
+            digest, metadata = executable_digest_for_identity(
+                ProcessIdentity(42, 100), proc=proc
+            )
+            self.assertEqual(64, len(digest))
+            self.assertGreater(metadata.st_size, 0)

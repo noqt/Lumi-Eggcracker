@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lumi-eggcracker"
-version = "0.4.0"
+dynamic = ["version"]
 description = "A local Linux kill switch for unapproved supported AI and agent runtimes"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,9 @@ eggcracker = "lumi_eggcracker.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+
+[tool.setuptools.dynamic]
+version = {attr = "lumi_eggcracker.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]

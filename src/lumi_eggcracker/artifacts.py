@@ -146,6 +146,8 @@ def validate_safetensors_fd(descriptor: int) -> ArtifactEvidence:
     header = _read_exact(descriptor, header_length + 8)[8:]
     if len(header) != header_length:
         raise JsonInputError("Safetensors header is truncated")
+    if not header.startswith(b"{"):
+        raise JsonInputError("Safetensors header must begin with an object")
     try:
         value = json.loads(header.decode("utf-8"), object_pairs_hook=_json_pairs)
     except (UnicodeDecodeError, json.JSONDecodeError, JsonInputError) as error:
@@ -165,7 +167,7 @@ def validate_safetensors_fd(descriptor: int) -> ArtifactEvidence:
         raise JsonInputError("Safetensors tensor count is invalid")
     data_start = 8 + header_length
     data_size = before.st_size - data_start
-    previous_end = 0
+    ranges: list[tuple[int, int]] = []
     for name, tensor in value.items():
         if not isinstance(name, str) or not name or not isinstance(tensor, dict):
             raise JsonInputError("Safetensors tensor entry is invalid")
@@ -204,9 +206,19 @@ def validate_safetensors_fd(descriptor: int) -> ArtifactEvidence:
         ):
             raise JsonInputError("Safetensors data offsets are invalid")
         start, end = offsets
-        if start > end or start < previous_end or end > data_size or end - start != required_bytes:
+        if start > end or end > data_size or end - start != required_bytes:
             raise JsonInputError("Safetensors data offsets do not match tensor shape")
+        ranges.append((start, end))
+    ranges.sort()
+    if not ranges or ranges[0][0] != 0:
+        raise JsonInputError("Safetensors data offsets contain a leading gap")
+    previous_end = 0
+    for start, end in ranges:
+        if start != previous_end:
+            raise JsonInputError("Safetensors data offsets contain a gap or overlap")
         previous_end = end
+    if previous_end != data_size:
+        raise JsonInputError("Safetensors data offsets leave trailing data")
     after = _regular(descriptor, minimum=8)
     if (before.st_dev, before.st_ino, before.st_size) != (
         after.st_dev,

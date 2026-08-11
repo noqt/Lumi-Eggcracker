@@ -83,14 +83,112 @@ def argv_digest(argv: tuple[str, ...] | list[str]) -> str:
 
 
 def executable_digest(path: Path) -> str:
-    metadata = path.stat(follow_symlinks=False)
-    if not stat.S_ISREG(metadata.st_mode):
-        raise JsonInputError("detected executable is not a regular file")
-    value = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(64 * 1024), b""):
+    """Hash a regular executable through one stable file descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise JsonInputError("detected executable is not a regular file")
+        value = hashlib.sha256()
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        for block in iter(lambda: os.read(descriptor, 64 * 1024), b""):
             value.update(block)
-    return value.hexdigest()
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise JsonInputError("executable changed during hashing")
+        return value.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def executable_digest_for_identity(
+    value: ProcessIdentity, *, proc: Path = PROC
+) -> tuple[str, os.stat_result]:
+    """Hash the executable actually running for one PID/start-time identity.
+
+    ``/proc/<pid>/exe`` is opened directly so a renamed or replaced pathname
+    cannot make the supervisor hash a different file from the executing inode.
+    The identity and descriptor metadata are checked before and after hashing.
+    """
+    if identity(value.pid, proc=proc) != value:
+        raise JsonInputError("process identity changed before executable hashing")
+    descriptor = os.open(
+        proc / str(value.pid) / "exe", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise JsonInputError("running executable is not a regular file")
+        digest = hashlib.sha256()
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        for block in iter(lambda: os.read(descriptor, 64 * 1024), b""):
+            digest.update(block)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise JsonInputError("running executable changed during hashing")
+        if identity(value.pid, proc=proc) != value:
+            raise JsonInputError("process identity changed during executable hashing")
+        return digest.hexdigest(), before
+    finally:
+        os.close(descriptor)
+
+
+def executable_metadata_for_identity(
+    value: ProcessIdentity, *, proc: Path = PROC
+) -> os.stat_result:
+    """Return stable metadata for the live executable without hashing it."""
+    if identity(value.pid, proc=proc) != value:
+        raise JsonInputError("process identity changed before executable inspection")
+    descriptor = os.open(
+        proc / str(value.pid) / "exe", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise JsonInputError("running executable is not a regular file")
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or identity(value.pid, proc=proc) != value:
+            raise JsonInputError("running executable changed during inspection")
+        return before
+    finally:
+        os.close(descriptor)
 
 
 def _uid(raw: str) -> int:
