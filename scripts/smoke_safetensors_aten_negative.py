@@ -54,6 +54,7 @@ from pathlib import Path
 weights = Path(sys.argv[1]).open('rb')
 aten = Path(sys.argv[2]).open('rb')
 mapped = mmap.mmap(aten.fileno(), 0, access=mmap.ACCESS_READ)
+Path(sys.argv[4]).write_text(Path('/proc/self/maps').read_text(encoding='ascii'), encoding='ascii')
 Path(sys.argv[3]).write_text('ready\\n', encoding='ascii')
 try:
     time.sleep(30)
@@ -64,7 +65,7 @@ finally:
 """
 
 
-def launch(python: Path, user: str, wrapper: Path, weights: Path, aten: Path, ready: Path) -> subprocess.Popen[bytes]:
+def launch(python: Path, user: str, wrapper: Path, weights: Path, aten: Path, ready: Path, maps_path: Path) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         [
             "/usr/sbin/runuser",
@@ -76,6 +77,7 @@ def launch(python: Path, user: str, wrapper: Path, weights: Path, aten: Path, re
             str(weights),
             str(aten),
             str(ready),
+            str(maps_path),
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -101,6 +103,7 @@ def one(python: Path, model: Path, user: str, aten: Path, index: int) -> dict[st
         weights = root / "weights.safetensors"
         wrapper = root / "worker.py"
         ready = root / "ready"
+        maps_path = root / "maps"
         shutil.copyfile(model, weights)
         os.chmod(weights, 0o644)
         wrapper.write_text(wrapper_source(), encoding="utf-8")
@@ -109,11 +112,14 @@ def one(python: Path, model: Path, user: str, aten: Path, index: int) -> dict[st
         process: subprocess.Popen[bytes] | None = None
         before = set(DETECTIONS.glob("*.json"))
         try:
-            process = launch(python, user, wrapper, weights, aten, ready)
+            process = launch(python, user, wrapper, weights, aten, ready, maps_path)
             wait_ready(process, ready)
-            maps = Path(f"/proc/{process.pid}/maps").read_text(encoding="ascii", errors="replace")
+            maps = maps_path.read_text(encoding="ascii", errors="replace")
             if aten.name not in maps or "libtorch_python" in maps:
-                raise RuntimeError("ATen-only fixture did not have the expected runtime topology")
+                raise RuntimeError(
+                    "ATen-only fixture did not have the expected runtime topology: "
+                    f"aten_seen={aten.name in maps}, bridge_seen={'libtorch_python' in maps}"
+                )
             time.sleep(4)
             detections = set(DETECTIONS.glob("*.json")) - before
             if detections:
