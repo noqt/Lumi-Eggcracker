@@ -18,6 +18,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+# The benchmark is shipped as a standalone script, but the implementation is
+# either in a source checkout (``src/``) or in the installed zipapp.
+ROOT = Path(__file__).resolve().parents[1]
+for candidate in (ROOT / "src", Path("/usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz")):
+    if candidate.is_dir() or candidate.is_file():
+        sys.path.insert(0, str(candidate))
+        break
+
 from lumi_eggcracker.supervisor import Supervisor
 
 
