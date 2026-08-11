@@ -79,11 +79,12 @@ before any external use:
   69 unit tests, build, and release verification;
 - no matching GitHub Release was observed; and
 - local commit `a3ad746682c89599ce582cd97acf5a99742dc3aa` is an unpushed
-  attribution-only descendant. Its exact candidate has independently accepted
-  **internal Windows control evidence** for Ruff, 69 tests with three documented
-  Windows skips, build/release verification, hashes, archive identity, and
-  preservation. It is not public, native-Linux qualification, independent use,
-  or market evidence.
+  attribution-only descendant. Its exact candidate has **internal Windows
+  control evidence** accepted by a separate internal control reviewer for Ruff,
+  69 tests with three documented Windows skips, build/release verification,
+  hashes, archive identity, and preservation. This was an internal control
+  review, not an independent external audit or assessment. It is not public,
+  native-Linux qualification, independent use, or market evidence.
 
 ## Proportional verification
 
