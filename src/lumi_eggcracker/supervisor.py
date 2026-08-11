@@ -1255,6 +1255,12 @@ class Supervisor:
                     _empty_ns, proof = verify_empty(identity_from_run(record))
                     if not proof.complete:
                         raise
+                    # `_contain` records a failure before raising when the
+                    # systemd unit has already been collected.  The exact
+                    # empty proof is authoritative for this recovery case;
+                    # restore the active state so normal completion can be
+                    # committed instead of leaving a false failure record.
+                    record["state"] = "RUNNING"
                     self._mark_completed(record)
         root = Path("/sys/fs/cgroup/system.slice")
         if not root.is_dir():
