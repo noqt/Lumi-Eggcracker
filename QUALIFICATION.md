@@ -1,5 +1,15 @@
 # Qualification
 
+This file defines the native qualification contract for an exact candidate and
+host. Project records report a complete result for commit
+`418f877f0d450aeb26d4a1233257746808c490e5` on one WSL2 Ubuntu host. The
+corresponding checksum-bound native evidence pack is not retained in this
+repository, a public GitHub Release, or current authorised durable evidence.
+Treat that result as project-recorded and commit-bound, not as independently
+re-verifiable native evidence or a qualification of another host. Re-run every
+gate below on the exact source and target host before making a current native
+qualification claim.
+
 The 0.4.0 candidate is releasable only when its exact commit passes the complete 0.3.1 regression, strict Safetensors and PyTorch/ATen direct tests, the existing selected-workload matrix, the native autonomous-discovery matrix, the GGUF and Safetensors content-recognition matrices, the combined detector self-protection matrix, and the host-overhead benchmark on one Ubuntu VM.
 
 Mandatory autonomous gates are: 100/100 unapproved fixture discoveries and complete tree kills, 100/100 unrelated-canary survivals, zero surviving bounded replacement attempts, zero reused-PID signals, 50/50 exact approved survivals, zero kills in the benign and partial-match matrices, zero workload policy/socket accesses, restart recovery, p95 qualifying-snapshot-to-stop below 100 ms, and p95 trigger-to-empty below 500 ms. Full process-start-to-stop time is retained as diagnostic evidence because real model startup can occur before the runtime identity becomes observable; it is not a containment-latency gate.
