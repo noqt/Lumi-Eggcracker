@@ -69,6 +69,68 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(supervisor._managed(snapshot))
         self.assertFalse(supervisor._discovery_excluded(snapshot))
 
+    def test_selected_match_contains_every_process_in_exact_run_cgroup(self) -> None:
+        supervisor = self._instance()
+        run_id = "a" * 24
+        selected = f"/system.slice/lumi-eggcracker-workload-{run_id}.service"
+        evidence_id = ProcessIdentity(10, 100)
+        broker_id = ProcessIdentity(11, 101)
+        replacement_id = ProcessIdentity(12, 102)
+        canary_id = ProcessIdentity(13, 103)
+        evidence = ProcessSnapshot(
+            evidence_id,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + selected,),
+            (),
+            (),
+        )
+        broker = ProcessSnapshot(
+            broker_id,
+            2001,
+            "/usr/bin/broker",
+            "broker",
+            ("broker",),
+            ("0::" + selected,),
+            (),
+            (),
+        )
+        replacement = ProcessSnapshot(
+            replacement_id,
+            2001,
+            "/usr/bin/replacement",
+            "replacement",
+            ("replacement",),
+            ("0::" + selected,),
+            (),
+            (),
+        )
+        canary = ProcessSnapshot(
+            canary_id,
+            2001,
+            "/usr/bin/canary",
+            "canary",
+            ("canary",),
+            ("0::/system.slice/unrelated-canary.service",),
+            (),
+            (),
+        )
+        group = (_EvidenceCandidate(evidence, (), (), 1),)
+
+        targets = supervisor._discovery_containment_targets(
+            group,
+            {
+                evidence_id: evidence,
+                broker_id: broker,
+                replacement_id: replacement,
+                canary_id: canary,
+            },
+        )
+
+        self.assertEqual({evidence_id, broker_id, replacement_id}, targets)
+
     def test_complete_identity_is_not_suppressed_or_broadened_by_64_partials(self) -> None:
         supervisor = self._instance()
         supervisor.catalogue = load_bundled()

@@ -644,6 +644,32 @@ class Supervisor:
                     latest["state"] = "TERMINATED"
                     self._store(latest)
 
+    def _discovery_containment_targets(
+        self,
+        group: tuple[_EvidenceCandidate, ...],
+        snapshots: dict[ProcessIdentity, ProcessSnapshot],
+    ) -> set[ProcessIdentity]:
+        """Select evidence roots or the complete exact selected workload.
+
+        A detector match inside an Eggcracker-launched systemd cgroup is a
+        violation by that selected workload.  Include every observed process
+        in that one exact owned unit so a broker, sibling, or replacement
+        cannot survive while the run is recorded as terminated.  Unmanaged
+        related-process matches remain limited to the evidence roots and
+        their descendants.
+        """
+        targets = {candidate.snapshot.identity for candidate in group}
+        selected_cgroups = self._discovered_run_cgroups(group[0].snapshot, group)
+        if not selected_cgroups:
+            return targets
+        for snapshot in snapshots.values():
+            if any(
+                line.startswith("0::") and line[3:] in selected_cgroups
+                for line in snapshot.cgroups
+            ):
+                targets.add(snapshot.identity)
+        return targets
+
     def _store_detection(self, value: dict[str, Any]) -> None:
         write_atomic(self._detection_path(value["event_id"]), value)
         records = sorted(
@@ -1026,7 +1052,7 @@ class Supervisor:
                     unapproved.append(candidate)
             if not unapproved:
                 continue
-            target_set = {candidate.snapshot.identity for candidate in group}
+            target_set = self._discovery_containment_targets(group, snapshot_map)
             with self.discovery_lock:
                 now = time.monotonic_ns()
                 self.discovery_done = {
