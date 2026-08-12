@@ -26,7 +26,7 @@ from .approvals import approved, revoke
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
 from .approvals import public as public_approval
-from .artifacts import MAX_FD_PROBES_PER_SCAN, ArtifactEvidence
+from .artifacts import MAX_FD_PROBES_PER_SCAN, MAX_MAP_PROBES_PER_SCAN, ArtifactEvidence
 from .artifacts import from_snapshot as artifacts_from_snapshot
 from .containment import (
     capture_identity,
@@ -218,6 +218,7 @@ class Supervisor:
         self.enforcement_slots = threading.BoundedSemaphore(MAX_ENFORCEMENT_TASKS)
         self.observations = ObservationStore()
         self.artifact_fd_offsets: dict[ProcessIdentity, int] = {}
+        self.artifact_map_offsets: dict[ProcessIdentity, int] = {}
         self.runtime_map_offsets: dict[ProcessIdentity, int] = {}
         self.observed_content: dict[ProcessIdentity, dict[str, ArtifactEvidence]] = {}
         self.observed_runtimes: dict[ProcessIdentity, dict[str, RuntimeEvidence]] = {}
@@ -919,6 +920,7 @@ class Supervisor:
         live_identities = set(snapshot_map)
         for cache in (
             getattr(self, "artifact_fd_offsets", {}),
+            getattr(self, "artifact_map_offsets", {}),
             getattr(self, "runtime_map_offsets", {}),
             getattr(self, "observed_content", {}),
             getattr(self, "observed_runtimes", {}),
@@ -941,13 +943,22 @@ class Supervisor:
                 if runtime_offsets is None:
                     self.runtime_map_offsets = {}
                     runtime_offsets = self.runtime_map_offsets
+                artifact_map_offsets = getattr(self, "artifact_map_offsets", None)
+                if artifact_map_offsets is None:
+                    self.artifact_map_offsets = {}
+                    artifact_map_offsets = self.artifact_map_offsets
                 content_now = artifacts_from_snapshot(
                     snapshot,
                     cache=self.artifact_cache,
                     fd_start_index=artifact_offsets.get(snapshot.identity, 0),
+                    map_start_index=artifact_map_offsets.get(snapshot.identity, 0),
                 )
                 artifact_offsets[snapshot.identity] = (
                     artifact_offsets.get(snapshot.identity, 0) + MAX_FD_PROBES_PER_SCAN
+                )
+                artifact_map_offsets[snapshot.identity] = (
+                    artifact_map_offsets.get(snapshot.identity, 0)
+                    + MAX_MAP_PROBES_PER_SCAN
                 )
                 # Runtime evidence is intentionally collected independently so
                 # it can be correlated with content held by a bounded peer.

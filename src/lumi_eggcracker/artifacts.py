@@ -17,6 +17,7 @@ MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 MAX_ARTIFACTS = 16
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_FD_PROBES_PER_SCAN = 256
+MAX_MAP_PROBES_PER_SCAN = 64
 MAX_GGUF_ITEMS = 10_000_000
 MAX_SAFETENSORS_TENSORS = 100_000
 MAX_SAFETENSORS_DIMS = 64
@@ -288,6 +289,25 @@ def _looks_like_artifact(path: Path) -> bool:
         os.close(descriptor)
 
 
+def _evidence_from_descriptor(
+    descriptor: int, cache: ArtifactCache | None
+) -> ArtifactEvidence | None:
+    metadata = os.fstat(descriptor)
+    key = _cache_key(metadata)
+    if cache is not None and key in cache:
+        return cache[key]
+    evidence = None
+    for validator in (validate_gguf_fd, validate_safetensors_fd):
+        try:
+            evidence = validator(descriptor)
+            break
+        except (JsonInputError, OSError):
+            continue
+    if cache is not None:
+        cache[key] = evidence
+    return evidence
+
+
 def from_process_fds(
     snapshot: object,
     *,
@@ -339,21 +359,7 @@ def from_process_fds(
         except OSError:
             continue
         try:
-            key = _cache_key(os.fstat(descriptor))
-            if cache is not None and key in cache:
-                evidence = cache[key]
-                if evidence is not None and evidence not in result:
-                    result.append(evidence)
-                continue
-            evidence = None
-            for validator in (validate_gguf_fd, validate_safetensors_fd):
-                try:
-                    evidence = validator(descriptor)
-                    break
-                except (JsonInputError, OSError):
-                    continue
-            if cache is not None:
-                cache[key] = evidence
+            evidence = _evidence_from_descriptor(descriptor, cache)
             if evidence is None:
                 continue
             header_bytes = min(os.fstat(descriptor).st_size, MAX_ARTIFACT_BYTES)
@@ -369,6 +375,67 @@ def from_process_fds(
     return tuple(result)
 
 
+def _mapping_references(snapshot: object, proc: Path) -> tuple[str, ...]:
+    try:
+        directory = proc / str(snapshot.identity.pid) / "map_files"
+        values = [
+            item.name
+            for item in directory.iterdir()
+            if len(item.name.split("-", 1)) == 2
+            and all(
+                part
+                and all(character in "0123456789abcdefABCDEF" for character in part)
+                for part in item.name.split("-", 1)
+            )
+        ]
+    except (AttributeError, OSError):
+        return ()
+    return tuple(sorted(values, key=lambda value: int(value.split("-", 1)[0], 16)))
+
+
+def from_mapped_files(
+    snapshot: object,
+    *,
+    proc: Path = Path("/proc"),
+    cache: ArtifactCache | None = None,
+    start_index: int = 0,
+    max_probes: int = MAX_MAP_PROBES_PER_SCAN,
+) -> tuple[ArtifactEvidence, ...]:
+    """Inspect a rotating bounded window of live mapped-file descriptors."""
+    if isinstance(start_index, bool) or not isinstance(start_index, int) or start_index < 0:
+        raise JsonInputError("artifact mapping cursor is invalid")
+    if isinstance(max_probes, bool) or not isinstance(max_probes, int) or max_probes < 1:
+        raise JsonInputError("artifact mapping probe limit is invalid")
+    references = _mapping_references(snapshot, proc)
+    if not references:
+        return ()
+    offset = start_index % len(references)
+    count = min(max_probes, len(references))
+    selected = tuple(
+        references[(offset + index) % len(references)] for index in range(count)
+    )
+    result: list[ArtifactEvidence] = []
+    for reference in selected:
+        try:
+            descriptor = os.open(
+                proc / str(snapshot.identity.pid) / "map_files" / reference,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+        except (AttributeError, OSError):
+            continue
+        try:
+            evidence = _evidence_from_descriptor(descriptor, cache)
+            if evidence is not None and evidence not in result:
+                result.append(evidence)
+                if len(result) >= MAX_ARTIFACTS:
+                    break
+        except (JsonInputError, OSError):
+            pass
+        finally:
+            os.close(descriptor)
+    return tuple(result)
+
+
 def from_snapshot(
     snapshot: object,
     *,
@@ -376,8 +443,10 @@ def from_snapshot(
     cache: ArtifactCache | None = None,
     fd_start_index: int = 0,
     fd_max_probes: int = MAX_FD_PROBES_PER_SCAN,
+    map_start_index: int = 0,
+    map_max_probes: int = MAX_MAP_PROBES_PER_SCAN,
 ) -> tuple[ArtifactEvidence, ...]:
-    """Collect bounded GGUF evidence from open descriptors and mapped files."""
+    """Collect bounded content evidence from open and mapped descriptors."""
     result = list(
         from_process_fds(
             snapshot,
@@ -387,6 +456,15 @@ def from_snapshot(
             max_probes=fd_max_probes,
         )
     )
+    for evidence in from_mapped_files(
+        snapshot,
+        proc=proc,
+        cache=cache,
+        start_index=map_start_index,
+        max_probes=map_max_probes,
+    ):
+        if evidence not in result:
+            result.append(evidence)
     for raw in tuple(getattr(snapshot, "map_paths", ())):
         if not isinstance(raw, str) or not raw.startswith("/"):
             continue

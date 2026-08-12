@@ -7,7 +7,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lumi_eggcracker.artifacts import from_process_fds, from_snapshot, validate_path
+from lumi_eggcracker.artifacts import (
+    from_mapped_files,
+    from_process_fds,
+    from_snapshot,
+    validate_path,
+)
 from lumi_eggcracker.discovery import ProcessIdentity
 
 
@@ -27,6 +32,25 @@ def safetensors(*, dtype: str = "F32", shape: list[int] | None = None, offsets: 
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_mapping_windows_eventually_cover_model_after_fd_close(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            mappings = proc / "42" / "map_files"
+            mappings.mkdir(parents=True)
+            for index in range(64):
+                (mappings / f"{index + 1:x}-{index + 2:x}").write_bytes(b"not a model")
+            (mappings / "100-200").write_bytes(gguf())
+            sample = type(
+                "Snapshot",
+                (),
+                {"identity": type("Identity", (), {"pid": 42})()},
+            )()
+
+            self.assertEqual((), from_mapped_files(sample, proc=proc, start_index=0))
+            evidence = from_mapped_files(sample, proc=proc, start_index=64)
+
+            self.assertEqual(("gguf-v3",), tuple(item.evidence_id for item in evidence))
+
     def test_descriptor_windows_eventually_cover_late_model_fd(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             proc = Path(raw)
