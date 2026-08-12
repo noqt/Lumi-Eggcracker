@@ -122,6 +122,12 @@ def main() -> int:
         ROOT / "scripts" / "run_autonomous_matrix.py": "scripts/run_autonomous_matrix.py",
         ROOT / "scripts" / "benchmark_overhead.py": "scripts/benchmark_overhead.py",
         ROOT / "scripts" / "verify_evidence.py": "scripts/verify_evidence.py",
+        ROOT / "tests" / "fixtures" / "benign_model_handler.py": "tests/fixtures/benign_model_handler.py",
+        ROOT / "tests" / "fixtures" / "benign_near_limit.py": "tests/fixtures/benign_near_limit.py",
+        ROOT / "tests" / "fixtures" / "canary.py": "tests/fixtures/canary.py",
+        ROOT / "tests" / "fixtures" / "fork_race.py": "tests/fixtures/fork_race.py",
+        ROOT / "tests" / "fixtures" / "hostile_client.py": "tests/fixtures/hostile_client.py",
+        ROOT / "tests" / "fixtures" / "pid_pressure.py": "tests/fixtures/pid_pressure.py",
     }
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path, name in release_files.items():

@@ -116,6 +116,12 @@ def main() -> int:
             "scripts/run_autonomous_matrix.py",
             "scripts/benchmark_overhead.py",
             "scripts/verify_evidence.py",
+            "tests/fixtures/benign_model_handler.py",
+            "tests/fixtures/benign_near_limit.py",
+            "tests/fixtures/canary.py",
+            "tests/fixtures/fork_race.py",
+            "tests/fixtures/hostile_client.py",
+            "tests/fixtures/pid_pressure.py",
         )
     }
     with zipfile.ZipFile(args.release_bundle) as archive:

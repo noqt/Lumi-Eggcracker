@@ -7,8 +7,10 @@ import json
 import os
 import pwd
 import secrets
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -104,17 +106,35 @@ def main() -> int:
     results: dict[str, Any] = {"fork_race": [], "benign": [], "pid_tripwire": [], "restart": [], "socket": {}, "result": "FAIL"}
     latencies: list[float] = []
     canaries = 0
+    fixture_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
+        fixture_workspace = tempfile.TemporaryDirectory(
+            prefix="lumi-native-fixtures-", dir="/tmp"
+        )
+        fixture_root = Path(fixture_workspace.name)
+        os.chmod(fixture_root, 0o755)
+        fixtures: dict[str, Path] = {}
+        for filename in (
+            "benign_near_limit.py",
+            "canary.py",
+            "fork_race.py",
+            "hostile_client.py",
+            "pid_pressure.py",
+        ):
+            destination = fixture_root / filename
+            shutil.copyfile(ROOT / "tests" / "fixtures" / filename, destination)
+            os.chmod(destination, 0o644)
+            fixtures[filename] = destination
         if run(["/usr/sbin/runuser", "-u", workload, "--", CLI, "doctor"], check=False).returncode == 0:
             raise RuntimeError("workload identity accessed supervisor client")
         if call(operator, ["doctor"]).get("result") != "PASS":
             raise RuntimeError("operator supervisor authentication failed")
         modes = ("fork", "session", "replace", "fork")
         for index in range(args.fork_race_repetitions):
-            canary = subprocess.Popen(["/usr/sbin/runuser", "-u", workload, "--", "/usr/bin/python3", str(ROOT / "tests/fixtures/canary.py")], start_new_session=True)
+            canary = subprocess.Popen(["/usr/sbin/runuser", "-u", workload, "--", "/usr/bin/python3", str(fixtures["canary.py"])], start_new_session=True)
             try:
                 name = f"race-{token}-{index}"
-                start_workload(operator, ["start", "--name", name, "--max-pids", "4096", "--", "/usr/bin/python3", str(ROOT / "tests/fixtures/fork_race.py"), modes[index % len(modes)]])
+                start_workload(operator, ["start", "--name", name, "--max-pids", "4096", "--", "/usr/bin/python3", str(fixtures["fork_race.py"]), modes[index % len(modes)]])
                 time.sleep(0.12)
                 receipt_path = Path("/tmp") / f"lumi-eggcracker-receipt-{token}-{index}.json"
                 receipt = call(operator, ["kill", "--name", name, "--receipt", str(receipt_path)])
@@ -130,7 +150,7 @@ def main() -> int:
                 stop_canary(canary)
         for index in range(5):
             name = f"pressure-{token}-{index}"
-            start_workload(operator, ["start", "--name", name, "--max-pids", "4", "--", "/usr/bin/python3", str(ROOT / "tests/fixtures/pid_pressure.py")])
+            start_workload(operator, ["start", "--name", name, "--max-pids", "4", "--", "/usr/bin/python3", str(fixtures["pid_pressure.py"])])
             state = wait_state(operator, name, "TERMINATED")
             receipt_files = sorted(Path("/var/lib/lumi-eggcracker/receipts").glob("*.json"), key=lambda path: path.stat().st_mtime_ns)
             receipt = json.loads(receipt_files[-1].read_text(encoding="utf-8"))
@@ -140,14 +160,14 @@ def main() -> int:
             results["pid_tripwire"].append(receipt["containment"]["trigger_to_empty_ms"])
         for index in range(args.benign_repetitions):
             name = f"benign-{token}-{index}"
-            start_workload(operator, ["start", "--name", name, "--max-pids", "16", "--", "/usr/bin/python3", str(ROOT / "tests/fixtures/benign_near_limit.py"), "12"])
+            start_workload(operator, ["start", "--name", name, "--max-pids", "16", "--", "/usr/bin/python3", str(fixtures["benign_near_limit.py"]), "12"])
             state = wait_state(operator, name, "COMPLETED_ALLOWED")
             if state.get("state") != "COMPLETED_ALLOWED":
                 raise RuntimeError("benign near-limit workload was not allowed")
             results["benign"].append(state["state"])
         hostile_path = Path("/tmp") / f"lumi-eggcracker-hostile-{token}.json"
         hostile = f"hostile-{token}"
-        start_workload(operator, ["start", "--name", hostile, "--max-pids", "8", "--", "/usr/bin/python3", str(ROOT / "tests/fixtures/hostile_client.py"), str(hostile_path), str(args.socket_attempts)])
+        start_workload(operator, ["start", "--name", hostile, "--max-pids", "8", "--", "/usr/bin/python3", str(fixtures["hostile_client.py"]), str(hostile_path), str(args.socket_attempts)])
         wait_state(operator, hostile, "COMPLETED_ALLOWED", timeout=30)
         hostile_result = json.loads(hostile_path.read_text(encoding="utf-8"))
         hostile_path.unlink(missing_ok=True)
@@ -198,6 +218,8 @@ def main() -> int:
         for line in active.stdout.splitlines():
             if line.split() and line.split()[0].startswith("lumi-eggcracker-workload-"):
                 run(["/usr/bin/systemctl", "stop", line.split()[0]], check=False)
+        if fixture_workspace is not None:
+            fixture_workspace.cleanup()
 
 
 if __name__ == "__main__":
