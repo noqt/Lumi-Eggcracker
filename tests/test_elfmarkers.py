@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from lumi_eggcracker.discovery import ProcessIdentity
 from lumi_eggcracker.elfmarkers import (
     PINNED_LLAMA_BUILD_IDS,
     PYTORCH_ATEN_EVIDENCE_ID,
@@ -44,7 +45,55 @@ def elf(*, markers: tuple[str, ...], append_decoys: bool = False) -> bytes:
     return bytes(body)
 
 
+def build_id_elf(identifier: bytes) -> bytes:
+    note = struct.pack("<III", 4, len(identifier), 3) + b"GNU\0" + identifier
+    note += b"\0" * ((4 - len(identifier) % 4) % 4)
+    body = bytearray(128 + len(note))
+    body[:16] = b"\x7fELF\x02\x01\x01" + b"\0" * 9
+    body[16:64] = struct.pack(
+        "<HHIQQQIHHHHHH", 3, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0
+    )
+    body[64:120] = struct.pack("<IIQQQQQQ", 4, 0, 128, 0, 0, len(note), 0, 4)
+    body[128:] = note
+    return bytes(body)
+
+
 class ElfMarkerTests(unittest.TestCase):
+    def test_proc_mapping_descriptors_are_inspected_without_pathnames(self) -> None:
+        bridge_id = bytes.fromhex("44" * 20)
+        aten_id = bytes.fromhex("55" * 20)
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            mappings = proc / "42" / "map_files"
+            mappings.mkdir(parents=True)
+            (mappings / "1000-2000").write_bytes(build_id_elf(bridge_id))
+            (mappings / "3000-4000").write_bytes(build_id_elf(aten_id))
+            sample = type(
+                "Snapshot",
+                (),
+                {
+                    "identity": ProcessIdentity(42, 100),
+                    "exe_path": "/deleted-runtime",
+                    "map_paths": (),
+                },
+            )()
+            with patch(
+                "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_BRIDGE_BUILD_IDS",
+                {bridge_id.hex()},
+            ), patch(
+                "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_ATEN_BUILD_IDS",
+                {aten_id.hex()},
+            ):
+                evidence = from_snapshot(sample, proc=proc, max_candidates=2)
+            self.assertEqual(
+                {
+                    PYTORCH_BRIDGE_EVIDENCE_ID,
+                    PYTORCH_ATEN_EVIDENCE_ID,
+                    PYTORCH_PAIR_EVIDENCE_ID,
+                },
+                {item.evidence_id for item in evidence},
+            )
+
     def test_two_valid_symbol_markers_qualify_regardless_of_filename(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "unrelated-name"

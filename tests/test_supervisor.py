@@ -67,6 +67,65 @@ class SupervisorTests(unittest.TestCase):
             (),
         )
         self.assertTrue(supervisor._managed(snapshot))
+        self.assertFalse(supervisor._discovery_excluded(snapshot))
+
+    def test_complete_identity_is_not_suppressed_or_broadened_by_64_partials(self) -> None:
+        supervisor = self._instance()
+        supervisor.catalogue = load_bundled()
+        parent = ProcessIdentity(10, 100)
+        parent_snapshot = ProcessSnapshot(
+            parent, 2001, "/usr/bin/worker", "worker", ("worker",), (), (), ()
+        )
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        snapshots = {parent: parent_snapshot}
+        candidates: list[_EvidenceCandidate] = []
+        for offset in range(64):
+            identity = ProcessIdentity(100 + offset, 1000 + offset)
+            current = ProcessSnapshot(
+                identity,
+                2001,
+                "/usr/bin/python3",
+                "python3",
+                ("python3",),
+                (),
+                (),
+                (),
+                parent=parent,
+            )
+            snapshots[identity] = current
+            candidates.append(_EvidenceCandidate(current, (content,), (), 1))
+        complete_identity = ProcessIdentity(999, 1999)
+        complete_snapshot = ProcessSnapshot(
+            complete_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            (),
+            (),
+            (),
+            parent=parent,
+        )
+        snapshots[complete_identity] = complete_snapshot
+        candidates.append(
+            _EvidenceCandidate(complete_snapshot, (content,), (runtime,), 2)
+        )
+
+        correlated = supervisor._correlate(candidates, snapshots)
+        self.assertEqual(1, len(correlated))
+        self.assertEqual(65, len(correlated[0][0]))
+
+        groups = supervisor._content_groups(candidates, snapshots)
+        self.assertEqual(1, len(groups))
+        self.assertEqual((complete_identity,), tuple(item.snapshot.identity for item in groups[0][0]))
 
     def test_heartbeat_stops_when_no_scan_completed_within_health_bound(self) -> None:
         supervisor = self._instance()

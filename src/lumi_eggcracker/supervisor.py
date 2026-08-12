@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import errno
-import hashlib
 import json
 import os
 import re
@@ -27,7 +26,7 @@ from .approvals import approved, revoke
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
 from .approvals import public as public_approval
-from .artifacts import ArtifactEvidence
+from .artifacts import MAX_FD_PROBES_PER_SCAN, ArtifactEvidence
 from .artifacts import from_snapshot as artifacts_from_snapshot
 from .containment import (
     capture_identity,
@@ -40,11 +39,12 @@ from .detectors import Catalogue, DetectionMatch, load_catalogue, match, public_
 from .discovery import (
     ProcessIdentity,
     ProcessSnapshot,
+    argv_digest,
     executable_digest_for_identity,
     executable_metadata_for_identity,
     scan,
 )
-from .elfmarkers import RuntimeEvidence, with_pytorch_pair
+from .elfmarkers import MAX_RUNTIME_CANDIDATES, RuntimeEvidence, with_pytorch_pair
 from .elfmarkers import from_snapshot as runtime_from_snapshot
 from .jsonio import JsonInputError, load_regular_json
 from .observation import ObservationStore
@@ -217,6 +217,10 @@ class Supervisor:
         ] = {}
         self.enforcement_slots = threading.BoundedSemaphore(MAX_ENFORCEMENT_TASKS)
         self.observations = ObservationStore()
+        self.artifact_fd_offsets: dict[ProcessIdentity, int] = {}
+        self.runtime_map_offsets: dict[ProcessIdentity, int] = {}
+        self.observed_content: dict[ProcessIdentity, dict[str, ArtifactEvidence]] = {}
+        self.observed_runtimes: dict[ProcessIdentity, dict[str, RuntimeEvidence]] = {}
         self.content_scan_tick = 0
         self.last_scan_completed_ns = 0
         self.last_scan_duration_ns = 0
@@ -423,7 +427,11 @@ class Supervisor:
         candidates: list[_EvidenceCandidate],
         snapshots: dict[ProcessIdentity, ProcessSnapshot],
     ) -> list[tuple[tuple[_EvidenceCandidate, ...], str]]:
-        """Union only small evidence sets joined by an exact live relation."""
+        """Union evidence sets joined by an exact live relation.
+
+        Component size is never interpreted as absence.  Callers reduce a
+        component to a minimal complete evidence set before enforcement.
+        """
         if not candidates:
             return []
         parent = list(range(len(candidates)))
@@ -452,8 +460,6 @@ class Supervisor:
             groups.setdefault(find(index), []).append(index)
         result: list[tuple[tuple[_EvidenceCandidate, ...], str]] = []
         for indexes in groups.values():
-            if len(indexes) > MAX_CORRELATED_PROCESSES:
-                continue
             values = tuple(candidates[index] for index in indexes)
             boundary_types = {
                 value
@@ -463,6 +469,97 @@ class Supervisor:
             boundary = next(iter(boundary_types), "same-process") if len(values) > 1 else "same-process"
             result.append((values, boundary))
         return result
+
+    def _minimal_content_groups(
+        self,
+        candidates: list[_EvidenceCandidate],
+        snapshots: dict[ProcessIdentity, ProcessSnapshot],
+    ) -> list[tuple[tuple[_EvidenceCandidate, ...], str]]:
+        """Return one minimal complete evidence set per related component.
+
+        Repeated partial evidence does not revoke an independently complete
+        approval, and a component larger than the historical containment cap
+        cannot suppress a complete profile.  Only evidence identities that
+        contribute a new predicate are selected.
+        """
+        result: list[tuple[tuple[_EvidenceCandidate, ...], str]] = []
+        for component, boundary in self._correlate(candidates, snapshots):
+            selected: list[_EvidenceCandidate] = []
+            seen_content: set[str] = set()
+            seen_runtime: set[str] = set()
+            detected: DetectionMatch | None = None
+            for candidate in sorted(component, key=lambda item: item.snapshot.identity):
+                content_ids = {item.evidence_id for item in candidate.content}
+                runtime_ids = {item.evidence_id for item in candidate.runtimes}
+                if content_ids <= seen_content and runtime_ids <= seen_runtime:
+                    continue
+                selected.append(candidate)
+                seen_content.update(content_ids)
+                seen_runtime.update(runtime_ids)
+                paired = with_pytorch_pair(
+                    item for value in selected for item in value.runtimes
+                )
+                detected = match(
+                    self.catalogue,
+                    selected[0].snapshot,
+                    evidence={
+                        "MODEL_CONTENT": {
+                            item.evidence_id for value in selected for item in value.content
+                        },
+                        "MODEL_RUNTIME": {item.evidence_id for item in paired},
+                    },
+                )
+                if detected is not None:
+                    break
+                if len(selected) >= MAX_CORRELATED_PROCESSES:
+                    # There are currently only two independent evidence groups
+                    # and at most three raw identities are required for the
+                    # pinned profiles.  Reaching this guard means no bounded
+                    # minimal set was established; do not reinterpret partial
+                    # evidence as a destructive match.
+                    break
+            if detected is not None:
+                result.append((tuple(selected), boundary))
+        return result
+
+    def _content_groups(
+        self,
+        candidates: list[_EvidenceCandidate],
+        snapshots: dict[ProcessIdentity, ProcessSnapshot],
+    ) -> list[tuple[tuple[_EvidenceCandidate, ...], str]]:
+        """Prefer exact same-process matches before any relation aggregate."""
+        complete: list[_EvidenceCandidate] = []
+        partial: list[_EvidenceCandidate] = []
+        for item in candidates:
+            own_runtime = with_pytorch_pair(item.runtimes)
+            own_match = match(
+                self.catalogue,
+                item.snapshot,
+                evidence={
+                    "MODEL_CONTENT": {value.evidence_id for value in item.content},
+                    "MODEL_RUNTIME": {value.evidence_id for value in own_runtime},
+                },
+            )
+            if own_match is None:
+                partial.append(item)
+            else:
+                complete.append(
+                    _EvidenceCandidate(
+                        item.snapshot,
+                        item.content,
+                        tuple(own_runtime),
+                        item.first_seen_ns,
+                        own_match,
+                    )
+                )
+        return [((item,), "same-process") for item in complete] + self._minimal_content_groups(
+            partial, snapshots
+        )
+
+    @staticmethod
+    def _discovery_excluded(snapshot: ProcessSnapshot) -> bool:
+        """Exclude only the supervisor itself; a run record is not approval."""
+        return snapshot.identity.pid == os.getpid()
 
     def _cached_executable_digest(self, snapshot: ProcessSnapshot) -> str:
         metadata = executable_metadata_for_identity(snapshot.identity)
@@ -571,7 +668,8 @@ class Supervisor:
             "executable": executable_record,
             "observed": {
                 "argv_count": len(snapshot.argv),
-                "argv_sha256": hashlib.sha256("\0".join(snapshot.argv).encode("utf-8")).hexdigest(),
+                "argv_sha256": argv_digest(snapshot.argv),
+                "argv_complete": snapshot.argv_complete,
                 "pid": snapshot.identity.pid,
                 "start_time": snapshot.identity.start_time,
                 "uid": snapshot.uid,
@@ -739,9 +837,20 @@ class Supervisor:
         except JsonInputError:
             approvals = []  # A corrupt approval never authorizes a matching workload.
         snapshots = scan(
-            exclude=lambda item: item.identity.pid == os.getpid() or self._managed(item)
+            exclude=self._discovery_excluded,
+            include_evidence=content_due,
         )
         snapshot_map = {item.identity: item for item in snapshots}
+        live_identities = set(snapshot_map)
+        for cache in (
+            getattr(self, "artifact_fd_offsets", {}),
+            getattr(self, "runtime_map_offsets", {}),
+            getattr(self, "observed_content", {}),
+            getattr(self, "observed_runtimes", {}),
+        ):
+            for identity in tuple(cache):
+                if identity not in live_identities:
+                    cache.pop(identity, None)
         candidates: list[_EvidenceCandidate] = []
         for snapshot in snapshots:
             fast_match = match(self.catalogue, snapshot)
@@ -749,33 +858,82 @@ class Supervisor:
             runtimes: tuple[RuntimeEvidence, ...] = ()
             first_seen_ns = time.monotonic_ns()
             if content_due:
-                content = artifacts_from_snapshot(snapshot, cache=self.artifact_cache)
+                artifact_offsets = getattr(self, "artifact_fd_offsets", None)
+                if artifact_offsets is None:
+                    self.artifact_fd_offsets = {}
+                    artifact_offsets = self.artifact_fd_offsets
+                runtime_offsets = getattr(self, "runtime_map_offsets", None)
+                if runtime_offsets is None:
+                    self.runtime_map_offsets = {}
+                    runtime_offsets = self.runtime_map_offsets
+                content_now = artifacts_from_snapshot(
+                    snapshot,
+                    cache=self.artifact_cache,
+                    fd_start_index=artifact_offsets.get(snapshot.identity, 0),
+                )
+                artifact_offsets[snapshot.identity] = (
+                    artifact_offsets.get(snapshot.identity, 0) + MAX_FD_PROBES_PER_SCAN
+                )
                 # Runtime evidence is intentionally collected independently so
                 # it can be correlated with content held by a bounded peer.
-                runtimes = runtime_from_snapshot(snapshot, cache=self.runtime_cache)
-                supplied = {
-                    "MODEL_CONTENT": {item.evidence_id for item in content},
-                    "MODEL_RUNTIME": {item.evidence_id for item in runtimes},
+                runtimes_now = runtime_from_snapshot(
+                    snapshot,
+                    cache=self.runtime_cache,
+                    start_index=runtime_offsets.get(snapshot.identity, 0),
+                )
+                runtime_offsets[snapshot.identity] = (
+                    runtime_offsets.get(snapshot.identity, 0) + MAX_RUNTIME_CANDIDATES
+                )
+                observed_content = getattr(self, "observed_content", None)
+                if observed_content is None:
+                    self.observed_content = {}
+                    observed_content = self.observed_content
+                observed_runtimes = getattr(self, "observed_runtimes", None)
+                if observed_runtimes is None:
+                    self.observed_runtimes = {}
+                    observed_runtimes = self.observed_runtimes
+                content_values = observed_content.setdefault(snapshot.identity, {})
+                runtime_values = observed_runtimes.setdefault(snapshot.identity, {})
+                content_values.update({item.evidence_id: item for item in content_now})
+                runtime_values.update({item.evidence_id: item for item in runtimes_now})
+                current_ids = {
+                    *(item.evidence_id for item in content_now),
+                    *(item.evidence_id for item in runtimes_now),
                 }
-                if content or runtimes:
+                if current_ids:
                     observation = self.observations.observe(
-                        snapshot.identity, set().union(*supplied.values())
+                        snapshot.identity, current_ids
                     )
                     first_seen_ns = observation.first_seen_ns
+                else:
+                    observation = self.observations.get(snapshot.identity)
+                if observation is not None:
+                    active = observation.evidence
+                    content = tuple(
+                        item for key, item in content_values.items() if key in active
+                    )
+                    runtimes = with_pytorch_pair(
+                        item for key, item in runtime_values.items() if key in active
+                    )
             if fast_match is None and not content and not runtimes:
                 continue
             candidates.append(
                 _EvidenceCandidate(snapshot, content, runtimes, first_seen_ns, fast_match)
             )
 
-        content_groups = self._correlate(
-            [item for item in candidates if (item.content or item.runtimes) and item.fast_match is None], snapshot_map
+        content_groups = self._content_groups(
+            [
+                item
+                for item in candidates
+                if (item.content or item.runtimes) and item.fast_match is None
+            ],
+            snapshot_map,
         )
-        groups = content_groups + [
+        groups = [
             ((item,), "same-process")
             for item in candidates
             if item.fast_match is not None
-        ]
+        ] + content_groups
         for group, boundary_type in groups:
             trigger_candidate = group[0]
             aggregate_content: list[ArtifactEvidence] = []
@@ -1313,7 +1471,20 @@ class Supervisor:
                 and "pids"
                 in Path("/sys/fs/cgroup/cgroup.controllers").read_text(encoding="ascii").split()
             )
-            ready = available and pidfd_available() and self.quarantine_root is not None
+            now_ns = time.monotonic_ns()
+            scan_healthy = (
+                self.last_scan_completed_ns > 0
+                and now_ns - self.last_scan_completed_ns <= SCAN_HEALTH_TIMEOUT_NS
+                and self.discovery_failures < MAX_DISCOVERY_FAILURES
+                and self.discovery_thread is not None
+                and self.discovery_thread.is_alive()
+            )
+            ready = (
+                available
+                and pidfd_available()
+                and self.quarantine_root is not None
+                and scan_healthy
+            )
             return {
                 "autonomous_discovery": ready,
                 "backend": "root-supervisor",
@@ -1323,6 +1494,7 @@ class Supervisor:
                     "consecutive_failures": self.discovery_failures,
                     "last_scan_duration_ms": self.last_scan_duration_ns / 1_000_000,
                     "last_scan_completed": self.last_scan_completed_ns > 0,
+                    "healthy": scan_healthy,
                     "scan_health_timeout_ms": SCAN_HEALTH_TIMEOUT_NS / 1_000_000,
                 },
                 "pidfd": pidfd_available(),

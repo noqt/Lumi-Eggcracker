@@ -39,6 +39,16 @@ class ObservationStore:
                 self._values.pop(oldest, None)
         return value
 
+    def get(
+        self, identity: Hashable, *, now_ns: int | None = None
+    ) -> Observation | None:
+        self.expire(now_ns=now_ns)
+        return self._values.get(identity)
+
+    def identities(self, *, now_ns: int | None = None) -> frozenset[Hashable]:
+        self.expire(now_ns=now_ns)
+        return frozenset(self._values)
+
     def expire(self, *, now_ns: int | None = None) -> None:
         now = time.monotonic_ns() if now_ns is None else now_ns
         for key, value in tuple(self._values.items()):

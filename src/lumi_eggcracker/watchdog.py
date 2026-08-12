@@ -90,12 +90,45 @@ def _kill_target(path: Path) -> dict[str, object]:
     _write(path, "cgroup.kill", b"1\n")
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        if _events(path).get("populated") == "0":
-            return {"cgroup": str(path), "frozen": frozen, "populated": 0, "started_ns": before}
+        try:
+            empty = _events(path).get("populated") == "0"
+        except JsonInputError:
+            # systemd may collect an empty transient cgroup immediately after
+            # the authoritative kill write.  Collection after that write is
+            # equivalent to an empty proof, not a containment failure.
+            if not path.exists():
+                return {
+                    "cgroup": str(path),
+                    "collected": True,
+                    "frozen": frozen,
+                    "populated": 0,
+                    "started_ns": before,
+                }
+            raise
+        if empty:
+            return {
+                "cgroup": str(path),
+                "collected": False,
+                "frozen": frozen,
+                "populated": 0,
+                "started_ns": before,
+            }
         time.sleep(0.005)
-    value = _events(path)
+    try:
+        value = _events(path)
+    except JsonInputError:
+        if not path.exists():
+            return {
+                "cgroup": str(path),
+                "collected": True,
+                "frozen": frozen,
+                "populated": 0,
+                "started_ns": before,
+            }
+        raise
     return {
         "cgroup": str(path),
+        "collected": False,
         "frozen": frozen,
         "populated": int(value.get("populated", "1")),
         "started_ns": before,

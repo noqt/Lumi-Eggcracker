@@ -16,6 +16,7 @@ from .jsonio import JsonInputError
 MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 MAX_ARTIFACTS = 16
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
+MAX_FD_PROBES_PER_SCAN = 256
 MAX_GGUF_ITEMS = 10_000_000
 MAX_SAFETENSORS_TENSORS = 100_000
 MAX_SAFETENSORS_DIMS = 64
@@ -292,19 +293,43 @@ def from_process_fds(
     *,
     proc: Path = Path("/proc"),
     cache: ArtifactCache | None = None,
+    start_index: int = 0,
+    max_probes: int = MAX_FD_PROBES_PER_SCAN,
 ) -> tuple[ArtifactEvidence, ...]:
-    """Inspect a bounded set of currently open target descriptors.
+    """Inspect one fair bounded window of currently open target descriptors.
 
     The descriptor is opened through ``/proc/<pid>/fd/<n>``.  The link name is
     used only to find a descriptor number; it is never accepted as evidence.
+    Callers advance ``start_index`` between scans so a held-open artifact
+    cannot be hidden permanently behind harmless lower-numbered descriptors.
     """
     identity = snapshot.identity
-    entries = tuple(getattr(snapshot, "fd_entries", ()))[:MAX_ARTIFACTS]
+    if isinstance(start_index, bool) or not isinstance(start_index, int) or start_index < 0:
+        raise JsonInputError("artifact descriptor cursor is invalid")
+    if isinstance(max_probes, bool) or not isinstance(max_probes, int) or max_probes < 1:
+        raise JsonInputError("artifact descriptor probe limit is invalid")
+    directory = proc / str(identity.pid) / "fd"
+    try:
+        numbers = sorted(
+            int(item.name) for item in directory.iterdir() if item.name.isdigit()
+        )
+    except (AttributeError, OSError):
+        numbers = sorted(
+            {
+                number
+                for number, _target in tuple(getattr(snapshot, "fd_entries", ()))
+                if isinstance(number, int) and not isinstance(number, bool) and number >= 0
+            }
+        )
+    if numbers:
+        offset = start_index % len(numbers)
+        probe_count = min(max_probes, len(numbers))
+        selected = tuple(numbers[(offset + index) % len(numbers)] for index in range(probe_count))
+    else:
+        selected = ()
     result: list[ArtifactEvidence] = []
     consumed = 0
-    for number, _target in entries:
-        if not isinstance(number, int) or number < 0:
-            continue
+    for number in selected:
         # /proc/<pid>/fd/<n> is necessarily a procfs symlink.  We open that
         # exact descriptor target, then validate the opened inode; O_NOFOLLOW
         # would reject every legitimate procfs descriptor.
@@ -349,9 +374,19 @@ def from_snapshot(
     *,
     proc: Path = Path("/proc"),
     cache: ArtifactCache | None = None,
+    fd_start_index: int = 0,
+    fd_max_probes: int = MAX_FD_PROBES_PER_SCAN,
 ) -> tuple[ArtifactEvidence, ...]:
     """Collect bounded GGUF evidence from open descriptors and mapped files."""
-    result = list(from_process_fds(snapshot, proc=proc, cache=cache))
+    result = list(
+        from_process_fds(
+            snapshot,
+            proc=proc,
+            cache=cache,
+            start_index=fd_start_index,
+            max_probes=fd_max_probes,
+        )
+    )
     for raw in tuple(getattr(snapshot, "map_paths", ())):
         if not isinstance(raw, str) or not raw.startswith("/"):
             continue

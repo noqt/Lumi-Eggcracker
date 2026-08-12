@@ -86,6 +86,8 @@ def approved(
     *,
     executable_metadata: os.stat_result | tuple[int, int] | None = None,
 ) -> bool:
+    if not getattr(snapshot, "argv_complete", True):
+        return False
     command_hash = argv_digest(snapshot.argv)
     if executable_metadata is None:
         try:

@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from lumi_eggcracker.artifacts import from_snapshot, validate_path
+from lumi_eggcracker.artifacts import from_process_fds, from_snapshot, validate_path
+from lumi_eggcracker.discovery import ProcessIdentity
 
 
 def gguf(*, version: int = 3, tensors: int = 1, metadata: int = 0, padding: int = 64) -> bytes:
@@ -26,6 +27,23 @@ def safetensors(*, dtype: str = "F32", shape: list[int] | None = None, offsets: 
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_descriptor_windows_eventually_cover_late_model_fd(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            directory = proc / "42" / "fd"
+            directory.mkdir(parents=True)
+            for number in range(20):
+                (directory / str(number)).write_bytes(b"harmless")
+            (directory / "20").write_bytes(gguf())
+            sample = type("Snapshot", (), {"identity": ProcessIdentity(42, 100), "fd_entries": ()})()
+            self.assertEqual(
+                (), from_process_fds(sample, proc=proc, start_index=0, max_probes=16)
+            )
+            evidence = from_process_fds(
+                sample, proc=proc, start_index=16, max_probes=16
+            )
+            self.assertEqual({"gguf-v3"}, {item.evidence_id for item in evidence})
+
     def test_valid_gguf_content_does_not_depend_on_filename(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "opaque-input"

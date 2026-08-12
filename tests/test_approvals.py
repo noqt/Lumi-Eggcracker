@@ -14,6 +14,7 @@ class Sample:
     uid: int
     exe_path: str
     argv: tuple[str, ...]
+    argv_complete: bool = True
 
 
 class ApprovalTests(unittest.TestCase):
@@ -28,6 +29,13 @@ class ApprovalTests(unittest.TestCase):
             self.assertTrue(approved(sample, executable_digest(binary), values))
             self.assertFalse(approved(Sample(1002, str(binary), sample.argv), executable_digest(binary), values))
             self.assertFalse(approved(Sample(1001, str(binary), (str(binary), "-m", "/models/other.gguf")), executable_digest(binary), values))
+            self.assertFalse(
+                approved(
+                    Sample(1001, str(binary), sample.argv, argv_complete=False),
+                    executable_digest(binary),
+                    values,
+                )
+            )
             self.assertNotIn("/models/qwen.gguf", record.values())
             self.assertEqual(argv_digest(sample.argv), record["argv_sha256"])
 
