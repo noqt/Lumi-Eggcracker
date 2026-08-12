@@ -18,7 +18,7 @@ from lumi_eggcracker.elfmarkers import (
     with_pytorch_pair,
 )
 from lumi_eggcracker.jsonio import JsonInputError
-from lumi_eggcracker.records import RUN_SCHEMA, command_summary
+from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
 from lumi_eggcracker.supervisor import Supervisor, _EvidenceCandidate
 
 
@@ -223,6 +223,24 @@ class SupervisorTests(unittest.TestCase):
             item["state"] = "TERMINATED"
             supervisor._store(item)
             self.assertFalse((supervisor.names / "demo.json").exists())
+
+    def test_autonomous_kill_terminal_state_wins_completion_race(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            item = record()
+            supervisor._store(item)
+            stale_watcher_record = item.copy()
+            supervisor._mark_discovered_runs_terminated({str(item["cgroup"])})
+            self.assertEqual(
+                "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
+            )
+            self.assertFalse(supervisor._mark_completed(stale_watcher_record))
+            self.assertEqual(
+                "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
+            )
 
     def test_correlation_requires_live_same_uid_parent_or_sibling_relation(self) -> None:
         supervisor = self._instance()

@@ -597,6 +597,53 @@ class Supervisor:
             raise JsonInputError("detection event identity is invalid")
         return self.detections / f"{event_id}.json"
 
+    def _discovered_run_cgroups(
+        self,
+        snapshot: ProcessSnapshot,
+        correlated: tuple[_EvidenceCandidate, ...],
+    ) -> set[str]:
+        values: set[str] = set()
+        candidates = correlated or (
+            _EvidenceCandidate(snapshot, (), (), time.monotonic_ns()),
+        )
+        for candidate in candidates:
+            for line in candidate.snapshot.cgroups:
+                if not line.startswith("0::/system.slice/"):
+                    continue
+                cgroup = line[3:]
+                unit = Path(cgroup).name
+                if (
+                    cgroup == f"/system.slice/{unit}"
+                    and unit.startswith(UNIT_PREFIX)
+                    and unit.endswith(".service")
+                    and RUN_ID.fullmatch(
+                        unit.removeprefix(UNIT_PREFIX).removesuffix(".service")
+                    )
+                ):
+                    values.add(cgroup)
+        return values
+
+    def _mark_discovered_runs_terminated(self, cgroups: set[str]) -> None:
+        """Prevent the cgroup watcher from relabelling a detector kill benign."""
+        if not cgroups:
+            return
+        for path in self.runs.glob("*.json"):
+            try:
+                current = load_run(self.runs, path.stem)
+            except JsonInputError:
+                continue
+            if current["cgroup"] not in cgroups:
+                continue
+            lock = self._new_lock(current["run_id"])
+            with lock:
+                try:
+                    latest = load_run(self.runs, current["run_id"])
+                except JsonInputError:
+                    latest = current
+                if latest["state"] != "TERMINATED":
+                    latest["state"] = "TERMINATED"
+                    self._store(latest)
+
     def _store_detection(self, value: dict[str, Any]) -> None:
         write_atomic(self._detection_path(value["event_id"]), value)
         records = sorted(
@@ -760,6 +807,7 @@ class Supervisor:
     ) -> None:
         containment_started = False
         managed_targets = targets or {snapshot.identity}
+        discovered_run_cgroups = self._discovered_run_cgroups(snapshot, correlated)
         try:
             if self.quarantine_root is None:
                 raise JsonInputError("quarantine root is unavailable")
@@ -791,6 +839,7 @@ class Supervisor:
                 dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
             )
             self._store_detection(receipt)
+            self._mark_discovered_runs_terminated(discovered_run_cgroups)
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
             receipt = self._detection_receipt(
                 event_id=event_id,
@@ -1175,10 +1224,15 @@ class Supervisor:
     def _mark_completed(self, record: dict[str, Any]) -> bool:
         lock = self._new_lock(record["run_id"])
         with lock:
-            if record["state"] not in ACTIVE_STATES:
+            try:
+                current = load_run(self.runs, record["run_id"])
+            except JsonInputError:
+                current = record
+            if current["state"] not in ACTIVE_STATES:
                 return False
-            record["state"] = "COMPLETED_ALLOWED"
-            self._store(record)
+            current["state"] = "COMPLETED_ALLOWED"
+            record.update(current)
+            self._store(current)
             return True
 
     def _watch_once(self, record: dict[str, Any], ready: threading.Event | None = None) -> None:
