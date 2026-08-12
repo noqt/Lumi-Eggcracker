@@ -1,6 +1,13 @@
 # Limitations
 
-Lumi Eggcracker 0.4.0 autonomously acts only on a complete match from its two active, publicly qualified content profiles. Its content path supports a regular GGUF v2/v3 artifact combined with a qualified llama.cpp/GGML ELF runtime, or a regular Safetensors artifact combined with the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair. The two evidence groups may be observed in one process or across a bounded related workload using the installed dedicated workload UID: a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup. Unrelated same-UID or common-init processes are not joined. There is no guarantee for evidence that escaped before observation, unobserved processes, or containerised or remote workloads. It does not recognise arbitrary, custom, fully stripped, encrypted or otherwise unlisted AI/agent workloads.
+Eggcracker 0.4.0 autonomously acts only on a complete match from its two active, contract-qualified content profiles. Its content path supports a regular GGUF v2/v3 artifact combined with a qualified llama.cpp/GGML ELF runtime, or a regular Safetensors artifact combined with the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair. The two evidence groups may be observed in one process or across a bounded related workload using the installed dedicated workload UID: a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup. Unrelated same-UID or common-init processes are not joined. There is no guarantee for evidence that escaped before observation, unobserved processes, or containerised or remote workloads. It does not recognise arbitrary, custom, fully stripped, encrypted or otherwise unlisted AI/agent workloads.
+
+The qualification contract is published in `QUALIFICATION.md`. Project records
+report a complete native result for exact commit
+`418f877f0d450aeb26d4a1233257746808c490e5` on one WSL2 Ubuntu host, but the
+checksum-bound evidence pack is not retained in this repository or a public
+GitHub Release. That project-recorded result is not independently re-verifiable
+from the durable public surface and does not qualify another commit or host.
 
 Name-only profiles for Ollama, vLLM, TGI, LocalAI, llamafile and agent CLIs are intentionally not active in this release. They require exact invocation fixtures and launcher-identity qualification before they can become destructive profiles.
 

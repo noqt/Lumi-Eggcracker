@@ -1,8 +1,8 @@
-# Lumi Eggcracker
+# Eggcracker
 
 **Deterministic containment for unapproved local AI workloads on Linux.**
 
-Lumi Eggcracker is a privileged Linux enforcement daemon for a narrow,
+Eggcracker is a privileged Linux enforcement daemon for a narrow,
 published catalogue of locally observed AI workloads.
 
 > Engineering preview: when a complete qualified match has no exact root approval,
@@ -15,7 +15,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 ## What it does
 
 - continuously scans host processes and performs a startup scan before accepting control commands;
-- detects only the two publicly qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
+- detects only the two contract-qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
 - recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
 - recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
 - lets the configured operator approve one exact executable, UID and invocation before it is run;
@@ -29,7 +29,16 @@ Eggcracker does not identify every possible AI implementation. Content recogniti
 
 A successful receipt proves the captured quarantine cgroup is empty. It does not prove that a process which escaped before detection never existed.
 
-## Publicly qualified profiles
+## Active contract-qualified profiles
+
+The table states the exact profile contract implemented by this source. Project
+records report that these profiles passed the native qualification gates for
+commit `418f877f0d450aeb26d4a1233257746808c490e5` on one WSL2 Ubuntu host.
+The corresponding checksum-bound native evidence pack is not retained in this
+repository or a public GitHub Release, so that result is not independently
+re-verifiable from the durable public surface. Run the qualification in
+[QUALIFICATION.md](QUALIFICATION.md) on the exact commit and target host before
+relying on it.
 
 | Profile | Exact qualification | Active in 0.4.0 |
 | --- | --- | --- |
@@ -46,7 +55,28 @@ A successful receipt proves the captured quarantine cgroup is empty. It does not
 
 ## Quick start
 
-Download and extract `lumi-eggcracker-0.4.0-linux.zip`, then run as root:
+There is currently no v0.4.0 GitHub Release or durable anonymous download for
+the Linux bundle. To evaluate the tagged source, build it locally in a disposable
+Ubuntu VM:
+
+```sh
+git clone --branch v0.4.0 --depth 1 https://github.com/noqt/Lumi-Eggcracker.git
+cd Lumi-Eggcracker
+test "$(git rev-parse HEAD)" = "418f877f0d450aeb26d4a1233257746808c490e5"
+python3 scripts/build_release.py --output dist/local
+python3 scripts/verify_release.py \
+  --artifact dist/local/lumi-eggcracker-0.4.0.pyz \
+  --source-archive dist/local/lumi-eggcracker-0.4.0-source.zip \
+  --release-bundle dist/local/lumi-eggcracker-0.4.0-linux.zip
+```
+
+Alternatively, a signed-in GitHub user may download the authenticated
+`lumi-eggcracker-v0.4.0` artifact from the
+[successful `v0.4.0` tag workflow](https://github.com/noqt/Lumi-Eggcracker/actions/runs/31472099403)
+while GitHub retains it, then perform the same source-commit and
+`verify_release.py` checks. A CI artifact is not a durable anonymous Release
+channel. After validation, extract `lumi-eggcracker-0.4.0-linux.zip` and run as
+root:
 
 ```sh
 cd lumi-eggcracker-0.4.0

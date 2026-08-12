@@ -1,16 +1,16 @@
 name: Bug report
-description: Report a reproducible Lumi Nutcracker defect
+description: Report a reproducible Eggcracker defect (sign-in and repository permission required)
 title: "[Bug]: "
 labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: Do not include credentials, private model files or sensitive exploit details. Use private vulnerability reporting for security issues.
+      value: GitHub currently restricts issue creation in this repository, so this tracked form is not an anonymous feedback channel. If you have permission to open an issue, do not include credentials, private model files or sensitive exploit details. Use private vulnerability reporting for security issues.
   - type: input
     id: version
     attributes:
       label: Version
-      placeholder: 0.1.0
+      placeholder: 0.4.0 or exact source commit
     validations:
       required: true
   - type: input
