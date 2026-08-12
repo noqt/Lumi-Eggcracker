@@ -10,6 +10,7 @@ import platform
 import pwd
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -44,20 +45,28 @@ def new_directory(path: Path) -> Path:
     return path
 
 
-def doctor(operator: str) -> dict[str, Any]:
-    result = subprocess.run(
-        ["/usr/sbin/runuser", "-u", operator, "--", str(CLI), "doctor"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or "Eggcracker doctor failed")
-    value = json.loads(result.stdout)
-    if not isinstance(value, dict) or value.get("result") != "PASS":
-        raise RuntimeError("Eggcracker doctor did not pass")
-    return value
+def doctor(operator: str, *, timeout: float = 30) -> dict[str, Any]:
+    """Wait through a bounded post-restart scan and require a real PASS."""
+    deadline = time.monotonic() + timeout
+    latest = "Eggcracker doctor did not pass"
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["/usr/sbin/runuser", "-u", operator, "--", str(CLI), "doctor"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3,
+        )
+        latest = result.stderr.strip() or result.stdout.strip() or latest
+        if result.returncode == 0:
+            try:
+                value = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                value = None
+            if isinstance(value, dict) and value.get("result") == "PASS":
+                return value
+        time.sleep(0.05)
+    raise RuntimeError(latest)
 
 
 def main() -> int:
@@ -216,6 +225,7 @@ def main() -> int:
             ),
         )
         for filename, arguments in jobs:
+            doctor(args.operator)
             run(
                 [
                     sys.executable,
