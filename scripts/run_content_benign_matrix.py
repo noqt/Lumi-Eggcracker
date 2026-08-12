@@ -48,23 +48,26 @@ def main() -> int:
                 mode = MODES[index % len(MODES)]
                 destination = root / f"copy-{index}"
                 before = set(DETECTIONS.glob("*.json"))
-                process = subprocess.run(
-                    [
-                        "/usr/sbin/runuser",
-                        "-u",
-                        args.user,
-                        "--",
-                        sys.executable,
-                        str(fixture),
-                        str(model),
-                        mode,
-                        str(destination),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=10,
-                )
+                try:
+                    process = subprocess.run(
+                        [
+                            "/usr/sbin/runuser",
+                            "-u",
+                            args.user,
+                            "--",
+                            sys.executable,
+                            str(fixture),
+                            str(model),
+                            mode,
+                            str(destination),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=30 if mode == "copy" else 10,
+                    )
+                finally:
+                    destination.unlink(missing_ok=True)
                 if process.returncode:
                     raise RuntimeError(
                         process.stderr.strip() or "benign model handler was interrupted"
