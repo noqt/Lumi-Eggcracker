@@ -120,6 +120,7 @@ def main() -> int:
         ROOT / "scripts" / "run_content_adversarial_matrix.py": "scripts/run_content_adversarial_matrix.py",
         ROOT / "scripts" / "self_validate.py": "scripts/self_validate.py",
         ROOT / "scripts" / "run_autonomous_matrix.py": "scripts/run_autonomous_matrix.py",
+        ROOT / "scripts" / "run_native_matrix.py": "scripts/run_native_matrix.py",
         ROOT / "scripts" / "benchmark_overhead.py": "scripts/benchmark_overhead.py",
         ROOT / "scripts" / "verify_evidence.py": "scripts/verify_evidence.py",
         ROOT / "tests" / "fixtures" / "benign_model_handler.py": "tests/fixtures/benign_model_handler.py",

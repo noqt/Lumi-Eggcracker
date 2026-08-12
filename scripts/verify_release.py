@@ -114,6 +114,7 @@ def main() -> int:
             "scripts/run_content_adversarial_matrix.py",
             "scripts/self_validate.py",
             "scripts/run_autonomous_matrix.py",
+            "scripts/run_native_matrix.py",
             "scripts/benchmark_overhead.py",
             "scripts/verify_evidence.py",
             "tests/fixtures/benign_model_handler.py",
