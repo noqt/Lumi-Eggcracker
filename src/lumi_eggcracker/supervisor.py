@@ -970,16 +970,6 @@ class Supervisor:
     def _scan_once(self, *, synchronous: bool = False) -> None:
         self.content_scan_tick += 1
         content_due = synchronous or self.content_scan_tick % CONTENT_SCAN_INTERVAL == 0
-        try:
-            provenances = load_launch_provenance(self.launches)
-        except JsonInputError:
-            # Corrupt or incomplete provenance never authorizes a matching
-            # workload.  Post-exec procfs argv is intentionally not consulted.
-            provenances = []
-        provenance_by_identity = {
-            ProcessIdentity(item["pid"], item["start_time"]): item
-            for item in provenances
-        }
         snapshots = scan(
             exclude=self._discovery_excluded,
             include_evidence=content_due,
@@ -1094,6 +1084,20 @@ class Supervisor:
                 continue
             for candidate in group:
                 snapshot_map[candidate.snapshot.identity] = candidate.snapshot
+            # Launch provenance is written before the protected gate releases.
+            # Load it only after refreshing the post-exec process identity;
+            # loading it at scan start can race a concurrent protected start
+            # and falsely kill an invocation admitted during that same scan.
+            try:
+                provenances = load_launch_provenance(self.launches)
+            except JsonInputError:
+                # Corrupt or incomplete provenance never authorizes a matching
+                # workload.  Post-exec procfs argv is intentionally not used.
+                provenances = []
+            provenance_by_identity = {
+                ProcessIdentity(item["pid"], item["start_time"]): item
+                for item in provenances
+            }
             trigger_candidate = group[0]
             aggregate_content: list[ArtifactEvidence] = []
             aggregate_runtimes: list[RuntimeEvidence] = []
