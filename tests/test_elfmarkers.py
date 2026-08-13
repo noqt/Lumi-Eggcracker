@@ -394,6 +394,12 @@ class ElfMarkerTests(unittest.TestCase):
             {PYTORCH_BRIDGE_EVIDENCE_ID, PYTORCH_ATEN_EVIDENCE_ID, PYTORCH_PAIR_EVIDENCE_ID},
             {item.evidence_id for item in with_pytorch_pair((bridge, aten))},
         )
+        pair = next(
+            item
+            for item in with_pytorch_pair((bridge, aten))
+            if item.evidence_id == PYTORCH_PAIR_EVIDENCE_ID
+        )
+        self.assertEqual("SHA256_PAIR", pair.method)
 
     def test_runtime_candidate_cap_deduplicates_repeated_map_segments(self) -> None:
         bridge = type("Evidence", (), {"evidence_id": PYTORCH_BRIDGE_EVIDENCE_ID})()

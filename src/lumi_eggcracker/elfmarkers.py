@@ -486,7 +486,11 @@ def with_pytorch_pair(values: Iterable[RuntimeEvidence]) -> tuple[RuntimeEvidenc
         and PYTORCH_ATEN_EVIDENCE_ID in evidence_ids
         and PYTORCH_PAIR_EVIDENCE_ID not in evidence_ids
     ):
-        result.append(RuntimeEvidence(PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID_PAIR", ()))
+        result.append(
+            RuntimeEvidence(
+                PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "SHA256_PAIR", ()
+            )
+        )
     return tuple(result)
 
 
