@@ -16,9 +16,9 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 
 - continuously scans host processes and performs a startup scan before accepting control commands;
 - distributes bounded descriptor inspection across each complete live descriptor table and advances its root-owned scan generation across supervisor recovery, so watchdog restart cannot permanently return a high-FD workload to the same uninspected window;
-- detects only the two contract-qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
-- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
-- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
+- detects only the two publicly qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
+- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header plus the full-file SHA-256-authenticated, structurally loadable qualified llama.cpp runtime observed as the running executable or an executable mapping;
+- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and full-file SHA-256-authenticated, structurally loadable, executable-mapped members of the exact pinned CPU PyTorch bridge-plus-ATen pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
 - lets root approve one exact qualified native llama invocation or one root-owned CPython interpreter plus an absolute regular script, workload UID and invocation, then lets the configured operator consume that approval only through the protected pre-exec `start` gate;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
@@ -43,8 +43,8 @@ relying on it.
 
 | Profile | Exact qualification | Active in 0.4.0 |
 | --- | --- | --- |
-| `content.gguf-llama` | Renamed llama.cpp runner, extensionless GGUF path, bounded GGUF header, qualified ELF identity | Yes |
-| `content.safetensors-pytorch` | Pinned CPU PyTorch bridge-plus-ATen pair, valid contiguous Safetensors layout, real model smoke and ATen-only negative control | Yes |
+| `content.gguf-llama` | Renamed full-file-pinned llama.cpp runner, extensionless GGUF path, bounded GGUF header, executable ELF identity | Yes |
+| `content.safetensors-pytorch` | Full-file-pinned CPU PyTorch bridge-plus-ATen pair, valid contiguous Safetensors layout, real model smoke and ATen-only negative control | Yes |
 | Ollama, vLLM, TGI, LocalAI, llamafile and agent CLIs | Invocation-specific fixtures and launcher identity still require qualification | No |
 
 ## Requirements

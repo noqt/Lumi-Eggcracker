@@ -15,6 +15,8 @@ from .jsonio import JsonInputError
 SYS_PIDFD_GETFD = 438
 MAX_FDINFO_BYTES = 16 * 1024
 MAX_REGULAR_FILE_SIZE = 1 << 40
+MAX_PROC_MAP_BYTES = 8 * 1024 * 1024
+MAX_PROC_MAPS = 4096
 T = TypeVar("T")
 
 
@@ -91,6 +93,124 @@ def unique_mapping_references(pid: int, *, proc: Path = PROC) -> tuple[str, ...]
             continue
         seen.add(key)
         result.append(item.name)
+    return tuple(result)
+
+
+@dataclass(frozen=True)
+class ExecutableMappingReference:
+    """One executable file mapping, bound to its kernel mapping identity."""
+
+    name: str
+    device_major: int
+    device_minor: int
+    inode: int
+    file_offset: int
+    mount_ids: tuple[int, ...] = ()
+
+
+def _mount_devices(pid: int, proc: Path) -> dict[tuple[int, int], tuple[int, ...]]:
+    """Map kernel device numbers to target mount IDs from bounded mountinfo."""
+    path = proc / str(pid) / "mountinfo"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return {}
+    if len(raw) > MAX_PROC_MAP_BYTES:
+        return {}
+    result: dict[tuple[int, int], list[int]] = {}
+    for line in raw.decode("utf-8", errors="replace").splitlines()[:MAX_PROC_MAPS]:
+        fields = line.split()
+        if len(fields) < 3 or ":" not in fields[2]:
+            continue
+        try:
+            mount_id = int(fields[0], 10)
+            major, minor = (int(item, 10) for item in fields[2].split(":", 1))
+        except ValueError:
+            continue
+        if mount_id < 1 or major < 0 or minor < 0:
+            continue
+        result.setdefault((major, minor), []).append(mount_id)
+    return {key: tuple(values) for key, values in result.items()}
+
+
+def executable_mapping_references(
+    pid: int, *, proc: Path = PROC
+) -> tuple[ExecutableMappingReference, ...]:
+    """Return bounded, unique executable file mappings from ``/proc/PID/maps``.
+
+    Runtime identity is intentionally narrower than general mapped-file
+    discovery: read-only/data mappings do not prove that an inference runtime
+    was loaded.  The device/inode identity is retained so a deleted mapping
+    whose ``map_files`` link cannot be reopened can be matched to the exact
+    retained process descriptor instead of scanning arbitrary open files.
+    """
+    path = proc / str(pid) / "maps"
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError:
+        return ()
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while total <= MAX_PROC_MAP_BYTES:
+            block = os.read(descriptor, min(64 * 1024, MAX_PROC_MAP_BYTES + 1 - total))
+            if not block:
+                break
+            chunks.append(block)
+            total += len(block)
+    finally:
+        os.close(descriptor)
+    if total > MAX_PROC_MAP_BYTES:
+        return ()
+    try:
+        lines = b"".join(chunks).decode("utf-8", errors="replace").splitlines()
+    except UnicodeError:
+        return ()
+
+    mount_devices = _mount_devices(pid, proc)
+    result: list[ExecutableMappingReference] = []
+    seen: set[tuple[int, int, int]] = set()
+    for line in lines[:MAX_PROC_MAPS]:
+        fields = line.split(maxsplit=5)
+        if len(fields) < 5 or "x" not in fields[1]:
+            continue
+        name, permissions, raw_offset, raw_device, raw_inode = fields[:5]
+        if len(permissions) != 4 or permissions[0] not in "r-":
+            continue
+        limits = name.split("-", 1)
+        devices = raw_device.split(":", 1)
+        if (
+            len(limits) != 2
+            or len(devices) != 2
+            or any(not item for item in (*limits, *devices))
+        ):
+            continue
+        try:
+            start, end = (int(item, 16) for item in limits)
+            major, minor = (int(item, 16) for item in devices)
+            file_offset = int(raw_offset, 16)
+            inode = int(raw_inode, 10)
+        except ValueError:
+            continue
+        if start >= end or inode < 1 or file_offset < 0:
+            continue
+        key = (major, minor, inode)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(
+            ExecutableMappingReference(
+                name,
+                major,
+                minor,
+                inode,
+                file_offset,
+                mount_devices.get((major, minor), ()),
+            )
+        )
     return tuple(result)
 
 

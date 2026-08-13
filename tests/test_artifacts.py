@@ -16,7 +16,11 @@ from lumi_eggcracker.artifacts import (
     validate_path,
 )
 from lumi_eggcracker.discovery import ProcessIdentity
-from lumi_eggcracker.procfd import StableFileMetadata, unique_mapping_references
+from lumi_eggcracker.procfd import (
+    StableFileMetadata,
+    executable_mapping_references,
+    unique_mapping_references,
+)
 
 
 def gguf(*, version: int = 3, tensors: int = 1, metadata: int = 0, padding: int = 64) -> bytes:
@@ -35,6 +39,27 @@ def safetensors(*, dtype: str = "F32", shape: list[int] | None = None, offsets: 
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_executable_mapping_parser_excludes_data_maps_and_binds_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            root = proc / "42"
+            root.mkdir()
+            (root / "maps").write_text(
+                "1000-2000 r--p 00000000 00:2a 11 /data\n"
+                "3000-4000 r-xp 00001000 00:2a 12 /runtime\n",
+                encoding="utf-8",
+            )
+            (root / "mountinfo").write_text(
+                "77 1 0:42 / /mnt/c rw - 9p drvfs rw\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                (("3000-4000", 12, (77,)),),
+                tuple(
+                    (item.name, item.inode, item.mount_ids)
+                    for item in executable_mapping_references(42, proc=proc)
+                ),
+            )
+
     def test_mapping_segments_are_deduplicated_by_stable_inode(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             proc = Path(raw)

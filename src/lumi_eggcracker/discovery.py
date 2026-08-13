@@ -39,6 +39,7 @@ class ProcessSnapshot:
     map_paths: tuple[str, ...] = ()
     parent: ProcessIdentity | None = None
     argv_complete: bool = True
+    executable_map_paths: tuple[str, ...] = ()
 
 
 def _read(path: Path, limit: int = MAX_READ) -> bytes:
@@ -245,7 +246,7 @@ def _maps(path: Path) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _map_paths(path: Path) -> tuple[str, ...]:
+def _map_paths(path: Path, *, executable_only: bool = False) -> tuple[str, ...]:
     try:
         raw = _read(path, MAX_MAP_BYTES).decode("utf-8", errors="replace")
     except (OSError, JsonInputError):
@@ -253,7 +254,11 @@ def _map_paths(path: Path) -> tuple[str, ...]:
     values: list[str] = []
     for line in raw.splitlines()[:MAX_MAPS]:
         parts = line.split(maxsplit=5)
-        if len(parts) == 6 and parts[5].startswith("/"):
+        if (
+            len(parts) == 6
+            and parts[5].startswith("/")
+            and (not executable_only or "x" in parts[1])
+        ):
             values.append(parts[5].removesuffix(" (deleted)"))
     return tuple(values)
 
@@ -298,6 +303,7 @@ def snapshot(
 
     fd_entries: tuple[tuple[int, str], ...] = ()
     maps: tuple[str, ...] = ()
+    executable_maps: tuple[str, ...] = ()
     if include_evidence:
         try:
             fd_entries = _fd_entries(root / "fd", limit=MAX_FDS)
@@ -309,6 +315,7 @@ def snapshot(
         # global discovery pass.
         if not (root / "map_files").is_dir():
             maps = _map_paths(root / "maps")
+            executable_maps = _map_paths(root / "maps", executable_only=True)
     fd_paths = tuple(item[1] for item in fd_entries)
     parent = identity(parent_pid, proc=proc) if parent_pid > 0 else None
     return ProcessSnapshot(
@@ -324,6 +331,7 @@ def snapshot(
         maps,
         parent,
         argv_complete,
+        executable_maps,
     )
 
 
