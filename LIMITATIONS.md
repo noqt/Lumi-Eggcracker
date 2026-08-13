@@ -13,7 +13,7 @@ Name-only profiles for Ollama, vLLM, TGI, LocalAI, llamafile and agent CLIs are 
 
 The observer uses bounded `/proc` polling. It has no kernel execution hook, eBPF programme or guarantee that a process which forks, daemonises or exits before discovery can be reconstructed as one complete historical tree. A successful receipt proves the exact captured quarantine cgroup is empty.
 
-On the qualification WSL2 Ubuntu environment, warmed-cache scan p95 was approximately 251 ms with 50 synthetic children, 650 ms with 200, and 2.9 seconds with 1,000. Content inspection occurs on alternating scans, so high process density can create multi-second observation delay. Results are host-specific; run the bundled benchmark before deployment.
+On the qualification WSL2 Ubuntu environment, warmed-cache scan p95 was approximately 251 ms with 50 synthetic children, 650 ms with 200, and 2.9 seconds with 1,000. Content inspection occurs on alternating scans, so high process density can create multi-second observation delay. Descriptor and mapping reads remain bounded, but use fair stripes whose generation survives supervisor restart rather than repeatedly scanning one prefix. Results are host-specific; run the bundled benchmark before deployment.
 
 The supervisor service protects home directories. Model files held open by a workload can still be inspected through a stable process-descriptor duplicate when an ordinary procfs reopen is unavailable, including deleted files on the qualified WSL2 DrvFS path. Models discovered only by a pathname under a protected home or cache have not been qualified as a release path.
 

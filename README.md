@@ -15,6 +15,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 ## What it does
 
 - continuously scans host processes and performs a startup scan before accepting control commands;
+- distributes bounded descriptor inspection across each complete live descriptor table and advances its root-owned scan generation across supervisor recovery, so watchdog restart cannot permanently return a high-FD workload to the same uninspected window;
 - detects only the two contract-qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
 - recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
 - recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;

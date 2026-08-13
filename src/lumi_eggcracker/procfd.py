@@ -7,6 +7,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from .discovery import PROC, ProcessIdentity, identity
 from .jsonio import JsonInputError
@@ -14,6 +15,83 @@ from .jsonio import JsonInputError
 SYS_PIDFD_GETFD = 438
 MAX_FDINFO_BYTES = 16 * 1024
 MAX_REGULAR_FILE_SIZE = 1 << 40
+T = TypeVar("T")
+
+
+def fair_window(
+    values: tuple[T, ...] | list[T], *, start_index: int, max_probes: int
+) -> tuple[T, ...]:
+    """Return one bounded stripe that eventually covers every current item.
+
+    Contiguous prefix windows let an adversary concentrate useful evidence at
+    one end of a large descriptor table. Stripes distribute each bounded read
+    across the complete table. ``start_index`` remains expressed in
+    probe-sized windows so callers can keep advancing by ``max_probes``.
+    """
+    if isinstance(start_index, bool) or not isinstance(start_index, int) or start_index < 0:
+        raise JsonInputError("descriptor window cursor is invalid")
+    if isinstance(max_probes, bool) or not isinstance(max_probes, int) or max_probes < 1:
+        raise JsonInputError("descriptor window probe limit is invalid")
+    count = len(values)
+    if count <= max_probes:
+        return tuple(values)
+    generation = start_index // max_probes
+    if max_probes < 4:
+        stripes = (count + max_probes - 1) // max_probes
+        return tuple(values[generation % stripes :: stripes])
+    # Always retain both descriptor-table edges.  High-FD placement is a
+    # common bounded-pressure tactic; the rotating interior still guarantees
+    # eventual coverage for every non-edge entry.
+    interior = values[1:-1]
+    interior_limit = max_probes - 2
+    stripes = (len(interior) + interior_limit - 1) // interior_limit
+    return (
+        values[0],
+        *interior[generation % stripes :: stripes],
+        values[-1],
+    )
+
+
+def unique_mapping_references(pid: int, *, proc: Path = PROC) -> tuple[str, ...]:
+    """Return one map-files range per stable mapped inode when available.
+
+    Shared objects normally occupy several adjacent mapping ranges. Counting
+    every segment against the deep-inspection limit makes the limit depend on
+    loader segmentation rather than unique runtime files. If a mapping cannot
+    be stat-bound (for example a deleted DrvFS entry), retain every range so no
+    evidence is discarded on the strength of a pathname.
+    """
+    directory = proc / str(pid) / "map_files"
+    try:
+        candidates = sorted(
+            (
+                item
+                for item in directory.iterdir()
+                if len(item.name.split("-", 1)) == 2
+                and all(
+                    part
+                    and all(character in "0123456789abcdefABCDEF" for character in part)
+                    for part in item.name.split("-", 1)
+                )
+            ),
+            key=lambda item: int(item.name.split("-", 1)[0], 16),
+        )
+    except (AttributeError, OSError):
+        return ()
+    result: list[str] = []
+    seen: set[tuple[int, int]] = set()
+    for item in candidates:
+        try:
+            metadata = item.stat()
+        except OSError:
+            result.append(item.name)
+            continue
+        key = (metadata.st_dev, metadata.st_ino)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item.name)
+    return tuple(result)
 
 
 @dataclass(frozen=True)

@@ -11,10 +11,17 @@ from pathlib import Path
 from typing import Protocol
 
 from .jsonio import JsonInputError
-from .procfd import StableFileMetadata, descriptor_size, open_process_fd
+from .procfd import (
+    StableFileMetadata,
+    descriptor_size,
+    fair_window,
+    open_process_fd,
+    unique_mapping_references,
+)
 
 MAX_ELF_BYTES = 4 * 1024 * 1024
 MAX_SECTIONS = 1024
+MAX_RUNTIME_FD_PROBES = 32
 LLAMA_MARKERS = frozenset(
     {
         "llama_decode",
@@ -346,21 +353,11 @@ def _cached_descriptor(
 
 
 def _mapping_references(snapshot: object, proc: Path) -> tuple[str, ...]:
-    try:
-        pid = snapshot.identity.pid
-        directory = proc / str(pid) / "map_files"
-        values = [
-            item.name
-            for item in directory.iterdir()
-            if len(item.name.split("-", 1)) == 2
-            and all(
-                part and all(character in "0123456789abcdefABCDEF" for character in part)
-                for part in item.name.split("-", 1)
-            )
-        ]
-    except (AttributeError, OSError):
+    identity = getattr(snapshot, "identity", None)
+    pid = getattr(identity, "pid", None)
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
         return ()
-    return tuple(sorted(values, key=lambda value: int(value.split("-", 1)[0], 16)))
+    return unique_mapping_references(pid, proc=proc)
 
 
 def from_snapshot(
@@ -424,10 +421,12 @@ def from_snapshot(
             }
         )
     if numbers:
-        fd_offset = start_index % len(numbers)
-        fd_count = min(max_candidates, len(numbers))
-        for index in range(fd_count):
-            number = numbers[(fd_offset + index) % len(numbers)]
+        runtime_generation = start_index // max_candidates
+        for number in fair_window(
+            numbers,
+            start_index=runtime_generation * MAX_RUNTIME_FD_PROBES,
+            max_probes=MAX_RUNTIME_FD_PROBES,
+        ):
             try:
                 descriptor, fallback = open_process_fd(
                     snapshot.identity, number, proc=proc
@@ -441,10 +440,8 @@ def from_snapshot(
 
     references = _mapping_references(snapshot, proc)
     if references:
-        offset = start_index % len(references)
-        count = min(max_candidates, len(references))
-        selected = tuple(
-            references[(offset + index) % len(references)] for index in range(count)
+        selected = fair_window(
+            references, start_index=start_index, max_probes=max_candidates
         )
         for reference in selected:
             try:
@@ -466,10 +463,10 @@ def from_snapshot(
                 seen.add(raw)
                 candidates.append(raw)
         if candidates:
-            offset = start_index % len(candidates)
-            count = min(max_candidates, len(candidates))
-            for index in range(count):
-                path = Path(candidates[(offset + index) % len(candidates)])
+            for raw_path in fair_window(
+                candidates, start_index=start_index, max_probes=max_candidates
+            ):
+                path = Path(raw_path)
                 if cache is None:
                     values = _inspect_candidate(path)
                 else:

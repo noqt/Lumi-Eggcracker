@@ -87,6 +87,8 @@ STATE_DIR = Path("/var/lib/lumi-eggcracker")
 UNIT_PREFIX = "lumi-eggcracker-workload-"
 GATES_DIR = Path("/run/lumi-eggcracker/gates")
 STAGED_DIR = Path("/run/lumi-eggcracker/staged")
+DISCOVERY_PROGRESS_SCHEMA = "lumi-eggcracker.discovery-progress.v1"
+DISCOVERY_PROGRESS = STATE_DIR / "discovery-progress.json"
 MAX_TERMINAL_RECORDS = 128
 DETECTION_LIMIT = 1000
 RECENT_DISCOVERY_NS = 5_000_000_000
@@ -243,6 +245,7 @@ class Supervisor:
         self.observed_content: dict[ProcessIdentity, dict[str, ArtifactEvidence]] = {}
         self.observed_runtimes: dict[ProcessIdentity, dict[str, RuntimeEvidence]] = {}
         self.content_scan_tick = 0
+        self.discovery_window_generation = 0
         self.last_scan_completed_ns = 0
         self.last_scan_duration_ns = 0
         self.discovery_failures = 0
@@ -388,9 +391,44 @@ class Supervisor:
         for path in (*SOCKET_ACTIONS, LEGACY_SOCKET):
             if path.exists() or path.is_symlink():
                 raise JsonInputError("Eggcracker socket already exists")
+        self._reserve_discovery_window()
         self._recover()
         self.quarantine_root = self._prepare_quarantine()
         self._scan_once(synchronous=True)
+
+    def _reserve_discovery_window(self) -> None:
+        """Reserve a fair scan generation that survives supervisor recovery."""
+        path = getattr(self, "discovery_progress_path", DISCOVERY_PROGRESS)
+        generation = 0
+        if path.exists() or path.is_symlink():
+            value = load_regular_json(path)
+            if (
+                set(value) != {"generation", "schema_version"}
+                or value.get("schema_version") != DISCOVERY_PROGRESS_SCHEMA
+                or isinstance(value.get("generation"), bool)
+                or not isinstance(value.get("generation"), int)
+                or value["generation"] < 0
+            ):
+                raise JsonInputError("discovery progress state is invalid")
+            generation = value["generation"]
+        write_atomic(
+            path,
+            {
+                "generation": generation + 1,
+                "schema_version": DISCOVERY_PROGRESS_SCHEMA,
+            },
+        )
+        self.discovery_window_generation = generation
+
+    def _window_start(self, probes: int) -> int:
+        # A process first observed after an expensive scan must join the
+        # current fair window, not the supervisor-startup window.  The durable
+        # base advances on recovery; the scan tick advances while this process
+        # remains alive.
+        scan_generation = getattr(self, "content_scan_tick", 0) // CONTENT_SCAN_INTERVAL
+        return (
+            getattr(self, "discovery_window_generation", 0) + scan_generation
+        ) * probes
 
     def _prepare_quarantine(self) -> Path:
         """Create only the delegated child cgroup root of this exact service."""
@@ -1075,29 +1113,38 @@ class Supervisor:
                 if artifact_map_offsets is None:
                     self.artifact_map_offsets = {}
                     artifact_map_offsets = self.artifact_map_offsets
+                artifact_fd_start = artifact_offsets.get(
+                    snapshot.identity,
+                    self._window_start(MAX_FD_PROBES_PER_SCAN),
+                )
+                artifact_map_start = artifact_map_offsets.get(
+                    snapshot.identity,
+                    self._window_start(MAX_MAP_PROBES_PER_SCAN),
+                )
                 content_now = artifacts_from_snapshot(
                     snapshot,
                     cache=self.artifact_cache,
-                    fd_start_index=artifact_offsets.get(snapshot.identity, 0),
-                    map_start_index=artifact_map_offsets.get(snapshot.identity, 0),
+                    fd_start_index=artifact_fd_start,
+                    map_start_index=artifact_map_start,
                 )
                 artifact_offsets[snapshot.identity] = (
-                    artifact_offsets.get(snapshot.identity, 0) + MAX_FD_PROBES_PER_SCAN
+                    artifact_fd_start + MAX_FD_PROBES_PER_SCAN
                 )
                 artifact_map_offsets[snapshot.identity] = (
-                    artifact_map_offsets.get(snapshot.identity, 0)
-                    + MAX_MAP_PROBES_PER_SCAN
+                    artifact_map_start + MAX_MAP_PROBES_PER_SCAN
                 )
                 # Runtime evidence is intentionally collected independently so
                 # it can be correlated with content held by a bounded peer.
+                runtime_start = runtime_offsets.get(
+                    snapshot.identity,
+                    self._window_start(MAX_RUNTIME_CANDIDATES),
+                )
                 runtimes_now = runtime_from_snapshot(
                     snapshot,
                     cache=self.runtime_cache,
-                    start_index=runtime_offsets.get(snapshot.identity, 0),
+                    start_index=runtime_start,
                 )
-                runtime_offsets[snapshot.identity] = (
-                    runtime_offsets.get(snapshot.identity, 0) + MAX_RUNTIME_CANDIDATES
-                )
+                runtime_offsets[snapshot.identity] = runtime_start + MAX_RUNTIME_CANDIDATES
                 observed_content = getattr(self, "observed_content", None)
                 if observed_content is None:
                     self.observed_content = {}

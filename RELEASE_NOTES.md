@@ -14,4 +14,6 @@ The final approval repair also prevents a non-root operator from replacing an ar
 
 The final containment-scope repair groups independently complete related siblings into one enforcement scope before the first receipt, including their live same-UID connector parent. Deleted WSL2 DrvFS model and runtime descriptors are inspected through an exact PID/start-time-bound `pidfd_getfd` duplicate when the ordinary procfs magic link cannot be reopened; the same bounded content and ELF validators remain authoritative.
 
+The pressure-recovery repair replaces contiguous descriptor prefixes with bounded stripes over the complete current descriptor and mapping tables. The root-owned stripe generation advances across supervisor/watchdog recovery, preventing repeated recovery from resetting a still-live high-FD supported workload to the same uninspected window.
+
 The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.

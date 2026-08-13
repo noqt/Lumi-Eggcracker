@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import threading
 import time
@@ -405,6 +406,35 @@ class SupervisorTests(unittest.TestCase):
         with patch("lumi_eggcracker.supervisor.socket.socket") as socket_factory:
             supervisor._heartbeat()
         socket_factory.assert_not_called()
+
+    def test_discovery_window_generation_survives_supervisor_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "discovery-progress.json"
+            first = self._instance()
+            first.discovery_progress_path = path
+            first._reserve_discovery_window()
+            second = self._instance()
+            second.discovery_progress_path = path
+            second._reserve_discovery_window()
+
+            self.assertEqual(0, first.discovery_window_generation)
+            self.assertEqual(1, second.discovery_window_generation)
+            self.assertEqual(64, second._window_start(64))
+            second.content_scan_tick = 2
+            self.assertEqual(128, second._window_start(64))
+            self.assertEqual(
+                2, json.loads(path.read_text(encoding="utf-8"))["generation"]
+            )
+
+    def test_invalid_discovery_progress_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "discovery-progress.json"
+            path.write_text('{"generation": true}', encoding="utf-8")
+            supervisor = self._instance()
+            supervisor.discovery_progress_path = path
+
+            with self.assertRaises(JsonInputError):
+                supervisor._reserve_discovery_window()
 
     def test_containment_orders_direct_kill_before_receipt_state_and_cleanup(self) -> None:
         supervisor = self._instance()
