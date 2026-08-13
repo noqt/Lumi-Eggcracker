@@ -35,6 +35,28 @@ def call(operator: str, argv: list[str]) -> dict[str, Any]:
     return value
 
 
+def wait_for_armed_doctor(operator: str, *, timeout: float = 45) -> dict[str, Any]:
+    """Wait through truthful between-scan UNSUPPORTED responses."""
+    deadline = time.monotonic() + timeout
+    last: dict[str, Any] | None = None
+    command = ["/usr/sbin/runuser", "-u", operator, "--", CLI, "doctor"]
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=False, timeout=30
+        )
+        raw = result.stdout.strip() or result.stderr.strip()
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            value = None
+        if isinstance(value, dict):
+            last = value
+            if value.get("result") == "PASS" and value.get("autonomous_discovery"):
+                return value
+        time.sleep(0.05)
+    raise RuntimeError(f"autonomous discovery did not become armed: {last}")
+
+
 def stop(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
@@ -102,9 +124,7 @@ def main() -> int:
         runner, model, _manifest = assets(args.assets_manifest)
         argv = command(runner, model)
         try:
-            doctor = call(operator, ["doctor"])
-            if doctor.get("result") != "PASS" or not doctor.get("autonomous_discovery"):
-                raise RuntimeError("autonomous discovery is not armed")
+            wait_for_armed_doctor(operator)
             for index in range(args.discoveries):
                 canary = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
                 process: subprocess.Popen[bytes] | None = None

@@ -20,4 +20,6 @@ Installation now waits for every control socket to reach its final owner and mod
 
 The mandatory synchronous startup scan is now accounted as the first healthy completed scan and heartbeated as soon as the discovery worker is live. Repeated deliberate supervisor restarts therefore retain watchdog liveness while still requiring a completed scan before any heartbeat.
 
+Native autonomous qualification now waits boundedly through truthful between-scan `UNSUPPORTED` responses after the restart matrix instead of misclassifying that fail-closed health window as a product failure.
+
 The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.
