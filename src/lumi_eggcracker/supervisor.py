@@ -22,9 +22,9 @@ from typing import Any
 
 from . import __version__
 from .adoption import AdoptionResult, contain_many, open_pidfd, pidfd_available
-from .approvals import approved, revoke
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
+from .approvals import match_launch, revoke
 from .approvals import public as public_approval
 from .artifacts import MAX_FD_PROBES_PER_SCAN, MAX_MAP_PROBES_PER_SCAN, ArtifactEvidence
 from .artifacts import from_snapshot as artifacts_from_snapshot
@@ -44,9 +44,16 @@ from .discovery import (
     executable_metadata_for_identity,
     scan,
 )
+from .discovery import (
+    identity as process_identity,
+)
 from .elfmarkers import MAX_RUNTIME_CANDIDATES, RuntimeEvidence, with_pytorch_pair
 from .elfmarkers import from_snapshot as runtime_from_snapshot
 from .jsonio import JsonInputError, load_regular_json
+from .launches import authorizes as launch_authorizes
+from .launches import create as create_launch_provenance
+from .launches import load_all as load_launch_provenance
+from .launches import provenance_path
 from .observation import ObservationStore
 from .records import (
     ACTIVE_STATES,
@@ -191,12 +198,14 @@ class Supervisor:
         self.names = STATE_DIR / "names"
         self.receipts = STATE_DIR / "receipts"
         self.approvals = STATE_DIR / "approvals"
+        self.launches = STATE_DIR / "launches"
         self.detections = STATE_DIR / "detections"
         self.quarantine_root: Path | None = None
         self.stop_event = threading.Event()
         self.locks: dict[str, threading.Lock] = {}
         self.lock_guard = threading.Lock()
         self.start_lock = threading.Lock()
+        self.approval_lock = threading.Lock()
         self.completed: dict[str, dict[str, Any]] = {}
         self.operations: list[str] = []  # Test-visible ordering only.
         self.discovery_lock = threading.Lock()
@@ -284,6 +293,8 @@ class Supervisor:
                     pointer.unlink()
             except JsonInputError:
                 raise JsonInputError("workload name index is invalid")
+        if record["state"] not in ACTIVE_STATES and hasattr(self, "launches"):
+            provenance_path(self.launches, record["run_id"]).unlink(missing_ok=True)
         self._prune_terminal_records()
 
     def _prune_terminal_records(self) -> None:
@@ -336,6 +347,7 @@ class Supervisor:
             (self.names, 0o700, 0),
             (self.receipts, 0o700, 0),
             (self.approvals, 0o700, 0),
+            (self.launches, 0o700, 0),
             (self.detections, 0o700, 0),
         ):
             path.mkdir(mode=mode, parents=True, exist_ok=True)
@@ -476,12 +488,14 @@ class Supervisor:
         candidates: list[_EvidenceCandidate],
         snapshots: dict[ProcessIdentity, ProcessSnapshot],
     ) -> list[tuple[tuple[_EvidenceCandidate, ...], str]]:
-        """Return one minimal complete evidence set per related component.
+        """Return each complete related component with its minimal witness proven.
 
         Repeated partial evidence does not revoke an independently complete
         approval, and a component larger than the historical containment cap
-        cannot suppress a complete profile.  Only evidence identities that
-        contribute a new predicate are selected.
+        cannot suppress a complete profile.  A minimal evidence witness is
+        used only to justify detection; the complete component is returned as
+        enforcement scope so redundant complete pairs cannot survive the
+        first success receipt.
         """
         result: list[tuple[tuple[_EvidenceCandidate, ...], str]] = []
         for component, boundary in self._correlate(candidates, snapshots):
@@ -520,7 +534,7 @@ class Supervisor:
                     # evidence as a destructive match.
                     break
             if detected is not None:
-                result.append((tuple(selected), boundary))
+                result.append((component, boundary))
         return result
 
     def _content_groups(
@@ -662,6 +676,22 @@ class Supervisor:
         targets = {candidate.snapshot.identity for candidate in group}
         selected_cgroups = self._discovered_run_cgroups(group[0].snapshot, group)
         if not selected_cgroups:
+            # A live same-UID parent is the connector that makes direct
+            # siblings one claimed workload.  Stop it before capture so it
+            # cannot replenish a sibling while the component is moved.
+            parents = {
+                candidate.snapshot.parent
+                for candidate in group
+                if candidate.snapshot.parent is not None
+            }
+            for parent in parents:
+                connector = snapshots.get(parent)
+                if connector is not None and connector.uid == self.policy["workload_uid"]:
+                    related_children = sum(
+                        candidate.snapshot.parent == parent for candidate in group
+                    )
+                    if related_children >= 2:
+                        targets.add(parent)
             return targets
         for snapshot in snapshots.values():
             if any(
@@ -909,9 +939,15 @@ class Supervisor:
         self.content_scan_tick += 1
         content_due = synchronous or self.content_scan_tick % CONTENT_SCAN_INTERVAL == 0
         try:
-            approvals = load_approvals(self.approvals)
+            provenances = load_launch_provenance(self.launches)
         except JsonInputError:
-            approvals = []  # A corrupt approval never authorizes a matching workload.
+            # Corrupt or incomplete provenance never authorizes a matching
+            # workload.  Post-exec procfs argv is intentionally not consulted.
+            provenances = []
+        provenance_by_identity = {
+            ProcessIdentity(item["pid"], item["start_time"]): item
+            for item in provenances
+        }
         snapshots = scan(
             exclude=self._discovery_excluded,
             include_evidence=content_due,
@@ -1052,13 +1088,14 @@ class Supervisor:
                     unapproved.append(candidate)
                     continue
                 executable_digests[candidate.snapshot.identity] = executable_sha256
-                if not approved(
+                provenance = provenance_by_identity.get(candidate.snapshot.identity)
+                if provenance is None or not launch_authorizes(
                     candidate.snapshot,
                     executable_sha256,
-                    approvals,
-                    executable_metadata=getattr(self, "executable_metadata", {}).get(
+                    getattr(self, "executable_metadata", {}).get(
                         candidate.snapshot.identity
                     ),
+                    provenance,
                 ):
                     unapproved.append(candidate)
             if not unapproved:
@@ -1358,6 +1395,21 @@ class Supervisor:
         finally:
             gate.unlink(missing_ok=True)
 
+    @staticmethod
+    def _gated_process(identity: Any) -> ProcessIdentity:
+        """Capture the one pre-exec gate identity in an exact owned cgroup."""
+        path = validate_identity(identity)
+        try:
+            raw = (path / "cgroup.procs").read_text(encoding="ascii").splitlines()
+        except OSError as error:
+            raise JsonInputError("cannot inspect gated workload process") from error
+        if len(raw) != 1 or not raw[0].isdigit():
+            raise JsonInputError("gated workload must contain exactly one process before exec")
+        value = process_identity(int(raw[0]))
+        if value is None:
+            raise JsonInputError("gated workload process identity vanished")
+        return value
+
     def _active_exists(self) -> bool:
         return bool(getattr(self, "active_cgroups", set()))
 
@@ -1375,11 +1427,19 @@ class Supervisor:
             raise JsonInputError("max_memory_mib must be from 64 to 131072")
         if isinstance(cpu_quota, bool) or not isinstance(cpu_quota, int) or not 10 <= cpu_quota <= 10_000:
             raise JsonInputError("cpu_quota_percent must be from 10 to 10000")
-        with self.start_lock:
+        with self.start_lock, self.approval_lock:
             if name_path(self.names, name).exists() or self._active_exists():
                 raise JsonInputError(
                     "one protected workload is already active or name is unavailable"
                 )
+            try:
+                approval = match_launch(
+                    uid=self.policy["workload_uid"],
+                    argv=argv,
+                    approvals=load_approvals(self.approvals),
+                )
+            except JsonInputError:
+                approval = None
             run_id = os.urandom(12).hex()
             unit = f"{UNIT_PREFIX}{run_id}.service"
             gate = self._make_gate(run_id)
@@ -1445,6 +1505,14 @@ class Supervisor:
                     "workload_uid": self.policy["workload_uid"],
                 }
                 self._store(record)
+                gated_process = self._gated_process(identity)
+                if approval is not None:
+                    create_launch_provenance(
+                        self.launches,
+                        run=record,
+                        process=gated_process,
+                        approval=approval,
+                    )
                 ready = threading.Event()
                 watcher = threading.Thread(target=self._watch, args=(record, ready), daemon=True)
                 watcher.start()
@@ -1467,6 +1535,7 @@ class Supervisor:
                 }
             except Exception:
                 gate.unlink(missing_ok=True)
+                provenance_path(self.launches, run_id).unlink(missing_ok=True)
                 try:
                     # Best effort rollback after a launch failure; direct kill is still authoritative.
                     identity = capture_identity(props["ControlGroup"], run_id, unit)
@@ -1614,20 +1683,25 @@ class Supervisor:
             ]
             return {"runs": runs}
         if action == "approve" and set(args) == {"argv", "name", "uid"}:
-            value = create_approval(
-                self.approvals,
-                name=args["name"],
-                uid=args["uid"],
-                argv=args["argv"],
-                administrator_uid=0,
-            )
+            with self.approval_lock:
+                value = create_approval(
+                    self.approvals,
+                    name=args["name"],
+                    uid=args["uid"],
+                    argv=args["argv"],
+                    administrator_uid=0,
+                )
             return {"approval": public_approval(value), "result": "APPROVED"}
         if action == "revoke" and set(args) == {"name"}:
-            return revoke(self.approvals, args["name"])
+            with self.approval_lock:
+                return revoke(self.approvals, args["name"])
         if action == "approvals" and not args:
-            return {
-                "approvals": [public_approval(value) for value in load_approvals(self.approvals)]
-            }
+            with self.approval_lock:
+                return {
+                    "approvals": [
+                        public_approval(value) for value in load_approvals(self.approvals)
+                    ]
+                }
         if action == "detections" and not args:
             values: list[dict[str, Any]] = []
             for path in sorted(

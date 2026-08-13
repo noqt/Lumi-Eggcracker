@@ -189,6 +189,65 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(1, len(groups))
         self.assertEqual((complete_identity,), tuple(item.snapshot.identity for item in groups[0][0]))
 
+    def test_redundant_complete_sibling_pairs_expand_enforcement_scope(self) -> None:
+        supervisor = self._instance()
+        supervisor.catalogue = load_bundled()
+        parent = ProcessIdentity(20, 200)
+        snapshots = {
+            parent: ProcessSnapshot(
+                parent,
+                2001,
+                "/usr/bin/worker",
+                "worker",
+                ("worker",),
+                (),
+                (),
+                (),
+            )
+        }
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        candidates: list[_EvidenceCandidate] = []
+        for offset, evidence in enumerate(
+            ((content, None), (content, None), (None, runtime), (None, runtime))
+        ):
+            identity = ProcessIdentity(21 + offset, 201 + offset)
+            current = ProcessSnapshot(
+                identity,
+                2001,
+                "/usr/bin/python3",
+                "python3",
+                ("python3",),
+                (),
+                (),
+                (),
+                parent=parent,
+            )
+            snapshots[identity] = current
+            candidates.append(
+                _EvidenceCandidate(
+                    current,
+                    (evidence[0],) if evidence[0] is not None else (),
+                    (evidence[1],) if evidence[1] is not None else (),
+                    1,
+                )
+            )
+
+        groups = supervisor._content_groups(candidates, snapshots)
+        self.assertEqual(1, len(groups))
+        self.assertEqual(4, len(groups[0][0]))
+        self.assertEqual(
+            {parent, *(candidate.snapshot.identity for candidate in candidates)},
+            supervisor._discovery_containment_targets(groups[0][0], snapshots),
+        )
+
     def test_heartbeat_stops_when_no_scan_completed_within_health_bound(self) -> None:
         supervisor = self._instance()
         supervisor.discovery_thread = type(
