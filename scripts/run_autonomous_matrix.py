@@ -68,6 +68,14 @@ def launch(user: str, argv: list[str]) -> subprocess.Popen[bytes]:
     )
 
 
+def stop_selected(operator: str, name: str) -> None:
+    receipt = Path(f"/tmp/lumi-autonomous-kill-{secrets.token_hex(8)}.json")
+    try:
+        call(operator, ["kill", "--name", name, "--receipt", str(receipt)])
+    finally:
+        receipt.unlink(missing_ok=True)
+
+
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("autonomous matrix must run as root")
@@ -115,18 +123,48 @@ def main() -> int:
                         stop(process)
                     stop(canary)
             for index in range(args.approved):
-                name = f"allow-{secrets.token_hex(6)}"
-                call(operator, ["approve", "--name", name, "--uid", str(uid), "--", *argv])
+                approval_name = f"allow-{secrets.token_hex(6)}"
+                run_name = f"approved-{secrets.token_hex(6)}"
+                call(
+                    operator,
+                    ["approve", "--name", approval_name, "--uid", str(uid), "--", *argv],
+                )
                 before = set(DETECTIONS.glob("*.json"))
-                process = launch(user, argv)
+                started = False
                 try:
-                    time.sleep(0.2)
+                    response = call(
+                        operator,
+                        [
+                            "start",
+                            "--name",
+                            run_name,
+                            "--max-pids",
+                            "64",
+                            "--max-memory-mib",
+                            "4096",
+                            "--cpu-quota-percent",
+                            "1200",
+                            "--",
+                            *argv,
+                        ],
+                    )
+                    started = True
+                    if response.get("state") != "RUNNING":
+                        raise RuntimeError("protected approved invocation did not start")
+                    # The real runner normally exposes its complete content and
+                    # runtime evidence during this interval.  Approval is valid
+                    # only because the exact command crossed the protected
+                    # pre-exec start gate.
+                    time.sleep(2.5)
                     if set(DETECTIONS.glob("*.json")) - before:
                         raise RuntimeError("exact approved invocation was killed")
-                    results["approved"].append(name)
+                    if call(operator, ["status", "--name", run_name]).get("state") != "RUNNING":
+                        raise RuntimeError("exact approved invocation did not remain running")
+                    results["approved"].append(approval_name)
                 finally:
-                    stop(process)
-                    call(operator, ["revoke", "--name", name])
+                    if started:
+                        stop_selected(operator, run_name)
+                    call(operator, ["revoke", "--name", approval_name])
             for _ in range(args.benign):
                 process = subprocess.Popen(["/usr/sbin/runuser", "-u", user, "--", sys.executable, "-c", "import time; time.sleep(0.03)"], start_new_session=True)
                 process.wait(timeout=5)

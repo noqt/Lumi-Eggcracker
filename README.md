@@ -18,7 +18,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 - detects only the two contract-qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
 - recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
 - recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
-- lets the configured operator approve one exact executable, UID and invocation before it is run;
+- lets root approve one exact executable, workload UID and invocation, then lets the configured operator consume that approval only through the protected pre-exec `start` gate;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
 - records bounded post-containment receipts, status and detection summaries.
@@ -85,10 +85,13 @@ eggcracker doctor
 eggcracker approvals
 ```
 
-An unapproved complete qualified content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, approve it before launch. The approval stores hashes, not its raw arguments:
+An unapproved complete qualified content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, root must approve it and the operator must launch that exact command through `eggcracker start`. The approval stores hashes, not its raw arguments. An approval by itself never exempts a process launched directly or by another tool:
 
 ```sh
-sudo eggcracker approve --name local-qwen --uid "$(id -u)" -- \
+sudo eggcracker approve --name local-qwen --uid "$(id -u lumi-eggcracker-workload)" -- \
+  /opt/llama.cpp/llama-cli -m /opt/models/qwen.gguf -p "Hello" -n 256
+eggcracker start --name local-qwen-run --max-pids 64 \
+  --max-memory-mib 4096 --cpu-quota-percent 400 -- \
   /opt/llama.cpp/llama-cli -m /opt/models/qwen.gguf -p "Hello" -n 256
 ```
 
@@ -98,7 +101,7 @@ Inspect autonomous containment summaries with:
 eggcracker detections
 ```
 
-Remove an approval for future launches with `sudo eggcracker revoke --name local-qwen`. Revocation does not kill a workload that was already approved and running.
+Remove an approval for future protected launches with `sudo eggcracker revoke --name local-qwen`. Revocation does not kill a workload that was already admitted and running. Approval is bound before exec to the exact Eggcracker-owned PID/start-time, executable identity and cgroup; mutable post-exec `/proc/<pid>/cmdline` data can never grant approval. Descendants and siblings do not inherit it.
 
 The selected-workload command remains available for controlled tests and explicit workloads:
 
@@ -119,7 +122,7 @@ sudo python3 scripts/smoke_autonomous_ai.py \
   --user "$USER" --repetitions 5 --output ./autonomous-ai-smoke.json
 ```
 
-The smoke launches the model directly, outside `eggcracker start`, verifies that Eggcracker kills the unapproved invocation, then proves that the same exact invocation survives only when approved. The companion `smoke_content_ai.py` uses a renamed runner, unfamiliar wrapper and extensionless GGUF path to exercise the content profile.
+The smoke launches the model directly first and verifies that Eggcracker kills the unapproved invocation. It then proves that the same exact invocation survives only after root approval and protected operator launch, before revoking the approval and proving a direct relaunch is killed again. The companion `smoke_content_ai.py` uses a renamed runner, unfamiliar wrapper and extensionless GGUF path to exercise the content profile.
 
 To remove Eggcracker completely:
 

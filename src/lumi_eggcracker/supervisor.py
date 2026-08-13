@@ -47,6 +47,7 @@ from .discovery import (
 from .discovery import (
     identity as process_identity,
 )
+from .discovery import snapshot as process_snapshot
 from .elfmarkers import MAX_RUNTIME_CANDIDATES, RuntimeEvidence, with_pytorch_pair
 from .elfmarkers import from_snapshot as runtime_from_snapshot
 from .jsonio import JsonInputError, load_regular_json
@@ -576,6 +577,37 @@ class Supervisor:
         """Exclude only the supervisor itself; a run record is not approval."""
         return snapshot.identity.pid == os.getpid()
 
+    @staticmethod
+    def _refresh_group(
+        group: tuple[_EvidenceCandidate, ...],
+    ) -> tuple[_EvidenceCandidate, ...]:
+        """Refresh live identity facts after evidence inspection.
+
+        A protected gate can exec between the initial process snapshot and
+        descriptor-based evidence inspection without changing PID/start-time.
+        Approval must use the post-exec executable and cgroup facts, never the
+        stale gate snapshot.  Evidence is retained only for identities that
+        still exist with the exact captured start time.
+        """
+        refreshed: list[_EvidenceCandidate] = []
+        for candidate in group:
+            current = process_snapshot(
+                candidate.snapshot.identity,
+                include_evidence=False,
+            )
+            if current is None:
+                continue
+            refreshed.append(
+                _EvidenceCandidate(
+                    current,
+                    candidate.content,
+                    candidate.runtimes,
+                    candidate.first_seen_ns,
+                    candidate.fast_match,
+                )
+            )
+        return tuple(refreshed)
+
     def _cached_executable_digest(self, snapshot: ProcessSnapshot) -> str:
         metadata = executable_metadata_for_identity(snapshot.identity)
         key = (
@@ -1057,6 +1089,11 @@ class Supervisor:
             if item.fast_match is not None
         ] + content_groups
         for group, boundary_type in groups:
+            group = self._refresh_group(group)
+            if not group:
+                continue
+            for candidate in group:
+                snapshot_map[candidate.snapshot.identity] = candidate.snapshot
             trigger_candidate = group[0]
             aggregate_content: list[ArtifactEvidence] = []
             aggregate_runtimes: list[RuntimeEvidence] = []

@@ -46,8 +46,12 @@ def assets(path: Path) -> tuple[Path, Path, dict[str, Any]]:
     return runner, model, value
 
 
-def control(user: str, argv: list[str]) -> dict[str, Any]:
-    command = [CLI, *argv] if argv and argv[0] in {"approve", "revoke"} else ["/usr/sbin/runuser", "-u", user, "--", CLI, *argv]
+def control(operator: str, argv: list[str]) -> dict[str, Any]:
+    command = (
+        [CLI, *argv]
+        if argv and argv[0] in {"approve", "revoke"}
+        else ["/usr/sbin/runuser", "-u", operator, "--", CLI, *argv]
+    )
     result = subprocess.run(
         command,
         capture_output=True,
@@ -69,6 +73,26 @@ def stop(process: subprocess.Popen[bytes] | None) -> None:
     if process is not None and process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
+
+
+def stop_selected(operator: str, name: str) -> None:
+    receipt = Path(f"/tmp/lumi-content-kill-{secrets.token_hex(8)}.json")
+    try:
+        control(operator, ["kill", "--name", name, "--receipt", str(receipt)])
+    finally:
+        receipt.unlink(missing_ok=True)
+
+
+def journal_bytes(unit: str) -> int:
+    result = subprocess.run(
+        ["/usr/bin/journalctl", "--unit", unit, "--output=cat", "--no-pager"],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode:
+        raise RuntimeError("cannot read protected workload output from the journal")
+    return len(result.stdout)
 
 
 def receipt_after(before: set[Path], *, timeout: float = 240) -> dict[str, Any]:
@@ -127,7 +151,13 @@ def launch(user: str, wrapper: Path, argv: list[str], output: Path) -> subproces
         handle.close()
 
 
-def one(runner: Path, model: Path, user: str, index: int) -> dict[str, Any]:
+def one(
+    runner: Path,
+    model: Path,
+    user: str,
+    operator: str,
+    index: int,
+) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="lumi-content-smoke-", dir="/tmp") as raw:
         root = Path(raw)
         # The unprivileged workload must be able to materialise its copied
@@ -155,8 +185,9 @@ def one(runner: Path, model: Path, user: str, index: int) -> dict[str, Any]:
             raise RuntimeError("content smoke accidentally satisfies a fast-name condition")
         canary = subprocess.Popen(["/bin/sleep", "180"], start_new_session=True)
         unapproved: subprocess.Popen[bytes] | None = None
-        allowed: subprocess.Popen[bytes] | None = None
+        allowed_started = False
         name = f"content-{index}-{secrets.token_hex(4)}"
+        run_name = f"content-run-{index}-{secrets.token_hex(4)}"
         try:
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, wrapper, final_argv, output)
@@ -174,7 +205,7 @@ def one(runner: Path, model: Path, user: str, index: int) -> dict[str, Any]:
             ) in json.dumps(first, sort_keys=True):
                 raise RuntimeError("content receipt leaked a local model or wrapper path")
             approved = control(
-                user,
+                operator,
                 [
                     "approve",
                     "--name",
@@ -187,18 +218,42 @@ def one(runner: Path, model: Path, user: str, index: int) -> dict[str, Any]:
             )
             if approved.get("result") != "APPROVED":
                 raise RuntimeError("exact content approval failed")
-            allowed = launch(user, wrapper, final_argv, output)
+            before_approved = set(DETECTIONS.glob("*.json"))
+            response = control(
+                operator,
+                [
+                    "start",
+                    "--name",
+                    run_name,
+                    "--max-pids",
+                    "64",
+                    "--max-memory-mib",
+                    "4096",
+                    "--cpu-quota-percent",
+                    "1200",
+                    "--",
+                    *final_argv,
+                ],
+            )
+            allowed_started = True
+            unit = response.get("unit")
+            if response.get("state") != "RUNNING" or not isinstance(unit, str):
+                raise RuntimeError("protected approved disguised AI did not start")
             deadline = time.monotonic() + 120
-            while time.monotonic() < deadline and (
-                not output.is_file() or output.stat().st_size < 32
-            ):
+            generated = 0
+            while time.monotonic() < deadline and generated < 32:
+                generated = journal_bytes(unit)
                 time.sleep(0.05)
-            if allowed.poll() is not None or output.stat().st_size < 32:
+            if (
+                generated < 32
+                or control(operator, ["status", "--name", run_name]).get("state")
+                != "RUNNING"
+                or set(DETECTIONS.glob("*.json")) - before_approved
+            ):
                 raise RuntimeError("approved disguised AI did not produce output")
-            generated = output.stat().st_size
-            stop(allowed)
-            allowed = None
-            control(user, ["revoke", "--name", name])
+            stop_selected(operator, run_name)
+            allowed_started = False
+            control(operator, ["revoke", "--name", name])
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, wrapper, final_argv, output)
             second = receipt_after(before)
@@ -217,7 +272,8 @@ def one(runner: Path, model: Path, user: str, index: int) -> dict[str, Any]:
             }
         finally:
             stop(unapproved)
-            stop(allowed)
+            if allowed_started:
+                stop_selected(operator, run_name)
             stop(canary)
 
 
@@ -240,7 +296,14 @@ def main() -> int:
     try:
         pwd.getpwnam(args.user)
         runner, model, _manifest = assets(args.assets_manifest)
-        values = [one(runner, model, args.user, index) for index in range(args.repetitions)]
+        install = json.loads(
+            Path("/var/lib/lumi-eggcracker/install-manifest.json").read_text(encoding="utf-8")
+        )
+        operator = str(install["operator"])
+        values = [
+            one(runner, model, args.user, operator, index)
+            for index in range(args.repetitions)
+        ]
         args.output.write_text(
             json.dumps({"repetitions": values, "result": "PASS"}, sort_keys=True) + "\n",
             encoding="utf-8",

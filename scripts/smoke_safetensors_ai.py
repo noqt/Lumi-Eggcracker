@@ -46,8 +46,11 @@ def load_assets(path: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
     return python, model, config, value
 
 
-def control(argv: list[str]) -> dict[str, Any]:
-    result = subprocess.run([CLI, *argv], capture_output=True, text=True, check=False, timeout=30)
+def control(argv: list[str], *, operator: str | None = None) -> dict[str, Any]:
+    command = [CLI, *argv]
+    if operator is not None:
+        command = ["/usr/sbin/runuser", "-u", operator, "--", *command]
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Eggcracker control failed")
     value = json.loads(result.stdout)
@@ -60,6 +63,17 @@ def stop(process: subprocess.Popen[bytes] | None) -> None:
     if process is not None and process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
+
+
+def stop_selected(operator: str, name: str) -> None:
+    receipt = Path(f"/tmp/lumi-safetensors-kill-{secrets.token_hex(8)}.json")
+    try:
+        control(
+            ["kill", "--name", name, "--receipt", str(receipt)],
+            operator=operator,
+        )
+    finally:
+        receipt.unlink(missing_ok=True)
 
 
 def receipt_after(before: set[Path], *, timeout: float = 90) -> dict[str, Any]:
@@ -107,7 +121,14 @@ def launch(python: Path, user: str, wrapper: Path, weights: Path, config: Path, 
     )
 
 
-def one(python: Path, model: Path, config: Path, user: str, index: int) -> dict[str, Any]:
+def one(
+    python: Path,
+    model: Path,
+    config: Path,
+    user: str,
+    operator: str,
+    index: int,
+) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="lumi-safetensors-smoke-", dir="/tmp") as raw:
         root = Path(raw)
         # The unprivileged workload must be able to write its bounded smoke
@@ -123,8 +144,9 @@ def one(python: Path, model: Path, config: Path, user: str, index: int) -> dict[
         user_uid = pwd.getpwnam(user).pw_uid
         canary = subprocess.Popen(["/bin/sleep", "180"], start_new_session=True)
         first_process: subprocess.Popen[bytes] | None = None
-        approved_process: subprocess.Popen[bytes] | None = None
+        approved_started = False
         name = f"safetensors-{index}-{secrets.token_hex(4)}"
+        run_name = f"safetensors-run-{index}-{secrets.token_hex(4)}"
         argv = [str(python), str(wrapper), str(weights), str(config_copy), str(output)]
         try:
             before = set(DETECTIONS.glob("*.json"))
@@ -143,15 +165,38 @@ def one(python: Path, model: Path, config: Path, user: str, index: int) -> dict[
             approval = control(["approve", "--name", name, "--uid", str(user_uid), "--", *argv])
             if approval.get("result") != "APPROVED":
                 raise RuntimeError("exact Safetensors approval failed")
-            approved_process = launch(python, user, wrapper, weights, config_copy, output)
+            response = control(
+                [
+                    "start",
+                    "--name",
+                    run_name,
+                    "--max-pids",
+                    "64",
+                    "--max-memory-mib",
+                    "4096",
+                    "--cpu-quota-percent",
+                    "1200",
+                    "--",
+                    *argv,
+                ],
+                operator=operator,
+            )
+            approved_started = True
+            if response.get("state") != "RUNNING":
+                raise RuntimeError("protected approved causal model did not start")
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline and (not output.is_file() or output.stat().st_size < 32):
                 time.sleep(0.05)
-            if approved_process.poll() is not None or output.stat().st_size < 32:
+            if (
+                not output.is_file()
+                or output.stat().st_size < 32
+                or control(["status", "--name", run_name], operator=operator).get("state")
+                != "RUNNING"
+            ):
                 raise RuntimeError("approved causal model did not generate output")
             generated = output.stat().st_size
-            stop(approved_process)
-            approved_process = None
+            stop_selected(operator, run_name)
+            approved_started = False
             control(["revoke", "--name", name])
             before = set(DETECTIONS.glob("*.json"))
             first_process = launch(python, user, wrapper, weights, config_copy, output)
@@ -163,7 +208,8 @@ def one(python: Path, model: Path, config: Path, user: str, index: int) -> dict[
             return {"approved_generated_bytes": generated, "first_receipt": first, "result": "PASS", "second_receipt": second}
         finally:
             stop(first_process)
-            stop(approved_process)
+            if approved_started:
+                stop_selected(operator, run_name)
             stop(canary)
 
 
@@ -180,7 +226,14 @@ def main() -> int:
         raise SystemExit("output must be new and repetitions must equal five")
     try:
         python, model, config, _manifest = load_assets(args.assets_manifest)
-        values = [one(python, model, config, args.user, index) for index in range(args.repetitions)]
+        install = json.loads(
+            Path("/var/lib/lumi-eggcracker/install-manifest.json").read_text(encoding="utf-8")
+        )
+        operator = str(install["operator"])
+        values = [
+            one(python, model, config, args.user, operator, index)
+            for index in range(args.repetitions)
+        ]
         args.output.write_text(json.dumps({"repetitions": values, "result": "PASS"}, sort_keys=True) + "\n", encoding="utf-8")
         return 0
     except (OSError, RuntimeError, TypeError, json.JSONDecodeError) as error:

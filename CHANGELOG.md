@@ -6,9 +6,10 @@
 - Migrate content catalogue groups to `MODEL_RUNTIME` in schema v3 while preserving GGUF/llama behavior.
 - Contain unapproved complete Safetensors/PyTorch matches autonomously, including converters and inspectors; partial matches survive.
 - Limit the active public catalogue to the two qualified content profiles; withhold unqualified name-only runtime entries.
-- Bind executable approval hashing to the live `/proc/<pid>/exe` descriptor and PID/start-time identity.
+- Bind approval consumption before exec to the exact protected `start` PID/start-time, owned cgroup and executable identity; never grant approval from mutable post-exec arguments.
+- Capture the full bounded related evidence component and connector parent after a minimal complete match, preventing incomplete sibling-pair containment receipts.
 - Tie supervisor heartbeats to recent successful scan completion and bound enforcement admission.
-- Preflight cgroups before uninstall and validate every published release checksum.
+- Preflight and empty only exact stopped service cgroups before uninstall, and validate every published release checksum.
 
 ## 0.3.0
 

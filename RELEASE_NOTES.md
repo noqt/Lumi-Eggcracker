@@ -8,4 +8,6 @@ The active catalogue contains only the two content profiles qualified by native 
 
 The release also applies bounded memory, CPU, I/O, task and descriptor limits to the supervisor, watchdog and selected workloads. Complete unapproved matches continue to use pidfd stop/capture and direct `cgroup.kill` as the authoritative complete-tree kill primitive.
 
+Adversarial repair qualification binds approval consumption to the exact protected pre-exec `start` identity rather than mutable post-exec procfs arguments. Direct launches can no longer borrow a root approval, and descendants or siblings do not inherit one. Related-process detection now separates the minimal evidence witness from enforcement scope: the full bounded evidence component and connector parent are captured so a successful containment receipt cannot describe one killed pair while another complete sibling pair remains. Clean uninstall also empties only the two exact stopped Eggcracker service cgroups before requiring systemd to collect the units.
+
 The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.

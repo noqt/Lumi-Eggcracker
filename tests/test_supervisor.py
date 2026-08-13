@@ -69,6 +69,40 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(supervisor._managed(snapshot))
         self.assertFalse(supervisor._discovery_excluded(snapshot))
 
+    def test_group_refresh_replaces_preexec_gate_snapshot_without_losing_evidence(self) -> None:
+        identity = ProcessIdentity(10, 100)
+        stale = ProcessSnapshot(
+            identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3", "_gate"),
+            ("0::/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service",),
+            (),
+            (),
+        )
+        current = ProcessSnapshot(
+            identity,
+            2001,
+            "/opt/llama-cli",
+            "llama-cli",
+            ("llama-cli", "-m", "/models/qwen"),
+            stale.cgroups,
+            (),
+            (),
+        )
+        evidence = ArtifactEvidence("gguf-v3", "GGUF", 1, 2, 4096, "a" * 64)
+        candidate = _EvidenceCandidate(stale, (evidence,), (), 123)
+
+        with patch("lumi_eggcracker.supervisor.process_snapshot", return_value=current):
+            refreshed = Supervisor._refresh_group((candidate,))
+
+        self.assertEqual(1, len(refreshed))
+        self.assertEqual(current, refreshed[0].snapshot)
+        self.assertEqual((evidence,), refreshed[0].content)
+        with patch("lumi_eggcracker.supervisor.process_snapshot", return_value=None):
+            self.assertEqual((), Supervisor._refresh_group((candidate,)))
+
     def test_selected_match_contains_every_process_in_exact_run_cgroup(self) -> None:
         supervisor = self._instance()
         run_id = "a" * 24
