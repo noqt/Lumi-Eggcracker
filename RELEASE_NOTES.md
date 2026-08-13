@@ -16,4 +16,6 @@ The final containment-scope repair groups independently complete related sibling
 
 The pressure-recovery repair replaces contiguous descriptor prefixes with bounded stripes over the complete current descriptor and mapping tables. The root-owned stripe generation advances across supervisor/watchdog recovery, preventing repeated recovery from resetting a still-live high-FD supported workload to the same uninspected window.
 
+Installation now waits for every control socket to reach its final owner and mode. This closes a startup race where socket path creation could briefly precede the supervisor's metadata update.
+
 The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.

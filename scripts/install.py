@@ -53,6 +53,20 @@ def write_new(path: Path, data: bytes, mode: int) -> None:
     os.chmod(path, mode)
 
 
+def socket_contract_matches(path: Path, mode: int, gid: int) -> bool:
+    """Return true only after a supervisor socket has its final metadata."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return False
+    return (
+        stat.S_ISSOCK(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == mode
+        and metadata.st_uid == 0
+        and metadata.st_gid == gid
+    )
+
+
 def manifest_for(artifact: Path) -> dict[str, Any]:
     path = artifact.parent / "release-manifest.json"
     if path.is_symlink() or not path.is_file():
@@ -210,15 +224,19 @@ def main() -> int:
         # qualification host.  Wait long enough for the supervisor to complete
         # that startup scan, while still failing before an operator mistakes a
         # non-starting installation for a ready one.
+        socket_contract = (
+            (QUERY_SOCKET, 0o660, operator.pw_gid),
+            (OPERATOR_SOCKET, 0o660, operator.pw_gid),
+            (ADMIN_SOCKET, 0o600, 0),
+            (HEARTBEAT_SOCKET, 0o600, 0),
+        )
         deadline = time.monotonic() + 45
-        while time.monotonic() < deadline and not all(path.exists() for path in (QUERY_SOCKET, OPERATOR_SOCKET, ADMIN_SOCKET, HEARTBEAT_SOCKET)):
+        while time.monotonic() < deadline:
+            if all(socket_contract_matches(*item) for item in socket_contract):
+                break
             time.sleep(0.02)
-        for path, mode, gid in ((QUERY_SOCKET, 0o660, operator.pw_gid), (OPERATOR_SOCKET, 0o660, operator.pw_gid), (ADMIN_SOCKET, 0o600, 0), (HEARTBEAT_SOCKET, 0o600, 0)):
-            if not path.exists() or path.is_symlink():
-                raise RuntimeError(f"required Eggcracker socket was not created: {path}")
-            metadata = path.stat()
-            if stat.S_IMODE(metadata.st_mode) != mode or metadata.st_uid != 0 or metadata.st_gid != gid:
-                raise RuntimeError("socket ownership contract failed")
+        else:
+            raise RuntimeError("required Eggcracker sockets did not reach their ownership contract")
         print(json.dumps({"result": "INSTALLED", "service": "lumi-eggcracker.service", "workload_uid": account.pw_uid}, sort_keys=True))
         return 0
     except Exception:
