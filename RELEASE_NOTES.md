@@ -18,4 +18,6 @@ The pressure-recovery repair replaces contiguous descriptor prefixes with bounde
 
 Installation now waits for every control socket to reach its final owner and mode. This closes a startup race where socket path creation could briefly precede the supervisor's metadata update.
 
+The mandatory synchronous startup scan is now accounted as the first healthy completed scan and heartbeated as soon as the discovery worker is live. Repeated deliberate supervisor restarts therefore retain watchdog liveness while still requiring a completed scan before any heartbeat.
+
 The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.

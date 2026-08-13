@@ -394,7 +394,16 @@ class Supervisor:
         self._reserve_discovery_window()
         self._recover()
         self.quarantine_root = self._prepare_quarantine()
+        self._scan_synchronously()
+
+    def _scan_synchronously(self) -> None:
+        """Complete and health-account the required startup discovery scan."""
+        started = time.monotonic_ns()
         self._scan_once(synchronous=True)
+        completed = time.monotonic_ns()
+        self.last_scan_completed_ns = completed
+        self.last_scan_duration_ns = completed - started
+        self.discovery_failures = 0
 
     def _reserve_discovery_window(self) -> None:
         """Reserve a fair scan generation that survives supervisor recovery."""
@@ -1936,6 +1945,11 @@ class Supervisor:
         self._prepare()
         self.discovery_thread = threading.Thread(target=self._discovery_loop, daemon=True)
         self.discovery_thread.start()
+        # The required synchronous startup scan is already complete and the
+        # discovery worker is live. Emit its health proof immediately so a
+        # sequence of deliberate restarts cannot starve the watchdog merely
+        # because each detected workload is contained before the next scan.
+        self._heartbeat()
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self.heartbeat_thread.start()
         listeners: dict[socket.socket, Path] = {}

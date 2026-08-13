@@ -407,6 +407,30 @@ class SupervisorTests(unittest.TestCase):
             supervisor._heartbeat()
         socket_factory.assert_not_called()
 
+    def test_synchronous_startup_scan_is_immediately_heartbeat_eligible(self) -> None:
+        supervisor = self._instance()
+        supervisor.discovery_thread = type(
+            "LiveThread", (), {"is_alive": lambda _self: True}
+        )()
+        supervisor.last_heartbeat_sent = 0.0
+        supervisor.last_scan_completed_ns = 0
+        supervisor.last_scan_duration_ns = 0
+        supervisor.discovery_failures = 2
+        supervisor.enforcement_saturation_until_ns = 0
+        supervisor.heartbeat_sequence = 0
+        with patch.object(supervisor, "_scan_once") as scan:
+            supervisor._scan_synchronously()
+        scan.assert_called_once_with(synchronous=True)
+        self.assertGreater(supervisor.last_scan_completed_ns, 0)
+        self.assertGreaterEqual(supervisor.last_scan_duration_ns, 0)
+        self.assertEqual(0, supervisor.discovery_failures)
+        with patch("lumi_eggcracker.supervisor.socket.AF_UNIX", 1, create=True), patch(
+            "lumi_eggcracker.supervisor.socket.SOCK_DGRAM", 2, create=True
+        ), patch("lumi_eggcracker.supervisor.socket.socket") as socket_factory:
+            supervisor._heartbeat()
+        socket_factory.assert_called_once()
+        self.assertEqual(1, supervisor.heartbeat_sequence)
+
     def test_discovery_window_generation_survives_supervisor_restart(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "discovery-progress.json"
