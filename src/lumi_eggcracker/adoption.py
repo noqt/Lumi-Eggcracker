@@ -161,18 +161,73 @@ def _validate(identity_value: QuarantineIdentity, root: Path) -> Path:
     return path
 
 
-def create_quarantine(root: Path, event_id: str) -> QuarantineIdentity:
-    if not root.is_dir() or root.is_symlink() or len(event_id) != 24 or any(character not in "0123456789abcdef" for character in event_id):
-        raise JsonInputError("quarantine root or event identity is invalid")
-    path = root / event_id
+def _ensure_quarantine_root(root: Path) -> Path:
+    """Recreate the exact delegated root if systemd removed it while empty.
+
+    A rapid uninstall/reinstall can leave an asynchronous systemd cgroup
+    cleanup racing the newly started supervisor.  The service cgroup remains
+    authoritative and populated, but its empty delegated child may disappear
+    after startup.  This helper is called only after the evidence roots have
+    been bound and stopped, so recovery cannot delay enforcement.
+    """
+    parent = root.parent
+    if (
+        root.name != "quarantine"
+        or parent.is_symlink()
+        or not parent.is_dir()
+        or not all(
+            (parent / item).is_file()
+            for item in ("cgroup.events", "cgroup.kill", "cgroup.procs")
+        )
+        or root.is_symlink()
+    ):
+        raise JsonInputError("quarantine root parent is invalid")
     try:
-        path.mkdir(mode=0o700)
-    except FileExistsError as error:
-        raise JsonInputError("quarantine cgroup already exists") from error
-    metadata = path.stat(follow_symlinks=False)
-    value = QuarantineIdentity(path, metadata.st_dev, metadata.st_ino, event_id)
-    _validate(value, root)
-    return value
+        root.mkdir(mode=0o700, exist_ok=True)
+    except OSError as error:
+        raise JsonInputError("quarantine root cannot be created") from error
+    if root.is_symlink() or not root.is_dir() or not all(
+        (root / item).is_file() for item in ("cgroup.events", "cgroup.kill", "cgroup.procs")
+    ):
+        raise JsonInputError("quarantine root is unavailable")
+    return root
+
+
+def create_quarantine(root: Path, event_id: str) -> QuarantineIdentity:
+    if len(event_id) != 24 or any(
+        character not in "0123456789abcdef" for character in event_id
+    ):
+        raise JsonInputError("quarantine event identity is invalid")
+    last_error: OSError | JsonInputError | None = None
+    for _attempt in range(2):
+        try:
+            _ensure_quarantine_root(root)
+        except JsonInputError as error:
+            if _attempt == 0 and not root.exists() and not root.is_symlink():
+                last_error = error
+                continue
+            raise
+        path = root / event_id
+        try:
+            path.mkdir(mode=0o700)
+            metadata = path.stat(follow_symlinks=False)
+        except FileExistsError as error:
+            raise JsonInputError("quarantine cgroup already exists") from error
+        except FileNotFoundError as error:
+            # The only expected disappearance is the empty delegated root.
+            # Retry once after validating and recreating it.
+            last_error = error
+            continue
+        value = QuarantineIdentity(path, metadata.st_dev, metadata.st_ino, event_id)
+        try:
+            _validate(value, root)
+        except JsonInputError as error:
+            if root.exists() and path.exists():
+                raise
+            last_error = error
+            continue
+        return value
+    raise JsonInputError("quarantine root disappeared during containment") from last_error
 
 
 def _move(value: ProcessIdentity, destination: Path, *, proc: Path = PROC) -> bool:

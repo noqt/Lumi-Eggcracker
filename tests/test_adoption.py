@@ -8,6 +8,7 @@ from unittest.mock import patch
 from lumi_eggcracker import adoption
 from lumi_eggcracker.adoption import QuarantineIdentity, children, contain_many, descendants
 from lumi_eggcracker.discovery import ProcessIdentity
+from lumi_eggcracker.jsonio import JsonInputError
 
 
 def stat(pid: int, parent: int, start: int) -> str:
@@ -15,6 +16,35 @@ def stat(pid: int, parent: int, start: int) -> str:
 
 
 class AdoptionTests(unittest.TestCase):
+    def test_missing_delegated_quarantine_root_is_recreated(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw) / "lumi-eggcracker.service"
+            parent.mkdir()
+            for name in ("cgroup.events", "cgroup.kill", "cgroup.procs"):
+                (parent / name).touch()
+            root = parent / "quarantine"
+            event_id = "a" * 24
+
+            original_mkdir = Path.mkdir
+
+            def materialize_controls(path: Path, *args: object, **kwargs: object) -> None:
+                original_mkdir(path, *args, **kwargs)
+                if path == root or path == root / event_id:
+                    for name in ("cgroup.events", "cgroup.kill", "cgroup.procs"):
+                        (path / name).touch()
+
+            with patch.object(Path, "mkdir", autospec=True, side_effect=materialize_controls):
+                identity_value = adoption.create_quarantine(root, event_id)
+
+            self.assertTrue(root.is_dir())
+            self.assertEqual(root / event_id, identity_value.path)
+
+    def test_quarantine_root_recovery_rejects_an_arbitrary_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "quarantine"
+            with self.assertRaisesRegex(JsonInputError, "parent is invalid"):
+                adoption._ensure_quarantine_root(root)
+
     def test_open_pidfd_revalidates_before_returning_descriptor(self) -> None:
         value = ProcessIdentity(10, 100)
         with patch.object(adoption, "pidfd_available", return_value=True), patch.object(adoption, "_same", return_value=True), patch.object(adoption.os, "pidfd_open", return_value=17, create=True), patch.object(adoption.os, "close") as close:
