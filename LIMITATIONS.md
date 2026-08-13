@@ -15,7 +15,7 @@ The observer uses bounded `/proc` polling. It has no kernel execution hook, eBPF
 
 On the qualification WSL2 Ubuntu environment, warmed-cache scan p95 was approximately 251 ms with 50 synthetic children, 650 ms with 200, and 2.9 seconds with 1,000. Content inspection occurs on alternating scans, so high process density can create multi-second observation delay. Results are host-specific; run the bundled benchmark before deployment.
 
-The supervisor service protects home directories. Model files held open by a workload can still be inspected through its procfs descriptor, but models discovered only by a pathname under a protected home or cache have not been qualified as a release path.
+The supervisor service protects home directories. Model files held open by a workload can still be inspected through a stable process-descriptor duplicate when an ordinary procfs reopen is unavailable, including deleted files on the qualified WSL2 DrvFS path. Models discovered only by a pathname under a protected home or cache have not been qualified as a release path.
 
 The product does not kill generic Python, Node.js, Java, shell, GPU-intensive, memory-intensive or networked processes based on those generic properties. It does not require or claim proof of inference: an unapproved converter, inspector, evaluator or trainer satisfying both evidence groups is an intended kill. It does not use behavioural modelling, telemetry upload, network isolation, credential isolation, filesystem isolation, malware prevention or EDR functions.
 

@@ -10,8 +10,10 @@ import struct
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .jsonio import JsonInputError
+from .procfd import StableFileMetadata, descriptor_size, open_process_fd
 
 MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 MAX_ARTIFACTS = 16
@@ -70,7 +72,16 @@ ArtifactCacheKey = tuple[int, int, int, int, int]
 ArtifactCache = MutableMapping[ArtifactCacheKey, ArtifactEvidence | None]
 
 
-def _cache_key(metadata: os.stat_result) -> ArtifactCacheKey:
+class _Metadata(Protocol):
+    st_dev: int
+    st_ino: int
+    st_size: int
+    st_mtime_ns: int
+    st_ctime_ns: int
+    st_mode: int
+
+
+def _cache_key(metadata: _Metadata) -> ArtifactCacheKey:
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -90,8 +101,18 @@ def _size_bucket(size: int) -> str:
     return ">=8GiB"
 
 
-def _regular(descriptor: int, *, minimum: int = 1) -> os.stat_result:
-    metadata = os.fstat(descriptor)
+def _regular(
+    descriptor: int,
+    *,
+    minimum: int = 1,
+    fallback: StableFileMetadata | None = None,
+) -> _Metadata:
+    try:
+        metadata: _Metadata = os.fstat(descriptor)
+    except OSError:
+        if fallback is None or descriptor_size(descriptor) != fallback.st_size:
+            raise
+        metadata = fallback
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < minimum:
         raise JsonInputError("candidate model artifact is not a usable regular file")
     return metadata
@@ -108,9 +129,11 @@ def _read_exact(descriptor: int, amount: int) -> bytes:
     return bytes(value)
 
 
-def validate_gguf_fd(descriptor: int) -> ArtifactEvidence:
+def validate_gguf_fd(
+    descriptor: int, *, fallback: StableFileMetadata | None = None
+) -> ArtifactEvidence:
     """Validate the fixed GGUF v2/v3 header without reading a model body."""
-    before = _regular(descriptor, minimum=25)
+    before = _regular(descriptor, minimum=25, fallback=fallback)
     raw = _read_exact(descriptor, 24)
     if len(raw) != 24 or raw[:4] != b"GGUF":
         raise JsonInputError("candidate is not GGUF")
@@ -123,7 +146,7 @@ def validate_gguf_fd(descriptor: int) -> ArtifactEvidence:
     if minimum > before.st_size or minimum > MAX_ARTIFACT_BYTES:
         raise JsonInputError("GGUF declared header exceeds the inspection budget")
     header = _read_exact(descriptor, min(before.st_size, MAX_ARTIFACT_BYTES))
-    after = _regular(descriptor)
+    after = _regular(descriptor, fallback=fallback)
     if (before.st_dev, before.st_ino, before.st_size) != (
         after.st_dev,
         after.st_ino,
@@ -149,9 +172,11 @@ def _json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-def validate_safetensors_fd(descriptor: int) -> ArtifactEvidence:
+def validate_safetensors_fd(
+    descriptor: int, *, fallback: StableFileMetadata | None = None
+) -> ArtifactEvidence:
     """Validate one bounded Safetensors header through an opened descriptor."""
-    before = _regular(descriptor, minimum=8)
+    before = _regular(descriptor, minimum=8, fallback=fallback)
     prefix = _read_exact(descriptor, 8)
     if len(prefix) != 8:
         raise JsonInputError("Safetensors header length is truncated")
@@ -236,7 +261,7 @@ def validate_safetensors_fd(descriptor: int) -> ArtifactEvidence:
         previous_end = end
     if previous_end != data_size:
         raise JsonInputError("Safetensors data offsets leave trailing data")
-    after = _regular(descriptor, minimum=8)
+    after = _regular(descriptor, minimum=8, fallback=fallback)
     if (before.st_dev, before.st_ino, before.st_size) != (
         after.st_dev,
         after.st_ino,
@@ -290,16 +315,18 @@ def _looks_like_artifact(path: Path) -> bool:
 
 
 def _evidence_from_descriptor(
-    descriptor: int, cache: ArtifactCache | None
+    descriptor: int,
+    cache: ArtifactCache | None,
+    fallback: StableFileMetadata | None = None,
 ) -> ArtifactEvidence | None:
-    metadata = os.fstat(descriptor)
+    metadata = _regular(descriptor, fallback=fallback)
     key = _cache_key(metadata)
     if cache is not None and key in cache:
         return cache[key]
     evidence = None
     for validator in (validate_gguf_fd, validate_safetensors_fd):
         try:
-            evidence = validator(descriptor)
+            evidence = validator(descriptor, fallback=fallback)
             break
         except (JsonInputError, OSError):
             continue
@@ -353,16 +380,18 @@ def from_process_fds(
         # /proc/<pid>/fd/<n> is necessarily a procfs symlink.  We open that
         # exact descriptor target, then validate the opened inode; O_NOFOLLOW
         # would reject every legitimate procfs descriptor.
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         try:
-            descriptor = os.open(proc / str(identity.pid) / "fd" / str(number), flags)
-        except OSError:
+            descriptor, fallback = open_process_fd(identity, number, proc=proc)
+        except (JsonInputError, OSError, ProcessLookupError):
             continue
         try:
-            evidence = _evidence_from_descriptor(descriptor, cache)
+            evidence = _evidence_from_descriptor(descriptor, cache, fallback)
             if evidence is None:
                 continue
-            header_bytes = min(os.fstat(descriptor).st_size, MAX_ARTIFACT_BYTES)
+            header_bytes = min(
+                _regular(descriptor, fallback=fallback).st_size,
+                MAX_ARTIFACT_BYTES,
+            )
             if consumed + header_bytes > MAX_TOTAL_BYTES:
                 break
             consumed += header_bytes

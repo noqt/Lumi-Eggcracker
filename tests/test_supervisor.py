@@ -221,7 +221,117 @@ class SupervisorTests(unittest.TestCase):
 
         groups = supervisor._content_groups(candidates, snapshots)
         self.assertEqual(1, len(groups))
-        self.assertEqual((complete_identity,), tuple(item.snapshot.identity for item in groups[0][0]))
+        self.assertEqual(
+            (complete_identity,),
+            tuple(item.snapshot.identity for item in groups[0].witness),
+        )
+        self.assertEqual(65, len(groups[0].scope))
+
+    def test_complete_sibling_storm_is_one_full_component_enforcement_scope(self) -> None:
+        supervisor = self._instance()
+        supervisor.catalogue = load_bundled()
+        parent = ProcessIdentity(20, 200)
+        snapshots = {
+            parent: ProcessSnapshot(
+                parent, 2001, "/usr/bin/worker", "worker", ("worker",), (), (), ()
+            )
+        }
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        candidates: list[_EvidenceCandidate] = []
+        for offset in range(18):
+            current_identity = ProcessIdentity(21 + offset, 201 + offset)
+            current = ProcessSnapshot(
+                current_identity,
+                2001,
+                "/usr/bin/python3",
+                "python3",
+                ("python3",),
+                (),
+                (),
+                (),
+                parent=parent,
+            )
+            snapshots[current_identity] = current
+            candidates.append(
+                _EvidenceCandidate(current, (content,), (runtime,), 1)
+            )
+
+        groups = supervisor._content_groups(candidates, snapshots)
+
+        self.assertEqual(1, len(groups))
+        self.assertEqual(18, len(groups[0].witness))
+        self.assertEqual(18, len(groups[0].scope))
+        self.assertEqual(
+            {parent, *(candidate.snapshot.identity for candidate in candidates)},
+            supervisor._discovery_containment_targets(groups[0].scope, snapshots),
+        )
+
+    def test_partial_peer_is_scope_but_not_witness_for_complete_identity(self) -> None:
+        supervisor = self._instance()
+        supervisor.catalogue = load_bundled()
+        parent = ProcessIdentity(40, 400)
+        snapshots = {
+            parent: ProcessSnapshot(
+                parent, 2001, "/usr/bin/worker", "worker", ("worker",), (), (), ()
+            )
+        }
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        complete_identity = ProcessIdentity(41, 401)
+        partial_identity = ProcessIdentity(42, 402)
+        complete = ProcessSnapshot(
+            complete_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            (),
+            (),
+            (),
+            parent=parent,
+        )
+        partial = ProcessSnapshot(
+            partial_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            (),
+            (),
+            (),
+            parent=parent,
+        )
+        snapshots.update({complete_identity: complete, partial_identity: partial})
+
+        groups = supervisor._content_groups(
+            [
+                _EvidenceCandidate(complete, (content,), (runtime,), 1),
+                _EvidenceCandidate(partial, (content,), (), 1),
+            ],
+            snapshots,
+        )
+
+        self.assertEqual(1, len(groups))
+        self.assertEqual((complete_identity,), tuple(item.snapshot.identity for item in groups[0].witness))
+        self.assertEqual(
+            {complete_identity, partial_identity},
+            {item.snapshot.identity for item in groups[0].scope},
+        )
 
     def test_redundant_complete_sibling_pairs_expand_enforcement_scope(self) -> None:
         supervisor = self._instance()
@@ -275,12 +385,14 @@ class SupervisorTests(unittest.TestCase):
             )
 
         groups = supervisor._content_groups(candidates, snapshots)
-        self.assertEqual(1, len(groups))
-        self.assertEqual(4, len(groups[0][0]))
-        self.assertEqual(
-            {parent, *(candidate.snapshot.identity for candidate in candidates)},
-            supervisor._discovery_containment_targets(groups[0][0], snapshots),
-        )
+        self.assertGreaterEqual(len(groups), 1)
+        for group in groups:
+            self.assertLessEqual(len(group.witness), 3)
+            self.assertEqual(4, len(group.scope))
+            self.assertEqual(
+                {parent, *(candidate.snapshot.identity for candidate in candidates)},
+                supervisor._discovery_containment_targets(group.scope, snapshots),
+            )
 
     def test_heartbeat_stops_when_no_scan_completed_within_health_bound(self) -> None:
         supervisor = self._instance()

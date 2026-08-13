@@ -8,8 +8,10 @@ import struct
 from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .jsonio import JsonInputError
+from .procfd import StableFileMetadata, descriptor_size, open_process_fd
 
 MAX_ELF_BYTES = 4 * 1024 * 1024
 MAX_SECTIONS = 1024
@@ -48,7 +50,16 @@ RuntimeCacheKey = tuple[int, int, int, int, int]
 RuntimeCache = MutableMapping[RuntimeCacheKey, tuple[RuntimeEvidence, ...]]
 
 
-def _cache_key(metadata: os.stat_result) -> RuntimeCacheKey:
+class _Metadata(Protocol):
+    st_dev: int
+    st_ino: int
+    st_size: int
+    st_mtime_ns: int
+    st_ctime_ns: int
+    st_mode: int
+
+
+def _cache_key(metadata: _Metadata) -> RuntimeCacheKey:
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -182,10 +193,23 @@ def _build_id(descriptor: int, size: int) -> str | None:
     return None
 
 
-def _inspect_llama_descriptor(descriptor: int) -> RuntimeEvidence | None:
+def _metadata(
+    descriptor: int, fallback: StableFileMetadata | None = None
+) -> _Metadata:
+    try:
+        return os.fstat(descriptor)
+    except OSError:
+        if fallback is None or descriptor_size(descriptor) != fallback.st_size:
+            raise
+        return fallback
+
+
+def _inspect_llama_descriptor(
+    descriptor: int, fallback: StableFileMetadata | None = None
+) -> RuntimeEvidence | None:
     """Recognise llama/GGML through one already-open, stable descriptor."""
     try:
-        before = os.fstat(descriptor)
+        before = _metadata(descriptor, fallback)
         if not stat.S_ISREG(before.st_mode) or before.st_size < 64 or before.st_size > (1 << 40):
             return None
         build_id = _build_id(descriptor, before.st_size)
@@ -195,7 +219,7 @@ def _inspect_llama_descriptor(descriptor: int) -> RuntimeEvidence | None:
             # A large object can keep its section table beyond the bounded
             # window. It may still qualify only through the exact build ID.
             found = ()
-        after = os.fstat(descriptor)
+        after = _metadata(descriptor, fallback)
         if (before.st_dev, before.st_ino, before.st_size) != (
             after.st_dev,
             after.st_ino,
@@ -211,14 +235,16 @@ def _inspect_llama_descriptor(descriptor: int) -> RuntimeEvidence | None:
         return None
 
 
-def _inspect_pytorch_descriptor(descriptor: int) -> RuntimeEvidence | None:
+def _inspect_pytorch_descriptor(
+    descriptor: int, fallback: StableFileMetadata | None = None
+) -> RuntimeEvidence | None:
     """Recognise one exact pinned PyTorch bridge/ATen descriptor identity."""
     try:
-        before = os.fstat(descriptor)
+        before = _metadata(descriptor, fallback)
         if not stat.S_ISREG(before.st_mode) or before.st_size < 64:
             return None
         build_id = _build_id(descriptor, before.st_size)
-        after = os.fstat(descriptor)
+        after = _metadata(descriptor, fallback)
         if (before.st_dev, before.st_ino, before.st_size) != (
             after.st_dev,
             after.st_ino,
@@ -238,12 +264,14 @@ def _inspect_pytorch_descriptor(descriptor: int) -> RuntimeEvidence | None:
         return None
 
 
-def _inspect_descriptor(descriptor: int) -> tuple[RuntimeEvidence, ...]:
+def _inspect_descriptor(
+    descriptor: int, fallback: StableFileMetadata | None = None
+) -> tuple[RuntimeEvidence, ...]:
     values: list[RuntimeEvidence] = []
-    llama = _inspect_llama_descriptor(descriptor)
+    llama = _inspect_llama_descriptor(descriptor, fallback)
     if llama is not None:
         values.append(llama)
-    pytorch = _inspect_pytorch_descriptor(descriptor)
+    pytorch = _inspect_pytorch_descriptor(descriptor, fallback)
     if pytorch is not None and pytorch not in values:
         values.append(pytorch)
     return tuple(values)
@@ -300,16 +328,18 @@ def with_pytorch_pair(values: Iterable[RuntimeEvidence]) -> tuple[RuntimeEvidenc
 
 
 def _cached_descriptor(
-    descriptor: int, cache: RuntimeCache | None
+    descriptor: int,
+    cache: RuntimeCache | None,
+    fallback: StableFileMetadata | None = None,
 ) -> tuple[RuntimeEvidence, ...]:
     try:
-        metadata = os.fstat(descriptor)
+        metadata = _metadata(descriptor, fallback)
         key = _cache_key(metadata)
     except OSError:
         return ()
     if cache is not None and key in cache:
         return cache[key]
-    values = _inspect_descriptor(descriptor)
+    values = _inspect_descriptor(descriptor, fallback)
     if cache is not None:
         cache[key] = values
     return values
@@ -372,6 +402,42 @@ def from_snapshot(
             add(_cached_descriptor(descriptor, cache))
         finally:
             os.close(descriptor)
+
+    # A mapped runtime can also retain a process FD.  WSL DrvFS may make a
+    # deleted procfs magic link and map_files entry unreopenable even though
+    # a pidfd duplicate remains readable.  Inspect a fair bounded FD window
+    # with the same exact ELF rules before considering pathname fallbacks.
+    try:
+        numbers = sorted(
+            int(item.name)
+            for item in (proc / str(snapshot.identity.pid) / "fd").iterdir()
+            if item.name.isdigit()
+        )
+    except (AttributeError, OSError):
+        numbers = sorted(
+            {
+                number
+                for number, _target in tuple(getattr(snapshot, "fd_entries", ()))
+                if isinstance(number, int)
+                and not isinstance(number, bool)
+                and number >= 0
+            }
+        )
+    if numbers:
+        fd_offset = start_index % len(numbers)
+        fd_count = min(max_candidates, len(numbers))
+        for index in range(fd_count):
+            number = numbers[(fd_offset + index) % len(numbers)]
+            try:
+                descriptor, fallback = open_process_fd(
+                    snapshot.identity, number, proc=proc
+                )
+            except (JsonInputError, OSError, ProcessLookupError):
+                continue
+            try:
+                add(_cached_descriptor(descriptor, cache, fallback))
+            finally:
+                os.close(descriptor)
 
     references = _mapping_references(snapshot, proc)
     if references:

@@ -6,14 +6,17 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from lumi_eggcracker.artifacts import (
     from_mapped_files,
     from_process_fds,
     from_snapshot,
+    validate_gguf_fd,
     validate_path,
 )
 from lumi_eggcracker.discovery import ProcessIdentity
+from lumi_eggcracker.procfd import StableFileMetadata
 
 
 def gguf(*, version: int = 3, tensors: int = 1, metadata: int = 0, padding: int = 64) -> bytes:
@@ -32,6 +35,23 @@ def safetensors(*, dtype: str = "F32", shape: list[int] | None = None, offsets: 
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_readable_deleted_drvfs_duplicate_does_not_require_fstat(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "model"
+            path.write_bytes(gguf())
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                fallback = StableFileMetadata(7, 11, path.stat().st_size)
+                with patch(
+                    "lumi_eggcracker.artifacts.os.fstat",
+                    side_effect=FileNotFoundError(2, "deleted DrvFS descriptor"),
+                ):
+                    evidence = validate_gguf_fd(descriptor, fallback=fallback)
+            finally:
+                os.close(descriptor)
+            self.assertEqual("gguf-v3", evidence.evidence_id)
+            self.assertEqual((7, 11), (evidence.device, evidence.inode))
+
     def test_mapping_windows_eventually_cover_model_after_fd_close(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             proc = Path(raw)

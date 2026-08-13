@@ -106,6 +106,15 @@ class _EvidenceCandidate:
     fast_match: DetectionMatch | None = None
 
 
+@dataclass(frozen=True)
+class _DetectionGroup:
+    """A minimal detection witness plus its full related containment scope."""
+
+    witness: tuple[_EvidenceCandidate, ...]
+    scope: tuple[_EvidenceCandidate, ...]
+    boundary: str
+
+
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -506,93 +515,132 @@ class Supervisor:
             result.append((values, boundary))
         return result
 
+    def _candidate_evidence(
+        self, candidates: tuple[_EvidenceCandidate, ...] | list[_EvidenceCandidate]
+    ) -> dict[str, set[str]]:
+        paired = with_pytorch_pair(
+            item for candidate in candidates for item in candidate.runtimes
+        )
+        return {
+            "MODEL_CONTENT": {
+                item.evidence_id for candidate in candidates for item in candidate.content
+            },
+            "MODEL_RUNTIME": {item.evidence_id for item in paired},
+        }
+
+    def _profile_match(
+        self,
+        candidates: tuple[_EvidenceCandidate, ...] | list[_EvidenceCandidate],
+        profile: Any,
+    ) -> DetectionMatch | None:
+        return match(
+            Catalogue(self.catalogue.digest, (profile,)),
+            candidates[0].snapshot,
+            evidence=self._candidate_evidence(candidates),
+        )
+
     def _minimal_content_groups(
         self,
         candidates: list[_EvidenceCandidate],
-        snapshots: dict[ProcessIdentity, ProcessSnapshot],
-    ) -> list[tuple[tuple[_EvidenceCandidate, ...], str]]:
-        """Return each complete related component with its minimal witness proven.
+        scope: tuple[_EvidenceCandidate, ...],
+        boundary: str,
+    ) -> list[_DetectionGroup]:
+        """Find bounded partial-role witnesses without broadening approval.
 
-        Repeated partial evidence does not revoke an independently complete
-        approval, and a component larger than the historical containment cap
-        cannot suppress a complete profile.  A minimal evidence witness is
-        used only to justify detection; the complete component is returned as
-        enforcement scope so redundant complete pairs cannot survive the
-        first success receipt.
+        Each evidence-bearing identity is used as an anchor.  A witness is
+        retained only when that anchor materially contributes to one exact
+        content profile.  Approval is later evaluated on the witness alone;
+        containment uses the complete related component.
         """
-        result: list[tuple[tuple[_EvidenceCandidate, ...], str]] = []
-        for component, boundary in self._correlate(candidates, snapshots):
-            selected: list[_EvidenceCandidate] = []
-            seen_content: set[str] = set()
-            seen_runtime: set[str] = set()
-            detected: DetectionMatch | None = None
-            for candidate in sorted(component, key=lambda item: item.snapshot.identity):
-                content_ids = {item.evidence_id for item in candidate.content}
-                runtime_ids = {item.evidence_id for item in candidate.runtimes}
-                if content_ids <= seen_content and runtime_ids <= seen_runtime:
+        result: list[_DetectionGroup] = []
+        seen_witnesses: set[tuple[ProcessIdentity, ...]] = set()
+        ordered = sorted(candidates, key=lambda item: item.snapshot.identity)
+        profiles = tuple(item for item in self.catalogue.profiles if item.path == "CONTENT")
+        for anchor in ordered:
+            for profile in profiles:
+                selected = [anchor]
+                seen_content = {item.evidence_id for item in anchor.content}
+                seen_runtime = {item.evidence_id for item in anchor.runtimes}
+                detected = self._profile_match(selected, profile)
+                while detected is None and len(selected) < MAX_CORRELATED_PROCESSES:
+                    best: _EvidenceCandidate | None = None
+                    best_score: tuple[int, int] = (0, 0)
+                    for candidate in ordered:
+                        if candidate in selected:
+                            continue
+                        content_ids = {item.evidence_id for item in candidate.content}
+                        runtime_ids = {item.evidence_id for item in candidate.runtimes}
+                        added = len(content_ids - seen_content) + len(
+                            runtime_ids - seen_runtime
+                        )
+                        if not added:
+                            continue
+                        completes = int(
+                            self._profile_match([*selected, candidate], profile) is not None
+                        )
+                        score = (completes, added)
+                        if score > best_score:
+                            best = candidate
+                            best_score = score
+                    if best is None:
+                        break
+                    selected.append(best)
+                    seen_content.update(item.evidence_id for item in best.content)
+                    seen_runtime.update(item.evidence_id for item in best.runtimes)
+                    detected = self._profile_match(selected, profile)
+                if detected is None:
                     continue
-                selected.append(candidate)
-                seen_content.update(content_ids)
-                seen_runtime.update(runtime_ids)
-                paired = with_pytorch_pair(
-                    item for value in selected for item in value.runtimes
-                )
-                detected = match(
-                    self.catalogue,
-                    selected[0].snapshot,
-                    evidence={
-                        "MODEL_CONTENT": {
-                            item.evidence_id for value in selected for item in value.content
-                        },
-                        "MODEL_RUNTIME": {item.evidence_id for item in paired},
-                    },
-                )
-                if detected is not None:
-                    break
-                if len(selected) >= MAX_CORRELATED_PROCESSES:
-                    # There are currently only two independent evidence groups
-                    # and at most three raw identities are required for the
-                    # pinned profiles.  Reaching this guard means no bounded
-                    # minimal set was established; do not reinterpret partial
-                    # evidence as a destructive match.
-                    break
-            if detected is not None:
-                result.append((component, boundary))
+                without_anchor = [item for item in selected if item is not anchor]
+                if without_anchor and self._profile_match(without_anchor, profile) is not None:
+                    continue
+                key = tuple(sorted(item.snapshot.identity for item in selected))
+                if key in seen_witnesses:
+                    continue
+                seen_witnesses.add(key)
+                result.append(_DetectionGroup(tuple(selected), scope, boundary))
         return result
 
     def _content_groups(
         self,
         candidates: list[_EvidenceCandidate],
         snapshots: dict[ProcessIdentity, ProcessSnapshot],
-    ) -> list[tuple[tuple[_EvidenceCandidate, ...], str]]:
-        """Prefer exact same-process matches before any relation aggregate."""
-        complete: list[_EvidenceCandidate] = []
-        partial: list[_EvidenceCandidate] = []
-        for item in candidates:
-            own_runtime = with_pytorch_pair(item.runtimes)
-            own_match = match(
-                self.catalogue,
-                item.snapshot,
-                evidence={
-                    "MODEL_CONTENT": {value.evidence_id for value in item.content},
-                    "MODEL_RUNTIME": {value.evidence_id for value in own_runtime},
-                },
-            )
-            if own_match is None:
-                partial.append(item)
-            else:
-                complete.append(
-                    _EvidenceCandidate(
-                        item.snapshot,
-                        item.content,
-                        tuple(own_runtime),
-                        item.first_seen_ns,
-                        own_match,
-                    )
+    ) -> list[_DetectionGroup]:
+        """Separate match witnesses from full related containment components."""
+        result: list[_DetectionGroup] = []
+        for component, boundary in self._correlate(candidates, snapshots):
+            normalized: list[_EvidenceCandidate] = []
+            complete: list[_EvidenceCandidate] = []
+            partial: list[_EvidenceCandidate] = []
+            for item in component:
+                own_runtime = with_pytorch_pair(item.runtimes)
+                own_match = match(
+                    self.catalogue,
+                    item.snapshot,
+                    evidence={
+                        "MODEL_CONTENT": {
+                            value.evidence_id for value in item.content
+                        },
+                        "MODEL_RUNTIME": {
+                            value.evidence_id for value in own_runtime
+                        },
+                    },
                 )
-        return [((item,), "same-process") for item in complete] + self._minimal_content_groups(
-            partial, snapshots
-        )
+                current = _EvidenceCandidate(
+                    item.snapshot,
+                    item.content,
+                    tuple(own_runtime),
+                    item.first_seen_ns,
+                    own_match,
+                )
+                normalized.append(current)
+                (complete if own_match is not None else partial).append(current)
+            scope = tuple(normalized)
+            if complete:
+                # All independently complete identities in one related
+                # component share one enforcement task and one full scope.
+                result.append(_DetectionGroup(tuple(complete), scope, boundary))
+            result.extend(self._minimal_content_groups(partial, scope, boundary))
+        return result
 
     @staticmethod
     def _discovery_excluded(snapshot: ProcessSnapshot) -> bool:
@@ -1096,15 +1144,25 @@ class Supervisor:
             snapshot_map,
         )
         groups = [
-            ((item,), "same-process")
+            _DetectionGroup((item,), (item,), "same-process")
             for item in candidates
             if item.fast_match is not None
         ] + content_groups
-        for group, boundary_type in groups:
-            group = self._refresh_group(group)
-            if not group:
+        for detection_group in groups:
+            scope = self._refresh_group(detection_group.scope)
+            if not scope:
                 continue
-            for candidate in group:
+            refreshed_by_identity = {
+                candidate.snapshot.identity: candidate for candidate in scope
+            }
+            witness = tuple(
+                refreshed_by_identity[item.snapshot.identity]
+                for item in detection_group.witness
+                if item.snapshot.identity in refreshed_by_identity
+            )
+            if not witness:
+                continue
+            for candidate in scope:
                 snapshot_map[candidate.snapshot.identity] = candidate.snapshot
             # Launch provenance is written before the protected gate releases.
             # Load it only after refreshing the post-exec process identity;
@@ -1120,10 +1178,10 @@ class Supervisor:
                 ProcessIdentity(item["pid"], item["start_time"]): item
                 for item in provenances
             }
-            trigger_candidate = group[0]
+            trigger_candidate = witness[0]
             aggregate_content: list[ArtifactEvidence] = []
             aggregate_runtimes: list[RuntimeEvidence] = []
-            for candidate in group:
+            for candidate in witness:
                 for evidence in candidate.content:
                     if evidence not in aggregate_content:
                         aggregate_content.append(evidence)
@@ -1143,7 +1201,7 @@ class Supervisor:
             qualified_ns = time.monotonic_ns()
             unapproved: list[_EvidenceCandidate] = []
             executable_digests: dict[ProcessIdentity, str | None] = {}
-            for candidate in group:
+            for candidate in witness:
                 try:
                     executable_sha256 = self._cached_executable_digest(candidate.snapshot)
                 except (JsonInputError, OSError):
@@ -1163,7 +1221,10 @@ class Supervisor:
                     unapproved.append(candidate)
             if not unapproved:
                 continue
-            target_set = self._discovery_containment_targets(group, snapshot_map)
+            trigger_candidate = unapproved[0]
+            if trigger_candidate.fast_match is not None:
+                detected = trigger_candidate.fast_match
+            target_set = self._discovery_containment_targets(scope, snapshot_map)
             with self.discovery_lock:
                 now = time.monotonic_ns()
                 self.discovery_done = {
@@ -1185,11 +1246,11 @@ class Supervisor:
                     self.discovery_active.difference_update(target_set)
                 continue
             executable_sha256 = executable_digests.get(snapshot.identity)
-            first_seen_ns = min(candidate.first_seen_ns for candidate in group)
+            first_seen_ns = min(candidate.first_seen_ns for candidate in witness)
             kwargs = {
                 "targets": target_set,
-                "correlated": tuple(group),
-                "boundary_type": boundary_type,
+                "correlated": tuple(scope),
+                "boundary_type": detection_group.boundary,
             }
             if synchronous:
                 self._enforce_discovery(

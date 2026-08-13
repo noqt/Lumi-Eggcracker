@@ -14,11 +14,13 @@ from lumi_eggcracker.elfmarkers import (
     PYTORCH_BRIDGE_EVIDENCE_ID,
     PYTORCH_PAIR_EVIDENCE_ID,
     RuntimeEvidence,
+    _inspect_descriptor,
     from_snapshot,
     inspect_path,
     inspect_pytorch_path,
     with_pytorch_pair,
 )
+from lumi_eggcracker.procfd import StableFileMetadata
 
 
 def elf(*, markers: tuple[str, ...], append_decoys: bool = False) -> bytes:
@@ -59,6 +61,24 @@ def build_id_elf(identifier: bytes) -> bytes:
 
 
 class ElfMarkerTests(unittest.TestCase):
+    def test_readable_deleted_drvfs_duplicate_does_not_require_fstat(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "runtime"
+            path.write_bytes(
+                elf(markers=("llama_decode", "llama_model_load_from_file"))
+            )
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                fallback = StableFileMetadata(7, 12, path.stat().st_size)
+                with patch(
+                    "lumi_eggcracker.elfmarkers.os.fstat",
+                    side_effect=FileNotFoundError(2, "deleted DrvFS descriptor"),
+                ):
+                    evidence = _inspect_descriptor(descriptor, fallback)
+            finally:
+                os.close(descriptor)
+            self.assertEqual(("llama-elf",), tuple(item.evidence_id for item in evidence))
+
     def test_proc_mapping_descriptors_are_inspected_without_pathnames(self) -> None:
         bridge_id = bytes.fromhex("44" * 20)
         aten_id = bytes.fromhex("55" * 20)

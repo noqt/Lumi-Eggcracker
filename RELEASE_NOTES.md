@@ -12,4 +12,6 @@ Adversarial repair qualification binds approval consumption to the exact protect
 
 The final approval repair also prevents a non-root operator from replacing an argv-referenced interpreter script after root approval. CPython approval is limited to one absolute regular script; that script is bound by identity and digest and copied from the same validated descriptor into an immutable root-owned per-run stage before gate release. Mutable, relative, module, command, directory and unsupported interpreter forms fail closed.
 
+The final containment-scope repair groups independently complete related siblings into one enforcement scope before the first receipt, including their live same-UID connector parent. Deleted WSL2 DrvFS model and runtime descriptors are inspected through an exact PID/start-time-bound `pidfd_getfd` duplicate when the ordinary procfs magic link cannot be reopened; the same bounded content and ELF validators remain authoritative.
+
 The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.
