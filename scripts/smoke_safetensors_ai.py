@@ -59,6 +59,19 @@ def control(argv: list[str], *, operator: str | None = None) -> dict[str, Any]:
     return value
 
 
+def rejected_control(argv: list[str], *, operator: str) -> dict[str, Any]:
+    result = subprocess.run(
+        ["/usr/sbin/runuser", "-u", operator, "--", CLI, *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode == 0 or "approved Python script" not in result.stderr:
+        raise RuntimeError("mutable approved script was not rejected before launch")
+    return {"returncode": result.returncode, "stderr": result.stderr.strip()}
+
+
 def stop(process: subprocess.Popen[bytes] | None) -> None:
     if process is not None and process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
@@ -165,6 +178,27 @@ def one(
             approval = control(["approve", "--name", name, "--uid", str(user_uid), "--", *argv])
             if approval.get("result") != "APPROVED":
                 raise RuntimeError("exact Safetensors approval failed")
+            approved_source = wrapper.read_bytes()
+            try:
+                wrapper.write_bytes(b"raise SystemExit('mutated after approval')\n")
+                mutation_rejection = rejected_control(
+                    [
+                        "start",
+                        "--name",
+                        run_name,
+                        "--max-pids",
+                        "64",
+                        "--max-memory-mib",
+                        "4096",
+                        "--cpu-quota-percent",
+                        "1200",
+                        "--",
+                        *argv,
+                    ],
+                    operator=operator,
+                )
+            finally:
+                wrapper.write_bytes(approved_source)
             response = control(
                 [
                     "start",
@@ -197,6 +231,8 @@ def one(
             generated = output.stat().st_size
             stop_selected(operator, run_name)
             approved_started = False
+            if any(Path("/run/lumi-eggcracker/staged").iterdir()):
+                raise RuntimeError("approved script stage survived workload termination")
             control(["revoke", "--name", name])
             before = set(DETECTIONS.glob("*.json"))
             first_process = launch(python, user, wrapper, weights, config_copy, output)
@@ -205,7 +241,7 @@ def one(
             first_process = None
             if second.get("detector", {}).get("profile") != "content.safetensors-pytorch" or canary.poll() is not None:
                 raise RuntimeError("revoked Safetensors/PyTorch model was not terminated")
-            return {"approved_generated_bytes": generated, "first_receipt": first, "result": "PASS", "second_receipt": second}
+            return {"approved_generated_bytes": generated, "first_receipt": first, "mutable_script_rejection": mutation_rejection, "result": "PASS", "second_receipt": second}
         finally:
             stop(first_process)
             if approved_started:
