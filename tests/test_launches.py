@@ -22,6 +22,7 @@ class LaunchProvenanceTests(unittest.TestCase):
             "run_id": run_id,
         }
         approval = {
+            "bound_inputs": [],
             "created_monotonic_ns": 1,
             "name": "approved",
             "argv_count": 2,
@@ -30,6 +31,7 @@ class LaunchProvenanceTests(unittest.TestCase):
             "executable_device": 9,
             "executable_inode": 10,
             "executable_sha256": "b" * 64,
+            "launch_kind": "NATIVE_LLAMA",
             "uid": 1001,
         }
         with tempfile.TemporaryDirectory() as raw:
@@ -65,4 +67,3 @@ class LaunchProvenanceTests(unittest.TestCase):
                 self.assertFalse(
                     authorizes(replacement, "b" * 64, (9, 10), provenance)
                 )
-

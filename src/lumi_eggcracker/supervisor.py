@@ -24,7 +24,7 @@ from . import __version__
 from .adoption import AdoptionResult, contain_many, open_pidfd, pidfd_available
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
-from .approvals import match_launch, revoke
+from .approvals import match_launch, revoke, stage_launch
 from .approvals import public as public_approval
 from .artifacts import MAX_FD_PROBES_PER_SCAN, MAX_MAP_PROBES_PER_SCAN, ArtifactEvidence
 from .artifacts import from_snapshot as artifacts_from_snapshot
@@ -86,6 +86,7 @@ SOCKET_ACTIONS = {
 STATE_DIR = Path("/var/lib/lumi-eggcracker")
 UNIT_PREFIX = "lumi-eggcracker-workload-"
 GATES_DIR = Path("/run/lumi-eggcracker/gates")
+STAGED_DIR = Path("/run/lumi-eggcracker/staged")
 MAX_TERMINAL_RECORDS = 128
 DETECTION_LIMIT = 1000
 RECENT_DISCOVERY_NS = 5_000_000_000
@@ -296,7 +297,27 @@ class Supervisor:
                 raise JsonInputError("workload name index is invalid")
         if record["state"] not in ACTIVE_STATES and hasattr(self, "launches"):
             provenance_path(self.launches, record["run_id"]).unlink(missing_ok=True)
+            self._clear_stage(record["run_id"])
         self._prune_terminal_records()
+
+    @staticmethod
+    def _clear_stage(run_id: str) -> None:
+        if not RUN_ID.fullmatch(run_id):
+            raise JsonInputError("staged launch identity is invalid")
+        root = STAGED_DIR / run_id
+        if not root.exists():
+            return
+        if root.is_symlink() or not root.is_dir():
+            raise JsonInputError("staged launch root is invalid")
+        children = list(root.iterdir())
+        if any(
+            child.name != "script.py" or child.is_symlink() or not child.is_file()
+            for child in children
+        ):
+            raise JsonInputError("staged launch contents are invalid")
+        for child in children:
+            child.unlink()
+        root.rmdir()
 
     def _prune_terminal_records(self) -> None:
         records: list[tuple[int, Path]] = []
@@ -343,6 +364,7 @@ class Supervisor:
         for path, mode, gid in (
             (QUERY_SOCKET.parent, 0o711, self.policy["operator_gid"]),
             (GATES_DIR, 0o710, self.policy["workload_gid"]),
+            (STAGED_DIR, 0o711, 0),
             (STATE_DIR, 0o700, 0),
             (self.runs, 0o700, 0),
             (self.names, 0o700, 0),
@@ -1483,7 +1505,16 @@ class Supervisor:
                 approval = None
             run_id = os.urandom(12).hex()
             unit = f"{UNIT_PREFIX}{run_id}.service"
-            gate = self._make_gate(run_id)
+            try:
+                effective_argv = (
+                    stage_launch(approval, argv, STAGED_DIR / run_id)
+                    if approval is not None
+                    else list(argv)
+                )
+                gate = self._make_gate(run_id)
+            except Exception:
+                self._clear_stage(run_id)
+                raise
             result = self._run(
                 [
                     "/usr/bin/systemd-run",
@@ -1502,6 +1533,11 @@ class Supervisor:
                     f"--property=CPUQuota={cpu_quota}%",
                     "--property=IOWeight=10",
                     "--property=LimitNOFILE=1024",
+                    "--working-directory=/",
+                    "--setenv=HOME=/nonexistent",
+                    "--setenv=PYTHONNOUSERSITE=1",
+                    "--setenv=PYTHONSAFEPATH=1",
+                    "--setenv=PYTHONPATH=",
                     "--",
                     "/usr/bin/python3",
                     "/usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz",
@@ -1509,11 +1545,12 @@ class Supervisor:
                     "--fifo",
                     str(gate),
                     "--",
-                    *argv,
+                    *effective_argv,
                 ]
             )
             if result.returncode:
                 gate.unlink(missing_ok=True)
+                self._clear_stage(run_id)
                 raise JsonInputError(result.stderr.strip() or "system workload launch failed")
             try:
                 deadline = time.monotonic() + 2.0
@@ -1577,6 +1614,7 @@ class Supervisor:
             except Exception:
                 gate.unlink(missing_ok=True)
                 provenance_path(self.launches, run_id).unlink(missing_ok=True)
+                self._clear_stage(run_id)
                 try:
                     # Best effort rollback after a launch failure; direct kill is still authoritative.
                     identity = capture_identity(props["ControlGroup"], run_id, unit)

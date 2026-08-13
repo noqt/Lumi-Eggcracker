@@ -7,6 +7,7 @@
 - Contain unapproved complete Safetensors/PyTorch matches autonomously, including converters and inspectors; partial matches survive.
 - Limit the active public catalogue to the two qualified content profiles; withhold unqualified name-only runtime entries.
 - Bind approval consumption before exec to the exact protected `start` PID/start-time, owned cgroup and executable identity; never grant approval from mutable post-exec arguments.
+- Bind supported CPython approvals to an immutable staged script and reject mutable or unsupported interpreter forms before launch.
 - Capture the full bounded related evidence component and connector parent after a minimal complete match, preventing incomplete sibling-pair containment receipts.
 - Tie supervisor heartbeats to recent successful scan completion and bound enforcement admission.
 - Preflight and empty only exact stopped service cgroups before uninstall, and validate every published release checksum.

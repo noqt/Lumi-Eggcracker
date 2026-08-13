@@ -11,7 +11,7 @@ from .discovery import ProcessIdentity, ProcessSnapshot
 from .jsonio import JsonInputError, load_regular_json
 from .records import RUN_ID, write_atomic
 
-SCHEMA = "lumi-eggcracker.launch-provenance.v1"
+SCHEMA = "lumi-eggcracker.launch-provenance.v2"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -27,6 +27,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         "approval_name",
         "argv_count",
         "argv_sha256",
+        "bound_input_sha256",
         "boot_id",
         "cgroup",
         "cgroup_device",
@@ -35,6 +36,7 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         "executable_device",
         "executable_inode",
         "executable_sha256",
+        "launch_kind",
         "pid",
         "run_id",
         "schema_version",
@@ -58,6 +60,17 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     for key in ("argv_sha256", "executable_sha256"):
         if not isinstance(value[key], str) or not SHA256.fullmatch(value[key]):
             raise JsonInputError("launch provenance digest is invalid")
+    if value["launch_kind"] not in {"NATIVE_LLAMA", "PYTHON_SCRIPT"}:
+        raise JsonInputError("launch provenance kind is invalid")
+    bound = value["bound_input_sha256"]
+    if not isinstance(bound, list) or any(
+        not isinstance(item, str) or not SHA256.fullmatch(item) for item in bound
+    ):
+        raise JsonInputError("launch provenance bound input is invalid")
+    if value["launch_kind"] == "NATIVE_LLAMA" and bound:
+        raise JsonInputError("native launch provenance has bound input")
+    if value["launch_kind"] == "PYTHON_SCRIPT" and len(bound) != 1:
+        raise JsonInputError("Python launch provenance requires one bound input")
     integers = (
         "approval_created_monotonic_ns",
         "argv_count",
@@ -92,6 +105,9 @@ def create(
             "approval_name": approval["name"],
             "argv_count": approval["argv_count"],
             "argv_sha256": approval["argv_sha256"],
+            "bound_input_sha256": [
+                item["sha256"] for item in approval["bound_inputs"]
+            ],
             "boot_id": run["boot_id"],
             "cgroup": run["cgroup"],
             "cgroup_device": run["cgroup_device"],
@@ -100,6 +116,7 @@ def create(
             "executable_device": approval["executable_device"],
             "executable_inode": approval["executable_inode"],
             "executable_sha256": approval["executable_sha256"],
+            "launch_kind": approval["launch_kind"],
             "pid": process.pid,
             "run_id": run["run_id"],
             "schema_version": SCHEMA,

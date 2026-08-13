@@ -18,7 +18,7 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 - detects only the two contract-qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
 - recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
 - recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
-- lets root approve one exact executable, workload UID and invocation, then lets the configured operator consume that approval only through the protected pre-exec `start` gate;
+- lets root approve one exact qualified native llama invocation or one root-owned CPython interpreter plus an absolute regular script, workload UID and invocation, then lets the configured operator consume that approval only through the protected pre-exec `start` gate;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
 - records bounded post-containment receipts, status and detection summaries.
@@ -85,7 +85,7 @@ eggcracker doctor
 eggcracker approvals
 ```
 
-An unapproved complete qualified content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, root must approve it and the operator must launch that exact command through `eggcracker start`. The approval stores hashes, not its raw arguments. An approval by itself never exempts a process launched directly or by another tool:
+An unapproved complete qualified content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, root must approve it and the operator must launch that exact command through `eggcracker start`. The approval stores hashes, not its raw arguments. Approval is deliberately limited to the qualified native llama runtime and CPython's single absolute-script form; Python `-c`, `-m`, relative paths, directories, symlinks and unsupported launchers are rejected. An approval by itself never exempts a process launched directly or by another tool:
 
 ```sh
 sudo eggcracker approve --name local-qwen --uid "$(id -u lumi-eggcracker-workload)" -- \
@@ -101,7 +101,7 @@ Inspect autonomous containment summaries with:
 eggcracker detections
 ```
 
-Remove an approval for future protected launches with `sudo eggcracker revoke --name local-qwen`. Revocation does not kill a workload that was already admitted and running. Approval is bound before exec to the exact Eggcracker-owned PID/start-time, executable identity and cgroup; mutable post-exec `/proc/<pid>/cmdline` data can never grant approval. Descendants and siblings do not inherit it.
+Remove an approval for future protected launches with `sudo eggcracker revoke --name local-qwen`. Revocation does not kill a workload that was already admitted and running. Approval is bound before exec to the exact Eggcracker-owned PID/start-time, executable identity and cgroup; mutable post-exec `/proc/<pid>/cmdline` data can never grant approval. For CPython, the approved script identity and digest are also bound, and the supervisor copies the same validated file descriptor into a root-owned per-run stage before releasing the gate. Script drift aborts `start`. Descendants and siblings do not inherit approval.
 
 The selected-workload command remains available for controlled tests and explicit workloads:
 
