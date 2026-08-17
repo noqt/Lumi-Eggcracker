@@ -123,6 +123,8 @@ def main() -> int:
         ROOT / "scripts" / "run_native_matrix.py": "scripts/run_native_matrix.py",
         ROOT / "scripts" / "benchmark_overhead.py": "scripts/benchmark_overhead.py",
         ROOT / "scripts" / "verify_evidence.py": "scripts/verify_evidence.py",
+        ROOT / "scripts" / "package_evidence.py": "scripts/package_evidence.py",
+        ROOT / "scripts" / "verify_evidence_archive.py": "scripts/verify_evidence_archive.py",
         ROOT / "tests" / "fixtures" / "benign_model_handler.py": "tests/fixtures/benign_model_handler.py",
         ROOT / "tests" / "fixtures" / "benign_near_limit.py": "tests/fixtures/benign_near_limit.py",
         ROOT / "tests" / "fixtures" / "canary.py": "tests/fixtures/canary.py",

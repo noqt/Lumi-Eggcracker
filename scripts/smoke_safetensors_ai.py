@@ -144,13 +144,19 @@ def one(
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="lumi-safetensors-smoke-", dir="/tmp") as raw:
         root = Path(raw)
-        # The unprivileged workload must be able to write its bounded smoke
-        # output, while model/config/wrapper inputs remain read-only files.
-        os.chmod(root, 0o733)
-        weights = root / "weights"
-        config_copy = root / "config.json"
-        wrapper = root / secrets.token_hex(12)
-        output = root / "output"
+        # Approval-bound inputs live below a root-controlled directory.  Only
+        # the separate output directory is writable by the workload identity.
+        os.chmod(root, 0o711)
+        inputs = root / "inputs"
+        outputs = root / "outputs"
+        inputs.mkdir(mode=0o711)
+        outputs.mkdir(mode=0o733)
+        os.chmod(inputs, 0o711)
+        os.chmod(outputs, 0o733)
+        weights = inputs / "weights"
+        config_copy = inputs / "config.json"
+        wrapper = inputs / secrets.token_hex(12)
+        output = outputs / "output"
         shutil.copyfile(model, weights)
         shutil.copyfile(config, config_copy)
         wrapper.write_text(wrapper_source(), encoding="utf-8")
@@ -175,6 +181,7 @@ def one(
                 raise RuntimeError("Safetensors/PyTorch profile or canary proof failed")
             if any(secret in json.dumps(first, sort_keys=True) for secret in (str(weights), str(wrapper))):
                 raise RuntimeError("Safetensors receipt leaked local paths")
+            output.unlink(missing_ok=True)
             approval = control(["approve", "--name", name, "--uid", str(user_uid), "--", *argv])
             if approval.get("result") != "APPROVED":
                 raise RuntimeError("exact Safetensors approval failed")

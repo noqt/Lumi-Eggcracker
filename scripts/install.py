@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import sys as _bootstrap_sys
+
+if not _bootstrap_sys.flags.isolated or not _bootstrap_sys.flags.no_site:
+    raise SystemExit(
+        "privileged installer requires /usr/bin/python3 -I -S scripts/install.py"
+    )
+
+import posix as _bootstrap_posix
+
+try:
+    _bootstrap_posix.readlink(__file__)
+except OSError:
+    pass
+else:
+    raise SystemExit("refusing a symlinked privileged installer")
+
 import argparse
 import grp
 import hashlib
 import json
 import os
 import pwd
+import re
 import secrets
 import shutil
 import signal
@@ -32,6 +49,7 @@ WATCHDOG_RUNTIME = Path("/run/lumi-eggcracker-watchdog")
 HEARTBEAT_SOCKET = WATCHDOG_RUNTIME / "heartbeat.sock"
 WORKLOAD_NAME = "lumi-eggcracker-workload"
 TARGETS = (LIB, BIN, ETC, UNIT, WATCHDOG_UNIT, STATE, RUNTIME, WATCHDOG_RUNTIME)
+INSTALLER_VERSION = "0.5.0"
 
 
 def digest(path: Path) -> str:
@@ -39,6 +57,15 @@ def digest(path: Path) -> str:
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(64 * 1024), b""):
             value.update(block)
+    return value.hexdigest()
+
+
+def digest_descriptor(descriptor: int) -> str:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    value = hashlib.sha256()
+    while block := os.read(descriptor, 64 * 1024):
+        value.update(block)
+    os.lseek(descriptor, 0, os.SEEK_SET)
     return value.hexdigest()
 
 
@@ -67,21 +94,43 @@ def socket_contract_matches(path: Path, mode: int, gid: int) -> bool:
     )
 
 
-def manifest_for(artifact: Path) -> dict[str, Any]:
+def manifest_for(
+    artifact: Path, descriptor: int, expected_sha256: str
+) -> dict[str, Any]:
     path = artifact.parent / "release-manifest.json"
     if path.is_symlink() or not path.is_file():
         raise RuntimeError("release manifest is missing")
     value = json.loads(path.read_text(encoding="utf-8"))
     expected = {"artifact", "sha256", "source_archive", "source_archive_sha256", "source_commit", "version"}
-    if set(value) != expected or value["artifact"] != artifact.name or value["sha256"] != digest(artifact):
+    actual_sha256 = digest_descriptor(descriptor)
+    if (
+        set(value) != expected
+        or value["artifact"] != artifact.name
+        or value["sha256"] != actual_sha256
+        or actual_sha256 != expected_sha256
+    ):
         raise RuntimeError("release artifact identity does not match manifest")
     if (
         not isinstance(value["version"], str)
         or not value["version"]
+        or value["version"] != INSTALLER_VERSION
         or len(value["source_commit"]) != 40
     ):
         raise RuntimeError("release manifest version or source identity is invalid")
-    version_check = run(["/usr/bin/python3", str(artifact), "version"])
+    version_check = subprocess.run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            f"/proc/self/fd/{descriptor}",
+            "version",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        pass_fds=(descriptor,),
+    )
     if version_check.returncode or version_check.stdout.strip() != value["version"]:
         raise RuntimeError("release artifact version does not match manifest")
     return value
@@ -102,7 +151,7 @@ def workload_account() -> tuple[pwd.struct_passwd, bool]:
 
 
 def service() -> bytes:
-    return b"""[Unit]\nDescription=Lumi Eggcracker autonomous AI runtime supervisor\nAfter=lumi-eggcracker-watchdog.service\nRequires=lumi-eggcracker-watchdog.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _supervisor --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\nDelegate=yes\nMemoryMin=64M\nMemoryMax=256M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=256\nLimitNOFILE=65536\nOOMScoreAdjust=-900\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
+    return b"""[Unit]\nDescription=Lumi Eggcracker autonomous AI runtime supervisor\nAfter=lumi-eggcracker-watchdog.service\nRequires=lumi-eggcracker-watchdog.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 -I -S /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _supervisor --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker\nRuntimeDirectoryMode=0710\nUMask=0077\nNoNewPrivileges=yes\nDelegate=yes\nMemoryMin=64M\nMemoryMax=256M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=256\nLimitNOFILE=65536\nOOMScoreAdjust=-900\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
 
 
 # The supervisor inspects model paths opened by unrelated host processes.  A
@@ -113,7 +162,7 @@ _SERVICE_RELEASE = service().replace(b"PrivateTmp=yes\n", b"")
 
 
 def watchdog_service() -> bytes:
-    return b"""[Unit]\nDescription=Lumi Eggcracker fail-closed watchdog\nBefore=lumi-eggcracker.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _watchdog --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker-watchdog\nRuntimeDirectoryMode=0700\nUMask=0077\nNoNewPrivileges=yes\nMemoryMin=16M\nMemoryMax=64M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=32\nLimitNOFILE=4096\nOOMScoreAdjust=-1000\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker-watchdog\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
+    return b"""[Unit]\nDescription=Lumi Eggcracker fail-closed watchdog\nBefore=lumi-eggcracker.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 -I -S /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _watchdog --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker-watchdog\nRuntimeDirectoryMode=0700\nUMask=0077\nNoNewPrivileges=yes\nMemoryMin=16M\nMemoryMax=64M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=32\nLimitNOFILE=4096\nOOMScoreAdjust=-1000\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker-watchdog\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
 
 
 def autonomous_primitives_available() -> bool:
@@ -179,10 +228,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--operator", required=True)
     parser.add_argument("--artifact", required=True, type=Path)
+    parser.add_argument("--expected-sha256", required=True)
     args = parser.parse_args()
+    if not re.fullmatch(r"[0-9a-f]{64}", args.expected_sha256):
+        raise SystemExit("expected artifact SHA-256 is invalid")
     if args.artifact.is_symlink() or not args.artifact.is_file():
         raise SystemExit("artifact must be a regular file")
-    release = manifest_for(args.artifact)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    artifact_descriptor = os.open(args.artifact, flags)
+    artifact_metadata = os.fstat(artifact_descriptor)
+    if not stat.S_ISREG(artifact_metadata.st_mode):
+        raise SystemExit("artifact must be a regular file")
+    release = manifest_for(args.artifact, artifact_descriptor, args.expected_sha256)
     operator = pwd.getpwnam(args.operator)
     if operator.pw_uid == 0:
         raise SystemExit("operator must be non-root")
@@ -203,10 +260,12 @@ def main() -> int:
         LIB.mkdir(mode=0o755); created.append(LIB)
         ETC.mkdir(mode=0o700); created.append(ETC)
         STATE.mkdir(mode=0o700); created.append(STATE)
-        shutil.copyfile(args.artifact, LIB / "lumi-eggcracker.pyz")
+        shutil.copyfile(
+            f"/proc/self/fd/{artifact_descriptor}", LIB / "lumi-eggcracker.pyz"
+        )
         os.chmod(LIB / "lumi-eggcracker.pyz", 0o755)
-        write_new(BIN, b"#!/bin/sh\nexec /usr/bin/python3 /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz \"$@\"\n", 0o755); created.append(BIN)
-        catalogue = catalogue_from_artifact(args.artifact)
+        write_new(BIN, b"#!/bin/sh\nexec /usr/bin/python3 -I -S /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz \"$@\"\n", 0o755); created.append(BIN)
+        catalogue = catalogue_from_artifact(Path(f"/proc/self/fd/{artifact_descriptor}"))
         catalogue_path = ETC / "detector_catalogue.json"
         write_new(catalogue_path, catalogue, 0o644)
         policy = {"admin_socket_path": str(ADMIN_SOCKET), "catalogue_path": str(catalogue_path), "catalogue_sha256": hashlib.sha256(catalogue).hexdigest(), "operator_gid": operator.pw_gid, "operator_socket_path": str(OPERATOR_SOCKET), "operator_uid": operator.pw_uid, "query_socket_path": str(QUERY_SOCKET), "schema_version": "lumi-eggcracker.policy.v4", "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-eggcracker-workload-", "version": release["version"], "watchdog_socket_path": str(HEARTBEAT_SOCKET), "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}

@@ -12,6 +12,10 @@ permissions:
 jobs:
   test-and-package:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -19,12 +23,13 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install test tooling
         run: python -m pip install ruff==0.16.1
 
       - name: Lint
+        if: matrix.python-version == '3.11'
         run: ruff check src tests scripts
 
       - name: Unit tests
@@ -33,14 +38,17 @@ jobs:
         run: python -m unittest discover -s tests -v
 
       - name: Build release artifacts
+        if: matrix.python-version == '3.11'
         run: python scripts/build_release.py --output dist/github
 
       - name: Determine public version
+        if: matrix.python-version == '3.11'
         id: version
         shell: bash
         run: echo "version=$(PYTHONPATH=src python -c 'from lumi_eggcracker import __version__; print(__version__)')" >> "$GITHUB_OUTPUT"
 
       - name: Verify public release
+        if: matrix.python-version == '3.11'
         run: >-
           python scripts/verify_release.py
           --artifact dist/github/lumi-eggcracker-${{ steps.version.outputs.version }}.pyz
@@ -48,7 +56,7 @@ jobs:
           --release-bundle dist/github/lumi-eggcracker-${{ steps.version.outputs.version }}-linux.zip
 
       - name: Upload tag artifacts
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && matrix.python-version == '3.11'
         uses: actions/upload-artifact@v6
         with:
           name: lumi-eggcracker-${{ github.ref_name }}

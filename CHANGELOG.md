@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Repair the independently reported Linux artifact-cache regression and test the supported Python 3.11, 3.12 and 3.13 runtimes in CI.
+- Carry forward the Daybreak approval, containment-scope, runtime-authentication, descriptor-fairness, watchdog and lifecycle repairs on a new release identity; the immutable `v0.4.0` tag remains historical evidence only.
+- Add portable, metadata-preserving release-evidence packaging and verification.
+- Require the five focused P0 campaigns, exact 41-case adversarial replay and ordinary Ubuntu 24.04 qualification before publishing the engineering preview.
+
 ## 0.4.0
 
 - Add bounded Safetensors structural validation and exact pinned CPU PyTorch/ATen build-ID-pair recognition.

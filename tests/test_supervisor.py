@@ -470,6 +470,16 @@ class SupervisorTests(unittest.TestCase):
         self.assertLess(supervisor.operations.index("cgroup.kill"), supervisor.operations.index("durable-receipt"))
         self.assertLess(supervisor.operations.index("durable-receipt"), supervisor.operations.index("cleanup"))
 
+    def test_receipt_persistence_fault_is_terminal_but_never_reports_success(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        stored: list[str] = []
+        with patch("lumi_eggcracker.supervisor.validate_identity", return_value=Path("/owned")), patch("lumi_eggcracker.supervisor.kill_path", return_value=(11, 12)), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(13, EmptyProof(True, 1, 0, []))), patch.object(supervisor, "_write_receipt", side_effect=OSError("disk full")), patch.object(supervisor, "_store", side_effect=lambda value: stored.append(str(value["state"]))), patch.object(supervisor, "_cleanup") as cleanup, self.assertRaisesRegex(JsonInputError, "receipt persistence failed"):
+            supervisor._contain(item, "OPERATOR", 10)
+        self.assertEqual("CONTAINED_RECEIPT_FAILED", item["state"])
+        self.assertIn("CONTAINED_RECEIPT_FAILED", stored)
+        cleanup.assert_not_called()
+
     def test_exact_empty_cgroup_allows_normal_completion_without_systemctl(self) -> None:
         supervisor = self._instance()
         saved: list[dict[str, object]] = []

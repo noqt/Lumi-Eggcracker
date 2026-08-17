@@ -117,6 +117,8 @@ def main() -> int:
             "scripts/run_native_matrix.py",
             "scripts/benchmark_overhead.py",
             "scripts/verify_evidence.py",
+            "scripts/package_evidence.py",
+            "scripts/verify_evidence_archive.py",
             "tests/fixtures/benign_model_handler.py",
             "tests/fixtures/benign_near_limit.py",
             "tests/fixtures/canary.py",

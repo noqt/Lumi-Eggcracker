@@ -22,7 +22,7 @@ class LaunchProvenanceTests(unittest.TestCase):
             "run_id": run_id,
         }
         approval = {
-            "bound_inputs": [],
+            "bound_inputs": [{"sha256": "c" * 64}],
             "created_monotonic_ns": 1,
             "name": "approved",
             "argv_count": 2,

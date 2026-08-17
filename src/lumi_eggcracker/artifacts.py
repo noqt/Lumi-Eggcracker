@@ -356,24 +356,33 @@ def from_process_fds(
     Callers advance ``start_index`` between scans so a held-open artifact
     cannot be hidden permanently behind harmless lower-numbered descriptors.
     """
-    identity = snapshot.identity
+    identity = getattr(snapshot, "identity", None)
     if isinstance(start_index, bool) or not isinstance(start_index, int) or start_index < 0:
         raise JsonInputError("artifact descriptor cursor is invalid")
     if isinstance(max_probes, bool) or not isinstance(max_probes, int) or max_probes < 1:
         raise JsonInputError("artifact descriptor probe limit is invalid")
-    directory = proc / str(identity.pid) / "fd"
-    try:
-        numbers = sorted(
-            int(item.name) for item in directory.iterdir() if item.name.isdigit()
-        )
-    except (AttributeError, OSError):
-        numbers = sorted(
-            {
-                number
-                for number, _target in tuple(getattr(snapshot, "fd_entries", ()))
-                if isinstance(number, int) and not isinstance(number, bool) and number >= 0
-            }
-        )
+    pid = getattr(identity, "pid", None)
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid >= 1:
+        directory = proc / str(pid) / "fd"
+        try:
+            numbers = sorted(
+                int(item.name) for item in directory.iterdir() if item.name.isdigit()
+            )
+        except OSError:
+            numbers = sorted(
+                {
+                    number
+                    for number, _target in tuple(getattr(snapshot, "fd_entries", ()))
+                    if isinstance(number, int)
+                    and not isinstance(number, bool)
+                    and number >= 0
+                }
+            )
+    else:
+        # Synthetic snapshots and partially collected /proc records can still
+        # contribute stable pathname evidence through ``from_snapshot``.  A
+        # missing process identity must not prevent that fallback path.
+        numbers = []
     selected = fair_window(numbers, start_index=start_index, max_probes=max_probes)
     result: list[ArtifactEvidence] = []
     consumed = 0

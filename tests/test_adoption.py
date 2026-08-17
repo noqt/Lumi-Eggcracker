@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -95,3 +96,44 @@ class AdoptionTests(unittest.TestCase):
         self.assertEqual(2, opened.call_count)
         self.assertEqual(2, stopped.call_count)
         self.assertEqual({17, 18}, {call.args[0] for call in close.call_args_list})
+
+    def test_containment_faults_cannot_return_a_success_result(self) -> None:
+        target = ProcessIdentity(10, 100)
+        identity = QuarantineIdentity(Path("/quarantine/aa"), 1, 2, "a" * 24)
+        proof = adoption.EmptyProof(False, 1, 1, [10])
+
+        def invoke(*, kill_error: bool, empty: adoption.EmptyProof | None = None):
+            with ExitStack() as stack:
+                for current in (
+                    patch.object(adoption, "open_pidfd", return_value=17),
+                    patch.object(adoption, "stop_pidfd", return_value=20),
+                    patch.object(adoption, "stop"),
+                    patch.object(adoption, "descendants", return_value={target}),
+                    patch.object(adoption, "_move", return_value=True),
+                    patch.object(adoption, "create_quarantine", return_value=identity),
+                    patch.object(adoption, "_validate", return_value=identity.path),
+                    patch.object(adoption, "_remove"),
+                    patch.object(adoption, "_kill"),
+                    patch.object(adoption.os, "close"),
+                ):
+                    stack.enter_context(current)
+                stack.enter_context(
+                    patch.object(
+                        adoption,
+                        "kill_path",
+                        side_effect=OSError("cgroup.kill failed")
+                        if kill_error
+                        else None,
+                        return_value=None if kill_error else (30, 31),
+                    )
+                )
+                if empty is not None:
+                    stack.enter_context(
+                        patch.object(adoption, "verify_empty", return_value=(32, empty))
+                    )
+                return contain_many({target}, Path("/quarantine"), "a" * 24)
+
+        with self.assertRaises(OSError):
+            invoke(kill_error=True)
+        with self.assertRaisesRegex(JsonInputError, "did not become empty"):
+            invoke(kill_error=False, empty=proof)

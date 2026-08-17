@@ -160,11 +160,10 @@ def one(
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="lumi-content-smoke-", dir="/tmp") as raw:
         root = Path(raw)
-        # The unprivileged workload must be able to materialise its copied
-        # runtime beside the unfamiliar launcher; the harness remains the
-        # owner of the files it creates and the directory is not searchable
-        # by unrelated users.
-        os.chmod(root, 0o733)
+        # Inputs stay in a root-controlled pathname so an approval can bind
+        # both the unfamiliar runtime and exact model without a swap window.
+        # Root opens the output before dropping to the workload identity.
+        os.chmod(root, 0o711)
         disguised_runner = root / secrets.token_hex(12)
         disguised_model = root / secrets.token_hex(12)
         wrapper = root / f"{secrets.token_hex(8)}.py"

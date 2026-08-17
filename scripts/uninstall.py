@@ -2,6 +2,22 @@
 
 from __future__ import annotations
 
+import sys as _bootstrap_sys
+
+if not _bootstrap_sys.flags.isolated or not _bootstrap_sys.flags.no_site:
+    raise SystemExit(
+        "privileged uninstaller requires /usr/bin/python3 -I -S scripts/uninstall.py"
+    )
+
+import posix as _bootstrap_posix
+
+try:
+    _bootstrap_posix.readlink(__file__)
+except OSError:
+    pass
+else:
+    raise SystemExit("refusing a symlinked privileged uninstaller")
+
 import grp
 import hashlib
 import json

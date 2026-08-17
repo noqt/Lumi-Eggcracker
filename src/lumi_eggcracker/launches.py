@@ -11,7 +11,7 @@ from .discovery import ProcessIdentity, ProcessSnapshot
 from .jsonio import JsonInputError, load_regular_json
 from .records import RUN_ID, write_atomic
 
-SCHEMA = "lumi-eggcracker.launch-provenance.v2"
+SCHEMA = "lumi-eggcracker.launch-provenance.v3"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -67,10 +67,8 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         not isinstance(item, str) or not SHA256.fullmatch(item) for item in bound
     ):
         raise JsonInputError("launch provenance bound input is invalid")
-    if value["launch_kind"] == "NATIVE_LLAMA" and bound:
-        raise JsonInputError("native launch provenance has bound input")
-    if value["launch_kind"] == "PYTHON_SCRIPT" and len(bound) != 1:
-        raise JsonInputError("Python launch provenance requires one bound input")
+    if not bound:
+        raise JsonInputError("launch provenance requires bound material")
     integers = (
         "approval_created_monotonic_ns",
         "argv_count",
