@@ -44,6 +44,12 @@ a valid sub-32-KiB JSON request containing an integer beyond the supported
 after more than 4,096 earlier mappings, provided the complete procfs maps input
 remains within the 8 MiB byte ceiling.
 
+The related-process matrix must also split valid model and runtime evidence
+across stable PPID-1 holders whose only relation is one exact active
+`lumi-eggcracker-workload-<run-id>.service` cgroup. The complete selected
+workload must be contained with an exact-empty receipt; an identically named
+inactive or unowned cgroup must not create a relation.
+
 After deterministic qualification, replay the frozen 41-case Daybreak corpus
 against the exact candidate. Then run a fresh no-history Daybreak campaign with
 black-box, source-informed and adaptive T1/T2/T3 rounds. Any reproducible

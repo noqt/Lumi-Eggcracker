@@ -718,6 +718,66 @@ class SupervisorTests(unittest.TestCase):
             )
         )
 
+    def test_orphaned_roles_in_exact_active_selected_cgroup_are_related(self) -> None:
+        supervisor = self._instance()
+        selected = "/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service"
+        supervisor.active_cgroups = {selected}
+        init = ProcessIdentity(1, 1)
+        left_identity = ProcessIdentity(31, 301)
+        right_identity = ProcessIdentity(32, 302)
+        left = ProcessSnapshot(
+            left_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + selected,),
+            (),
+            (),
+            parent=init,
+        )
+        right = ProcessSnapshot(
+            right_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + selected,),
+            (),
+            (),
+            parent=init,
+        )
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        left_candidate = _EvidenceCandidate(left, (content,), (), 1)
+        right_candidate = _EvidenceCandidate(right, (), (runtime,), 2)
+
+        with patch("lumi_eggcracker.supervisor.Path.is_symlink", return_value=False), patch(
+            "lumi_eggcracker.supervisor.Path.is_dir", return_value=True
+        ), patch("lumi_eggcracker.supervisor.Path.is_file", return_value=True):
+            related, boundary = supervisor._related(
+                left_candidate,
+                right_candidate,
+                {left_identity: left, right_identity: right},
+            )
+            self.assertTrue(related)
+            self.assertEqual("owned-cgroup", boundary)
+
+            supervisor.active_cgroups.clear()
+            related, _boundary = supervisor._related(
+                left_candidate,
+                right_candidate,
+                {left_identity: left, right_identity: right},
+            )
+            self.assertFalse(related)
+
     def test_unrelated_same_uid_partial_candidates_do_not_join_by_common_root(self) -> None:
         supervisor = self._instance()
         common = ProcessIdentity(1, 1)

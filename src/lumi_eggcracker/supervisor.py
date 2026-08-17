@@ -481,22 +481,37 @@ class Supervisor:
         )
 
     def _owned_cgroup(self, snapshot: ProcessSnapshot) -> str | None:
-        """Return one exact supervisor-owned child cgroup, never an ancestor."""
+        """Return one exact Eggcracker-owned cgroup, never an ancestor."""
         prefix = "/system.slice/lumi-eggcracker.service/"
+        active_selected = getattr(self, "active_cgroups", set())
         for line in snapshot.cgroups:
             if not line.startswith("0::"):
                 continue
             value = line[3:]
-            if not value.startswith(prefix):
-                continue
-            relative = value.removeprefix(prefix)
-            if not relative or relative.startswith("quarantine/"):
-                continue
+            if value.startswith(prefix):
+                relative = value.removeprefix(prefix)
+                if not relative or relative.startswith("quarantine/"):
+                    continue
+            else:
+                unit = Path(value).name
+                if (
+                    value not in active_selected
+                    or value != f"/system.slice/{unit}"
+                    or not unit.startswith(UNIT_PREFIX)
+                    or not unit.endswith(".service")
+                    or not RUN_ID.fullmatch(
+                        unit.removeprefix(UNIT_PREFIX).removesuffix(".service")
+                    )
+                ):
+                    continue
             path = Path("/sys/fs/cgroup").joinpath(*value.lstrip("/").split("/"))
             if (
                 path.is_symlink()
                 or not path.is_dir()
-                or not all((path / item).is_file() for item in ("cgroup.events", "cgroup.procs", "cgroup.kill"))
+                or not all(
+                    (path / item).is_file()
+                    for item in ("cgroup.events", "cgroup.procs", "cgroup.kill")
+                )
             ):
                 continue
             return value
