@@ -50,6 +50,18 @@ def checksums(path: Path) -> dict[str, str]:
     return result
 
 
+def artifact_source_commit(path: Path) -> str:
+    with zipfile.ZipFile(path) as archive:
+        try:
+            raw = archive.read("lumi_eggcracker/build_info.py")
+        except KeyError as error:
+            raise SystemExit("artifact source identity is missing") from error
+    match = re.fullmatch(b'SOURCE_COMMIT = "([0-9a-f]{40})"\r?\n', raw)
+    if match is None:
+        raise SystemExit("artifact source identity is invalid")
+    return match.group(1).decode("ascii")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact", required=True, type=Path)
@@ -84,6 +96,8 @@ def main() -> int:
         raise SystemExit("artifact version is inconsistent")
     if manifest.get("artifact") != args.artifact.name:
         raise SystemExit("release manifest is inconsistent")
+    if manifest.get("source_commit") != artifact_source_commit(args.artifact):
+        raise SystemExit("artifact and manifest source identities differ")
     expected = {
         prefix + name
         for name in (
@@ -115,6 +129,7 @@ def main() -> int:
             "scripts/self_validate.py",
             "scripts/run_autonomous_matrix.py",
             "scripts/run_native_matrix.py",
+            "scripts/run_p0_native.py",
             "scripts/benchmark_overhead.py",
             "scripts/verify_evidence.py",
             "scripts/package_evidence.py",

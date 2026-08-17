@@ -121,6 +121,7 @@ def main() -> int:
         ROOT / "scripts" / "self_validate.py": "scripts/self_validate.py",
         ROOT / "scripts" / "run_autonomous_matrix.py": "scripts/run_autonomous_matrix.py",
         ROOT / "scripts" / "run_native_matrix.py": "scripts/run_native_matrix.py",
+        ROOT / "scripts" / "run_p0_native.py": "scripts/run_p0_native.py",
         ROOT / "scripts" / "benchmark_overhead.py": "scripts/benchmark_overhead.py",
         ROOT / "scripts" / "verify_evidence.py": "scripts/verify_evidence.py",
         ROOT / "scripts" / "package_evidence.py": "scripts/package_evidence.py",

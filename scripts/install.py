@@ -50,6 +50,7 @@ HEARTBEAT_SOCKET = WATCHDOG_RUNTIME / "heartbeat.sock"
 WORKLOAD_NAME = "lumi-eggcracker-workload"
 TARGETS = (LIB, BIN, ETC, UNIT, WATCHDOG_UNIT, STATE, RUNTIME, WATCHDOG_RUNTIME)
 INSTALLER_VERSION = "0.5.0"
+MAX_RELEASE_MANIFEST_BYTES = 32 * 1024
 
 
 def digest(path: Path) -> str:
@@ -94,13 +95,66 @@ def socket_contract_matches(path: Path, mode: int, gid: int) -> bool:
     )
 
 
+def read_stable_regular(path: Path, *, maximum: int) -> bytes:
+    """Read one bounded non-symlink file through a stable held descriptor."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RuntimeError(f"cannot open release file {path.name}") from error
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or not 1 <= before.st_size <= maximum:
+            raise RuntimeError(f"release file {path.name} is invalid")
+        value = bytearray()
+        while len(value) <= maximum:
+            block = os.read(descriptor, min(64 * 1024, maximum + 1 - len(value)))
+            if not block:
+                break
+            value.extend(block)
+        after = os.fstat(descriptor)
+        def identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                item.st_dev,
+                item.st_ino,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+            )
+        if len(value) > maximum or len(value) != before.st_size or identity(before) != identity(after):
+            raise RuntimeError(f"release file {path.name} changed during validation")
+        return bytes(value)
+    finally:
+        os.close(descriptor)
+
+
+def artifact_source_commit(artifact: Path) -> str:
+    try:
+        with zipfile.ZipFile(artifact) as bundle:
+            raw = bundle.read("lumi_eggcracker/build_info.py")
+    except (KeyError, OSError, zipfile.BadZipFile) as error:
+        raise RuntimeError("release artifact lacks source identity") from error
+    match = re.fullmatch(b'SOURCE_COMMIT = "([0-9a-f]{40})"\r?\n', raw)
+    if match is None:
+        raise RuntimeError("release artifact source identity is invalid")
+    return match.group(1).decode("ascii")
+
+
 def manifest_for(
     artifact: Path, descriptor: int, expected_sha256: str
 ) -> dict[str, Any]:
     path = artifact.parent / "release-manifest.json"
-    if path.is_symlink() or not path.is_file():
-        raise RuntimeError("release manifest is missing")
-    value = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        value = json.loads(
+            read_stable_regular(path, maximum=MAX_RELEASE_MANIFEST_BYTES).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("release manifest is invalid") from error
     expected = {"artifact", "sha256", "source_archive", "source_archive_sha256", "source_commit", "version"}
     actual_sha256 = digest_descriptor(descriptor)
     if (
@@ -115,6 +169,8 @@ def manifest_for(
         or not value["version"]
         or value["version"] != INSTALLER_VERSION
         or len(value["source_commit"]) != 40
+        or artifact_source_commit(Path(f"/proc/self/fd/{descriptor}"))
+        != value["source_commit"]
     ):
         raise RuntimeError("release manifest version or source identity is invalid")
     version_check = subprocess.run(

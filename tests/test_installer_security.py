@@ -62,4 +62,5 @@ class InstallerSecurityTests(unittest.TestCase):
         installer = INSTALLER.read_text(encoding="utf-8")
         self.assertIn("--expected-sha256", installer)
         self.assertIn("/proc/self/fd/{artifact_descriptor}", installer)
-
+        self.assertIn("read_stable_regular", installer)
+        self.assertIn("artifact_source_commit", installer)
