@@ -32,16 +32,13 @@ A successful receipt proves the captured quarantine cgroup is empty. It does not
 
 ## Active contract-qualified profiles
 
-The table states the exact profile contract implemented by this source. Project
-records report that these profiles passed the native qualification gates for
-commit `418f877f0d450aeb26d4a1233257746808c490e5` on one WSL2 Ubuntu host.
-The corresponding checksum-bound native evidence pack is not retained in this
-repository or a public GitHub Release, so that result is not independently
-re-verifiable from the durable public surface. Run the qualification in
-[QUALIFICATION.md](QUALIFICATION.md) on the exact commit and target host before
-relying on it.
+The table states the exact profile contract implemented by this source. A 0.5.0
+package is qualified only when its `release-manifest.json`, installed policy,
+receipts, source archive and portable evidence archive all name the same exact
+source commit and the gates in [QUALIFICATION.md](QUALIFICATION.md) pass on the
+target host. Do not transfer a qualification result between commits or hosts.
 
-| Profile | Exact qualification | Active in 0.4.0 |
+| Profile | Exact qualification | Active in 0.5.0 |
 | --- | --- | --- |
 | `content.gguf-llama` | Renamed full-file-pinned llama.cpp runner, extensionless GGUF path, bounded GGUF header, executable ELF identity | Yes |
 | `content.safetensors-pytorch` | Full-file-pinned CPU PyTorch bridge-plus-ATen pair, valid contiguous Safetensors layout, real model smoke and ATen-only negative control | Yes |
@@ -56,32 +53,32 @@ relying on it.
 
 ## Quick start
 
-There is currently no v0.4.0 GitHub Release or durable anonymous download for
-the Linux bundle. To evaluate the tagged source, build it locally in a disposable
-Ubuntu VM:
+0.5.0 is prepared as a new engineering-preview line; the historical `v0.4.0`
+tag is not moved. Until a reviewed 0.5.0 tag and release exist, evaluate an
+explicit reviewed commit in a disposable Ubuntu 24.04 VM and retain the
+generated manifest:
 
 ```sh
-git clone --branch v0.4.0 --depth 1 https://github.com/noqt/Lumi-Eggcracker.git
+git clone https://github.com/noqt/Lumi-Eggcracker.git
 cd Lumi-Eggcracker
-test "$(git rev-parse HEAD)" = "418f877f0d450aeb26d4a1233257746808c490e5"
+git checkout <reviewed-0.5.0-commit>
 python3 scripts/build_release.py --output dist/local
 python3 scripts/verify_release.py \
-  --artifact dist/local/lumi-eggcracker-0.4.0.pyz \
-  --source-archive dist/local/lumi-eggcracker-0.4.0-source.zip \
-  --release-bundle dist/local/lumi-eggcracker-0.4.0-linux.zip
+  --artifact dist/local/lumi-eggcracker-0.5.0.pyz \
+  --source-archive dist/local/lumi-eggcracker-0.5.0-source.zip \
+  --release-bundle dist/local/lumi-eggcracker-0.5.0-linux.zip
 ```
 
-Alternatively, a signed-in GitHub user may download the authenticated
-`lumi-eggcracker-v0.4.0` artifact from the
-[successful `v0.4.0` tag workflow](https://github.com/noqt/Lumi-Eggcracker/actions/runs/31472099403)
-while GitHub retains it, then perform the same source-commit and
-`verify_release.py` checks. A CI artifact is not a durable anonymous Release
-channel. After validation, extract `lumi-eggcracker-0.4.0-linux.zip` and run as
-root:
+After validation, extract `lumi-eggcracker-0.5.0-linux.zip`, compare the
+manifest commit to the reviewed source, and install through the isolated system
+Python with the manifest-bound artifact digest:
 
 ```sh
-cd lumi-eggcracker-0.4.0
-sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.4.0.pyz
+cd lumi-eggcracker-0.5.0
+artifact_sha=$(python3 -c 'import json; print(json.load(open("release-manifest.json"))["sha256"])')
+sudo /usr/bin/python3 -I -S scripts/install.py \
+  --operator "$USER" --artifact "$PWD/lumi-eggcracker-0.5.0.pyz" \
+  --expected-sha256 "$artifact_sha"
 eggcracker doctor
 eggcracker approvals
 ```
@@ -128,7 +125,7 @@ The smoke launches the model directly first and verifies that Eggcracker kills t
 To remove Eggcracker completely:
 
 ```sh
-sudo python3 scripts/uninstall.py
+sudo /usr/bin/python3 -I -S scripts/uninstall.py
 ```
 
 ## Local validation
@@ -144,6 +141,13 @@ sudo python3 scripts/self_validate.py \
 ```
 
 It runs the real-AI approval smoke, Safetensors approval smoke, ATen-only negative control, renamed content matrix, benign model-handling matrix, descendants/startup/restart checks, autonomous regression, selected-workload security regression, and the host-overhead benchmark. The resulting `overhead-benchmark.json` is included in the checksum-verified evidence pack.
+
+The 0.5.0 closure additionally runs the bundled `run_p0_native.py` workload
+campaign, `run_installer_p0.py` privileged-boundary campaign, deterministic
+enforcement/receipt fault injection, the frozen 41-case Daybreak replay, and a
+fresh no-history Daybreak assessment. Package the resulting evidence with
+`package_evidence.py`; its tar archive preserves POSIX symlink and hardlink
+semantics and is verified without extraction on a second host.
 
 Measure host cost separately in the disposable qualification VM:
 

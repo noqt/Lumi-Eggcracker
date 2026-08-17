@@ -519,7 +519,6 @@ class Campaign:
         real_model: Path,
         output: Path,
     ) -> None:
-        self.script = script
         self.workload = workload
         self.operator = operator
         self.runtime = runtime
@@ -532,6 +531,9 @@ class Campaign:
         self.root.mkdir(mode=0o755)
         self.work.mkdir(mode=0o733)
         os.chmod(self.work, 0o733)
+        self.script = self.root / "fixture.py"
+        shutil.copyfile(script, self.script)
+        self.script.chmod(0o555)
         self.model = self.root / "synthetic.gguf"
         self.model.write_bytes(gguf(1))
         self.model.chmod(0o444)

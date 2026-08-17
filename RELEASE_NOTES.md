@@ -1,6 +1,14 @@
-# Lumi Eggcracker 0.4.0
+# Lumi Eggcracker 0.5.0
 
-0.4.0 adds aggressive `content.safetensors-pytorch` recognition to the qualified 0.3.1 control plane. A valid bounded, contiguous Safetensors layout and the exact full-file SHA-256-pinned CPU PyTorch bridge-plus-ATen ELF pair may appear in one process or across a bounded related workload using the installed dedicated workload UID: a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup. Unrelated same-UID or common-init processes are not joined. There is no guarantee for evidence that escaped before observation, unobserved processes, or containerised or remote workloads. An unapproved complete match is automatically contained once a complete match is observed, without requiring proof of a forward pass. The three-socket approval boundaries, watchdog and direct cgroup.kill containment remain qualified release properties.
+0.5.0 is a new engineering-preview release line and does not move or replace
+the historical `v0.4.0` tag. It closes the independent release-review items:
+the Linux artifact-cache regression, exact artifact/source/manifest identity,
+root-isolated installer execution, descriptor-bound installation, portable
+POSIX evidence archives, Python 3.11/3.12/3.13 CI, ordinary Ubuntu 24.04 native
+qualification, five Priority-0 adversarial campaigns, the frozen 41-case
+Daybreak replay and a fresh no-history Daybreak assessment.
+
+The release retains aggressive `content.safetensors-pytorch` recognition on the qualified control plane. A valid bounded, contiguous Safetensors layout and the exact full-file SHA-256-pinned CPU PyTorch bridge-plus-ATen ELF pair may appear in one process or across a bounded related workload using the installed dedicated workload UID: a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup. Unrelated same-UID or common-init processes are not joined. There is no guarantee for evidence that escaped before observation, unobserved processes, or containerised or remote workloads. An unapproved complete match is automatically contained once a complete match is observed, without requiring proof of a forward pass. The three-socket approval boundaries, watchdog and direct cgroup.kill containment remain qualified release properties.
 
 On the qualification WSL2 Ubuntu environment, warmed-cache scan p95 was approximately 251 ms with 50 synthetic children, 650 ms with 200, and 2.9 seconds with 1,000. Content inspection occurs on alternating scans, so high process density can create multi-second observation delay. Results are host-specific; run the bundled benchmark before deployment.
 
