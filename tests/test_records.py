@@ -60,6 +60,7 @@ class RecordTests(unittest.TestCase):
         self.assertNotIn("--safe", str(value))
 
     def test_schema_rejects_unknown_field(self) -> None:
-        value = record(); value["extra"] = True
+        value = record()
+        value["extra"] = True
         with self.assertRaises(JsonInputError):
             validate_run(value)

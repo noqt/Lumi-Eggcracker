@@ -161,7 +161,8 @@ def main() -> int:
             if args.model is None:
                 raise RuntimeError("--model is required with --llama-cli")
             runner, model = args.llama_cli, args.model
-            regular(runner, executable=True); regular(model)
+            regular(runner, executable=True)
+            regular(model)
             provenance = {"llama": {"repository": "operator-supplied", "tag": None, "commit": None, "sha256": digest(runner), "size": runner.stat().st_size, "license": "operator-supplied"}, "model": {"url": "operator-supplied", "revision": None, "sha256": digest(model), "size": model.stat().st_size, "license": "operator-supplied"}}
         results = [one_smoke(runner=runner, model=model, provenance=provenance, index=index) for index in range(args.repetitions)]
         args.output.write_text(json.dumps({"repetitions": results, "result": "PASS"}, sort_keys=True) + "\n", encoding="utf-8")

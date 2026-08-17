@@ -47,7 +47,8 @@ class DiscoveryTests(unittest.TestCase):
     def test_pid_identity_includes_start_time(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             proc = Path(raw)
-            entry = proc / "42"; entry.mkdir()
+            entry = proc / "42"
+            entry.mkdir()
             (entry / "stat").write_text("42 (x) S 1 " + "0 " * 17 + "100\n", encoding="utf-8")
             self.assertEqual(ProcessIdentity(42, 100), identity(42, proc=proc))
             (entry / "stat").write_text("42 (x) S 1 " + "0 " * 17 + "101\n", encoding="utf-8")

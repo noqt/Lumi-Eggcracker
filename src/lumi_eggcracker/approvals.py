@@ -48,8 +48,16 @@ def _root_controlled_reference(path: Path) -> bool:
         sticky_root_directory = stat.S_ISDIR(metadata.st_mode) and bool(
             metadata.st_mode & stat.S_ISVTX
         )
+        # Linux reports symlink permissions as 0777, but changing a symlink
+        # requires write access to its parent directory.  A root-owned link
+        # whose complete lexical path is root-controlled is therefore safe to
+        # resolve, provided the resolved target and all of its parents are
+        # independently checked below.
+        root_owned_symlink = stat.S_ISLNK(metadata.st_mode) and metadata.st_uid == 0
         if metadata.st_uid != 0 or (
-            metadata.st_mode & 0o022 and not sticky_root_directory
+            metadata.st_mode & 0o022
+            and not sticky_root_directory
+            and not root_owned_symlink
         ):
             return False
     return True
@@ -361,6 +369,8 @@ def create(root: Path, *, name: str, uid: int, argv: list[str], administrator_ui
         executable = supplied.resolve(strict=True)
     except OSError as error:
         raise JsonInputError("approval executable cannot be resolved") from error
+    if not _root_controlled_reference(executable):
+        raise JsonInputError("resolved approval executable path must be root-controlled")
     metadata = executable.stat(follow_symlinks=False)
     if executable.is_symlink() or not executable.is_file():
         raise JsonInputError("approval executable must be regular")
@@ -412,6 +422,8 @@ def match_launch(
         if not _root_controlled_reference(supplied):
             return None
         executable = supplied.resolve(strict=True)
+        if not _root_controlled_reference(executable):
+            return None
         metadata = executable.stat(follow_symlinks=False)
         digest = executable_digest(executable)
     except OSError:

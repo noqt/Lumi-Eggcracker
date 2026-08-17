@@ -20,6 +20,7 @@ def load_script(name: str):
 
 
 smoke = load_script("smoke_local_ai")
+content_smoke = load_script("smoke_content_ai")
 prepare = load_script("prepare_ai_smoke")
 
 
@@ -67,3 +68,7 @@ class AiSmokeTests(unittest.TestCase):
         self.assertNotIn("/bin/sh", source)
         self.assertIn("ai_smoke_worker.py", source)
         self.assertIn('raise SystemExit(main())', worker)
+
+    def test_content_smoke_keeps_real_model_alive_until_containment(self) -> None:
+        command = content_smoke.command(Path("/runner"), Path("/model"))
+        self.assertIn("--ignore-eos", command)

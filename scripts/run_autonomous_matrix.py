@@ -129,7 +129,8 @@ def main() -> int:
                 canary = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
                 process: subprocess.Popen[bytes] | None = None
                 try:
-                    before = set(DETECTIONS.glob("*.json")); started = time.monotonic_ns()
+                    before = set(DETECTIONS.glob("*.json"))
+                    started = time.monotonic_ns()
                     process = launch(user, argv)
                     receipt = new_receipt(before)
                     stop(process)
@@ -137,7 +138,8 @@ def main() -> int:
                         raise RuntimeError("autonomous fixture containment or canary proof failed")
                     starts.append((receipt["containment"]["first_stop_monotonic_ns"] - started) / 1_000_000)
                     empties.append(float(receipt["containment"]["trigger_to_empty_ms"]))
-                    results["discoveries"].append(receipt["event_id"]); results["canary_survival"] += 1
+                    results["discoveries"].append(receipt["event_id"])
+                    results["canary_survival"] += 1
                 finally:
                     if process is not None:
                         stop(process)

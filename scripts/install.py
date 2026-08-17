@@ -257,21 +257,27 @@ def main() -> int:
         raise SystemExit("workload identity must be isolated from the operator and have no supplementary groups")
     created: list[Path] = []
     try:
-        LIB.mkdir(mode=0o755); created.append(LIB)
-        ETC.mkdir(mode=0o700); created.append(ETC)
-        STATE.mkdir(mode=0o700); created.append(STATE)
+        LIB.mkdir(mode=0o755)
+        created.append(LIB)
+        ETC.mkdir(mode=0o700)
+        created.append(ETC)
+        STATE.mkdir(mode=0o700)
+        created.append(STATE)
         shutil.copyfile(
             f"/proc/self/fd/{artifact_descriptor}", LIB / "lumi-eggcracker.pyz"
         )
         os.chmod(LIB / "lumi-eggcracker.pyz", 0o755)
-        write_new(BIN, b"#!/bin/sh\nexec /usr/bin/python3 -I -S /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz \"$@\"\n", 0o755); created.append(BIN)
+        write_new(BIN, b"#!/bin/sh\nexec /usr/bin/python3 -I -S /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz \"$@\"\n", 0o755)
+        created.append(BIN)
         catalogue = catalogue_from_artifact(Path(f"/proc/self/fd/{artifact_descriptor}"))
         catalogue_path = ETC / "detector_catalogue.json"
         write_new(catalogue_path, catalogue, 0o644)
         policy = {"admin_socket_path": str(ADMIN_SOCKET), "catalogue_path": str(catalogue_path), "catalogue_sha256": hashlib.sha256(catalogue).hexdigest(), "operator_gid": operator.pw_gid, "operator_socket_path": str(OPERATOR_SOCKET), "operator_uid": operator.pw_uid, "query_socket_path": str(QUERY_SOCKET), "schema_version": "lumi-eggcracker.policy.v4", "source_commit": release["source_commit"], "state_dir": str(STATE), "unit_prefix": "lumi-eggcracker-workload-", "version": release["version"], "watchdog_socket_path": str(HEARTBEAT_SOCKET), "workload_gid": account.pw_gid, "workload_uid": account.pw_uid}
         write_new(ETC / "policy.json", (json.dumps(policy, sort_keys=True) + "\n").encode(), 0o600)
-        write_new(UNIT, _SERVICE_RELEASE.replace(b"Requires=lumi-eggcracker-watchdog.service\n\n", b"Requires=lumi-eggcracker-watchdog.service\nStartLimitIntervalSec=0\n\n"), 0o644); created.append(UNIT)
-        write_new(WATCHDOG_UNIT, watchdog_service().replace(b"Before=lumi-eggcracker.service\n\n", b"Before=lumi-eggcracker.service\nStartLimitIntervalSec=0\n\n"), 0o644); created.append(WATCHDOG_UNIT)
+        write_new(UNIT, _SERVICE_RELEASE.replace(b"Requires=lumi-eggcracker-watchdog.service\n\n", b"Requires=lumi-eggcracker-watchdog.service\nStartLimitIntervalSec=0\n\n"), 0o644)
+        created.append(UNIT)
+        write_new(WATCHDOG_UNIT, watchdog_service().replace(b"Before=lumi-eggcracker.service\n\n", b"Before=lumi-eggcracker.service\nStartLimitIntervalSec=0\n\n"), 0o644)
+        created.append(WATCHDOG_UNIT)
         manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT), str(WATCHDOG_UNIT): digest(WATCHDOG_UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v4", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
         write_new(STATE / "install-manifest.json", (json.dumps(manifest, sort_keys=True) + "\n").encode(), 0o600)
         checked = run(["/usr/bin/systemctl", "daemon-reload"])

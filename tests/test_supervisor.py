@@ -536,7 +536,8 @@ class SupervisorTests(unittest.TestCase):
 
     def test_status_resolves_the_latest_terminal_run_after_name_reuse_is_enabled(self) -> None:
         supervisor = self._instance()
-        item = record(); item["state"] = "COMPLETED_ALLOWED"
+        item = record()
+        item["state"] = "COMPLETED_ALLOWED"
         with patch.object(supervisor, "_load", side_effect=JsonInputError("gone")), patch.object(supervisor, "_latest_by_name", return_value=item), patch.object(supervisor, "_store") as stored:
             value = supervisor.handle({"action": "status", "args": {"name": "demo"}})
         self.assertEqual("COMPLETED_ALLOWED", value["state"])
@@ -546,7 +547,8 @@ class SupervisorTests(unittest.TestCase):
         supervisor = self._instance()
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            supervisor.runs = root / "runs"; supervisor.names = root / "names"
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
             item = record()
             supervisor._store(item)
             self.assertTrue((supervisor.runs / ("a" * 24 + ".json")).is_file())

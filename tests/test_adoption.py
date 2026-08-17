@@ -75,7 +75,8 @@ class AdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             proc = Path(raw)
             for pid, parent, start in ((10, 1, 100), (11, 10, 101), (12, 10, 102)):
-                entry = proc / str(pid); (entry / "task" / str(pid)).mkdir(parents=True)
+                entry = proc / str(pid)
+                (entry / "task" / str(pid)).mkdir(parents=True)
                 (entry / "stat").write_text(stat(pid, parent, start), encoding="ascii")
             (proc / "10" / "task" / "10" / "children").write_text("11 12\n", encoding="ascii")
             (proc / "11" / "task" / "11" / "children").write_text("", encoding="ascii")

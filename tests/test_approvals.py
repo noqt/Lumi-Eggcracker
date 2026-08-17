@@ -1,17 +1,45 @@
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from lumi_eggcracker.approvals import create, load_all, match_launch, revoke, stage_launch
+from lumi_eggcracker.approvals import (
+    _root_controlled_reference,
+    create,
+    load_all,
+    match_launch,
+    revoke,
+    stage_launch,
+)
 from lumi_eggcracker.discovery import argv_digest
 from lumi_eggcracker.jsonio import JsonInputError
 
 
 class ApprovalTests(unittest.TestCase):
+    def test_root_owned_interpreter_symlink_uses_parent_and_target_controls(self) -> None:
+        link = Path("/opt/root-venv/bin/python")
+
+        def root_owned(path: Path):
+            mode = stat.S_IFLNK | 0o777 if path == link else stat.S_IFDIR | 0o755
+            return SimpleNamespace(st_mode=mode, st_uid=0)
+
+        with patch.object(Path, "lstat", autospec=True, side_effect=root_owned):
+            self.assertTrue(_root_controlled_reference(link))
+
+        def untrusted_link(path: Path):
+            metadata = root_owned(path)
+            if path == link:
+                metadata.st_uid = 1000
+            return metadata
+
+        with patch.object(Path, "lstat", autospec=True, side_effect=untrusted_link):
+            self.assertFalse(_root_controlled_reference(link))
+
     def test_exact_approval_matches_only_trusted_preexec_uid_and_argv(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "approvals"

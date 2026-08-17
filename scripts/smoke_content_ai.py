@@ -131,6 +131,11 @@ def command(runner: Path, model: Path) -> list[str]:
         "--single-turn",
         "--no-warmup",
         "--no-display-prompt",
+        # Small deterministic models may emit EOS before a slower native VM
+        # completes its first bounded discovery pass.  Keep the real runtime
+        # alive until Eggcracker contains it (or the smoke timeout fires) so
+        # model output timing cannot turn the detector gate into a race.
+        "--ignore-eos",
         "--seed",
         "1234",
     ]
