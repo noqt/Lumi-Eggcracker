@@ -126,6 +126,12 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _bounded_int(value: str) -> int:
+    if len(value.removeprefix("-")) > 128:
+        raise JsonInputError("request integer is too large")
+    return int(value)
+
+
 def _receive(connection: socket.socket) -> dict[str, Any]:
     def exact(length: int) -> bytes:
         chunks: list[bytes] = []
@@ -141,8 +147,12 @@ def _receive(connection: socket.socket) -> dict[str, Any]:
     if not 1 <= length <= MAX_FRAME:
         raise JsonInputError("invalid request frame size")
     try:
-        value = json.loads(exact(length).decode("utf-8"), object_pairs_hook=_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, JsonInputError) as error:
+        value = json.loads(
+            exact(length).decode("utf-8"),
+            object_pairs_hook=_pairs,
+            parse_int=_bounded_int,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError, JsonInputError) as error:
         raise JsonInputError(f"invalid request JSON: {error}") from error
     if not isinstance(value, dict):
         raise JsonInputError("request root must be an object")
@@ -249,6 +259,7 @@ class Supervisor:
         self.last_scan_completed_ns = 0
         self.last_scan_duration_ns = 0
         self.discovery_failures = 0
+        self.receipt_persistence_healthy = True
         self.enforcement_saturation_until_ns = 0
         self.heartbeat_sequence = 0
         self.last_heartbeat_sent = 0.0
@@ -851,12 +862,22 @@ class Supervisor:
         return targets
 
     def _store_detection(self, value: dict[str, Any]) -> None:
-        write_atomic(self._detection_path(value["event_id"]), value)
-        records = sorted(
-            self.detections.glob("*.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True
-        )
-        for path in records[DETECTION_LIMIT:]:
-            path.unlink(missing_ok=True)
+        try:
+            write_atomic(self._detection_path(value["event_id"]), value)
+            records = sorted(
+                self.detections.glob("*.json"),
+                key=lambda item: item.stat().st_mtime_ns,
+                reverse=True,
+            )
+            for path in records[DETECTION_LIMIT:]:
+                path.unlink(missing_ok=True)
+        except (JsonInputError, OSError):
+            # Containment has already happened when this is called from the
+            # autonomous enforcement path.  A missing durable empty-state
+            # receipt must therefore make health fail closed until a root
+            # operator repairs storage and restarts the supervisor.
+            self.receipt_persistence_healthy = False
+            raise
 
     def _detection_sort_key(self, path: Path) -> tuple[int, str]:
         try:
@@ -1382,6 +1403,7 @@ class Supervisor:
             or self.last_scan_completed_ns <= 0
             or time.monotonic_ns() - self.last_scan_completed_ns > SCAN_HEALTH_TIMEOUT_NS
             or self.discovery_failures >= MAX_DISCOVERY_FAILURES
+            or not self.receipt_persistence_healthy
             or time.monotonic_ns() < self.enforcement_saturation_until_ns
         ):
             return
@@ -1846,6 +1868,7 @@ class Supervisor:
                 self.last_scan_completed_ns > 0
                 and now_ns - self.last_scan_completed_ns <= SCAN_HEALTH_TIMEOUT_NS
                 and self.discovery_failures < MAX_DISCOVERY_FAILURES
+                and self.receipt_persistence_healthy
                 and self.discovery_thread is not None
                 and self.discovery_thread.is_alive()
             )
@@ -1864,6 +1887,7 @@ class Supervisor:
                     "consecutive_failures": self.discovery_failures,
                     "last_scan_duration_ms": self.last_scan_duration_ns / 1_000_000,
                     "last_scan_completed": self.last_scan_completed_ns > 0,
+                    "receipt_persistence_healthy": self.receipt_persistence_healthy,
                     "healthy": scan_healthy,
                     "scan_health_timeout_ms": SCAN_HEALTH_TIMEOUT_NS / 1_000_000,
                 },
@@ -1949,10 +1973,18 @@ class Supervisor:
                 if action not in SOCKET_ACTIONS[path]:
                     raise JsonInputError("action is not permitted on this socket")
                 _send(connection, {"ok": True, "value": self.handle(value)})
-            except (JsonInputError, OSError, struct.error) as error:
+            except (
+                JsonInputError,
+                OSError,
+                OverflowError,
+                RecursionError,
+                TypeError,
+                ValueError,
+                struct.error,
+            ) as error:
                 try:
                     _send(connection, {"ok": False, "value": str(error)})
-                except OSError:
+                except (OSError, OverflowError, RecursionError, TypeError, ValueError):
                     pass
 
     def serve(self) -> int:

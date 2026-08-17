@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import socket
+import struct
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from lumi_eggcracker.artifacts import ArtifactEvidence
 from lumi_eggcracker.containment import EmptyProof
@@ -20,7 +22,12 @@ from lumi_eggcracker.elfmarkers import (
 )
 from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
-from lumi_eggcracker.supervisor import Supervisor, _EvidenceCandidate
+from lumi_eggcracker.supervisor import (
+    QUERY_SOCKET,
+    Supervisor,
+    _EvidenceCandidate,
+    _receive,
+)
 
 
 def record() -> dict[str, object]:
@@ -44,7 +51,39 @@ class SupervisorTests(unittest.TestCase):
         value.discovery_done = {}
         value.discovery_lock = threading.Lock()
         value.content_scan_tick = 0
+        value.receipt_persistence_healthy = True
         return value
+
+    def test_oversized_valid_json_integer_is_rejected_without_escaping(self) -> None:
+        server, client = socket.socketpair()
+        try:
+            payload = (
+                b'{"action":"status","args":{"name":'
+                + b"9" * 5000
+                + b"}}"
+            )
+            self.assertLess(len(payload), 32 * 1024)
+            client.sendall(struct.pack("!I", len(payload)) + payload)
+            with self.assertRaisesRegex(JsonInputError, "integer is too large"):
+                _receive(server)
+        finally:
+            client.close()
+            server.close()
+
+    def test_connection_boundary_contains_validation_value_error(self) -> None:
+        supervisor = self._instance()
+        supervisor.policy["operator_uid"] = 1000
+        connection = MagicMock()
+        connection.getsockopt.return_value = struct.pack("3i", 42, 0, 0)
+        with patch(
+            "lumi_eggcracker.supervisor._receive",
+            side_effect=ValueError("bounded validation failure"),
+        ), patch("lumi_eggcracker.supervisor._send") as send:
+            supervisor._serve_connection(connection, QUERY_SOCKET)
+
+        send.assert_called_once_with(
+            connection, {"ok": False, "value": "bounded validation failure"}
+        )
 
     def test_recently_contained_identity_is_not_reenforced(self) -> None:
         supervisor = self._instance()
@@ -406,6 +445,39 @@ class SupervisorTests(unittest.TestCase):
         with patch("lumi_eggcracker.supervisor.socket.socket") as socket_factory:
             supervisor._heartbeat()
         socket_factory.assert_not_called()
+
+    def test_detection_receipt_fault_latches_unhealthy_and_stops_heartbeat(self) -> None:
+        supervisor = self._instance()
+        supervisor.detections = Path(".")
+        with patch(
+            "lumi_eggcracker.supervisor.write_atomic", side_effect=OSError("read only")
+        ), self.assertRaises(OSError):
+            supervisor._store_detection({"event_id": "a" * 24})
+        self.assertFalse(supervisor.receipt_persistence_healthy)
+
+        supervisor.discovery_thread = type(
+            "LiveThread", (), {"is_alive": lambda _self: True}
+        )()
+        supervisor.last_heartbeat_sent = 0.0
+        supervisor.last_scan_completed_ns = time.monotonic_ns()
+        supervisor.discovery_failures = 0
+        supervisor.enforcement_saturation_until_ns = 0
+        with patch("lumi_eggcracker.supervisor.socket.socket") as socket_factory:
+            supervisor._heartbeat()
+        socket_factory.assert_not_called()
+
+        supervisor.catalogue = load_bundled()
+        supervisor.quarantine_root = Path("/owned")
+        supervisor.last_scan_duration_ns = 1
+        with patch(
+            "lumi_eggcracker.supervisor.Path.is_file", return_value=True
+        ), patch(
+            "lumi_eggcracker.supervisor.Path.read_text", return_value="pids"
+        ), patch("lumi_eggcracker.supervisor.pidfd_available", return_value=True):
+            doctor = supervisor.handle({"action": "doctor", "args": {}})
+        self.assertEqual("UNSUPPORTED", doctor["result"])
+        self.assertFalse(doctor["discovery"]["healthy"])
+        self.assertFalse(doctor["discovery"]["receipt_persistence_healthy"])
 
     def test_synchronous_startup_scan_is_immediately_heartbeat_eligible(self) -> None:
         supervisor = self._instance()

@@ -31,11 +31,18 @@ Five release-blocking Priority-0 campaigns are mandatory:
    partials, 1,024 descriptors and 600 executable decoy mappings;
 4. deterministic fault injection at pidfd binding, stop, descendant discovery,
    quarantine creation/move/kill/empty proof and receipt write/replace/fsync;
-   no injected failure may return or publish success;
+   no injected failure may return or publish success, and a failed autonomous
+   receipt write must immediately make health unsupported and stop heartbeats;
 5. privileged installer attacks: hostile Python import hooks, symlinked inputs,
    expected-digest/manifest/version/source drift, traversal archive, partial
    prior installation, pre-existing-install refusal and a pathname replacement
    after the installer binds its artifact descriptor.
+
+The control-plane parser must also reject, without replacing the supervisor,
+a valid sub-32-KiB JSON request containing an integer beyond the supported
+128-digit bound. Runtime qualification must reach an exact executable mapping
+after more than 4,096 earlier mappings, provided the complete procfs maps input
+remains within the 8 MiB byte ceiling.
 
 After deterministic qualification, replay the frozen 41-case Daybreak corpus
 against the exact candidate. Then run a fresh no-history Daybreak campaign with

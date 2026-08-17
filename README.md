@@ -22,7 +22,10 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 - lets root approve one exact qualified native llama invocation or one root-owned CPython interpreter plus an absolute regular script, workload UID and invocation, then lets the configured operator consume that approval only through the protected pre-exec `start` gate;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
-- records bounded post-containment receipts, status and detection summaries.
+- records bounded post-containment receipts, status and detection summaries; if a
+  post-containment detection receipt cannot be made durable, health becomes
+  `UNSUPPORTED` and supervisor heartbeats stop until root repairs storage and
+  restarts the service.
 
 ## What it does not do
 

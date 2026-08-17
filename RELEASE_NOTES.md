@@ -24,6 +24,8 @@ The final containment-scope repair groups independently complete related sibling
 
 The pressure-recovery repair replaces contiguous descriptor prefixes with bounded stripes over the complete current descriptor and mapping tables. The root-owned stripe generation advances across supervisor/watchdog recovery, preventing repeated recovery from resetting a still-live high-FD supported workload to the same uninspected window.
 
+Fresh independent-review repairs make post-containment detection-receipt persistence part of supervisor health: a failed durable write now latches `doctor` to `UNSUPPORTED` and stops watchdog heartbeats until root repair and restart. Control JSON integers are explicitly bounded and parser recursion/value errors are converted to bounded protocol errors instead of escaping the connection handler. Executable runtime mapping discovery now considers every mapping within the existing 8 MiB procfs byte ceiling rather than silently truncating after 4,096 lines.
+
 Installation now waits for every control socket to reach its final owner and mode. This closes a startup race where socket path creation could briefly precede the supervisor's metadata update.
 
 The mandatory synchronous startup scan is now accounted as the first healthy completed scan and heartbeated as soon as the discovery worker is live. Repeated deliberate supervisor restarts therefore retain watchdog liveness while still requiring a completed scan before any heartbeat.

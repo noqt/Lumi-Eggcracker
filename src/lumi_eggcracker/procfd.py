@@ -16,7 +16,6 @@ SYS_PIDFD_GETFD = 438
 MAX_FDINFO_BYTES = 16 * 1024
 MAX_REGULAR_FILE_SIZE = 1 << 40
 MAX_PROC_MAP_BYTES = 8 * 1024 * 1024
-MAX_PROC_MAPS = 4096
 T = TypeVar("T")
 
 
@@ -116,9 +115,9 @@ def _mount_devices(pid: int, proc: Path) -> dict[tuple[int, int], tuple[int, ...
     except OSError:
         return {}
     if len(raw) > MAX_PROC_MAP_BYTES:
-        return {}
+        raise JsonInputError("process mount table exceeds bounded inspection limit")
     result: dict[tuple[int, int], list[int]] = {}
-    for line in raw.decode("utf-8", errors="replace").splitlines()[:MAX_PROC_MAPS]:
+    for line in raw.decode("utf-8", errors="replace").splitlines():
         fields = line.split()
         if len(fields) < 3 or ":" not in fields[2]:
             continue
@@ -164,7 +163,7 @@ def executable_mapping_references(
     finally:
         os.close(descriptor)
     if total > MAX_PROC_MAP_BYTES:
-        return ()
+        raise JsonInputError("process maps exceeds bounded inspection limit")
     try:
         lines = b"".join(chunks).decode("utf-8", errors="replace").splitlines()
     except UnicodeError:
@@ -173,7 +172,7 @@ def executable_mapping_references(
     mount_devices = _mount_devices(pid, proc)
     result: list[ExecutableMappingReference] = []
     seen: set[tuple[int, int, int]] = set()
-    for line in lines[:MAX_PROC_MAPS]:
+    for line in lines:
         fields = line.split(maxsplit=5)
         if len(fields) < 5 or "x" not in fields[1]:
             continue

@@ -16,7 +16,9 @@ from lumi_eggcracker.artifacts import (
     validate_path,
 )
 from lumi_eggcracker.discovery import ProcessIdentity
+from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.procfd import (
+    MAX_PROC_MAP_BYTES,
     StableFileMetadata,
     executable_mapping_references,
     unique_mapping_references,
@@ -59,6 +61,34 @@ class ArtifactTests(unittest.TestCase):
                     for item in executable_mapping_references(42, proc=proc)
                 ),
             )
+
+    def test_executable_mapping_parser_does_not_truncate_at_4096_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            root = proc / "42"
+            root.mkdir()
+            lines = [
+                f"{index + 1:x}-{index + 2:x} r-xp 00000000 00:2a {index + 1} /decoy/{index}\n"
+                for index in range(4286)
+            ]
+            lines.append("20000-21000 r-xp 00000000 00:2a 9001 /runtime\n")
+            (root / "maps").write_text("".join(lines), encoding="utf-8")
+            (root / "mountinfo").write_text("", encoding="utf-8")
+
+            references = executable_mapping_references(42, proc=proc)
+
+            self.assertEqual(4287, len(references))
+            self.assertEqual(9001, references[-1].inode)
+
+    def test_oversized_mapping_table_fails_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            root = proc / "42"
+            root.mkdir()
+            (root / "maps").write_bytes(b"x" * (MAX_PROC_MAP_BYTES + 1))
+
+            with self.assertRaisesRegex(JsonInputError, "bounded inspection limit"):
+                executable_mapping_references(42, proc=proc)
 
     def test_mapping_segments_are_deduplicated_by_stable_inode(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
