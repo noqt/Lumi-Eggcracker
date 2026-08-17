@@ -159,7 +159,21 @@ def main() -> int:
         args.source_archive.name: digest_bytes(args.source_archive.read_bytes()),
         args.release_bundle.name: digest_bytes(args.release_bundle.read_bytes()),
     }
-    if parsed_sums != expected_sums:
+    # A detached build directory carries the archive's checksum as its third
+    # entry. The checksum file embedded inside that archive cannot include a
+    # digest of its containing archive without recursion, so an extracted
+    # bundle carries only its artifact and source entries. In both modes the
+    # archive's exact member set and embedded payload digests were checked
+    # above; distribution still relies on the detached SHA256SUMS as its trust
+    # anchor.
+    if args.artifact.parent.resolve() == args.release_bundle.parent.resolve():
+        required_sums = expected_sums
+    else:
+        required_sums = {
+            args.artifact.name: expected_sums[args.artifact.name],
+            args.source_archive.name: expected_sums[args.source_archive.name],
+        }
+    if parsed_sums != required_sums:
         raise SystemExit("checksums do not match the published release assets")
     print(json.dumps({"result": "PASS", "version": version}, sort_keys=True))
     return 0
