@@ -390,7 +390,7 @@ def json_control(argv: list[str], *, operator: str | None = None) -> dict[str, A
         raise RuntimeError(stderr.strip() or stdout.strip() or "Eggcracker control failed")
     value = json.loads(stdout)
     if not isinstance(value, dict):
-        raise RuntimeError("Eggcracker control response is invalid")
+        raise TypeError("Eggcracker control response is invalid")
     return value
 
 
