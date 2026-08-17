@@ -42,8 +42,12 @@ def assets_from_manifest(path: Path) -> tuple[Path, Path, dict[str, Any]]:
     return runner, model, value
 
 
-def call(user: str, argv: list[str]) -> dict[str, Any]:
-    command = [CLI, *argv] if argv and argv[0] in {"approve", "revoke"} else ["/usr/sbin/runuser", "-u", user, "--", CLI, *argv]
+def call(operator: str, argv: list[str]) -> dict[str, Any]:
+    command = (
+        [CLI, *argv]
+        if argv and argv[0] in {"approve", "revoke"}
+        else ["/usr/sbin/runuser", "-u", operator, "--", CLI, *argv]
+    )
     result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Eggcracker control command failed")
@@ -57,6 +61,26 @@ def stop(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
+
+
+def stop_selected(operator: str, name: str) -> None:
+    receipt = Path(f"/tmp/lumi-autonomous-smoke-kill-{os.urandom(8).hex()}.json")
+    try:
+        call(operator, ["kill", "--name", name, "--receipt", str(receipt)])
+    finally:
+        receipt.unlink(missing_ok=True)
+
+
+def journal_bytes(unit: str) -> int:
+    result = subprocess.run(
+        ["/usr/bin/journalctl", "--unit", unit, "--output=cat", "--no-pager"],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode:
+        raise RuntimeError("cannot read protected workload output from the journal")
+    return len(result.stdout)
 
 
 def receipt_after(previous: set[Path], *, timeout: float = 90) -> dict[str, Any]:
@@ -90,46 +114,96 @@ def launch(user: str, argv: list[str], output: Path) -> subprocess.Popen[bytes]:
         handle.close()
 
 
-def one(*, runner: Path, model: Path, user: str, index: int, provenance: dict[str, Any]) -> dict[str, Any]:
+def one(
+    *,
+    runner: Path,
+    model: Path,
+    user: str,
+    operator: str,
+    index: int,
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
     argv = runner_argv(runner, model)
     with tempfile.TemporaryDirectory(prefix="lumi-eggcracker-autonomous-", dir="/tmp") as raw:
-        root = Path(raw); output = root / "generated.txt"
+        root = Path(raw)
+        output = root / "generated.txt"
         os.chmod(root, 0o711)
         canary = subprocess.Popen(["/bin/sleep", "180"], start_new_session=True)
         unapproved: subprocess.Popen[bytes] | None = None
-        allowed: subprocess.Popen[bytes] | None = None
+        allowed_started = False
         name = f"real-qwen-{index}"
+        run_name = f"real-qwen-run-{index}-{os.urandom(4).hex()}"
         try:
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, argv, output)
             receipt = receipt_after(before)
-            stop(unapproved); unapproved = None
+            stop(unapproved)
+            unapproved = None
             if receipt.get("trigger", {}).get("kind") != "UNAPPROVED_AI_MATCH" or receipt.get("detector", {}).get("profile") != "llama.cpp" or canary.poll() is not None:
                 raise RuntimeError("unapproved real AI result or canary is invalid")
-            approval = call(user, ["approve", "--name", name, "--uid", str(pwd.getpwnam(user).pw_uid), "--", *argv])
+            approval = call(
+                operator,
+                [
+                    "approve",
+                    "--name",
+                    name,
+                    "--uid",
+                    str(pwd.getpwnam(user).pw_uid),
+                    "--",
+                    *argv,
+                ],
+            )
             if approval.get("result") != "APPROVED":
                 raise RuntimeError("exact real-AI approval failed")
-            allowed = launch(user, argv, output)
+            before_approved = set(DETECTIONS.glob("*.json"))
+            response = call(
+                operator,
+                [
+                    "start",
+                    "--name",
+                    run_name,
+                    "--max-pids",
+                    "64",
+                    "--max-memory-mib",
+                    "4096",
+                    "--cpu-quota-percent",
+                    "1200",
+                    "--",
+                    *argv,
+                ],
+            )
+            allowed_started = True
+            unit = response.get("unit")
+            if response.get("state") != "RUNNING" or not isinstance(unit, str):
+                raise RuntimeError("protected approved real AI did not start")
             deadline = time.monotonic() + 120
-            while time.monotonic() < deadline and not generated(output):
+            approved_bytes = 0
+            while time.monotonic() < deadline and approved_bytes < 32:
+                approved_bytes = journal_bytes(unit)
                 time.sleep(0.05)
-            if not generated(output) or allowed.poll() is not None:
+            if (
+                approved_bytes < 32
+                or call(operator, ["status", "--name", run_name]).get("state")
+                != "RUNNING"
+                or set(DETECTIONS.glob("*.json")) - before_approved
+            ):
                 raise RuntimeError("approved real AI did not remain alive and generate output")
-            approved_bytes = output.stat().st_size
-            stop(allowed); allowed = None
-            call(user, ["revoke", "--name", name])
+            stop_selected(operator, run_name)
+            allowed_started = False
+            call(operator, ["revoke", "--name", name])
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, argv, output)
             receipt_after_revoke = receipt_after(before)
-            stop(unapproved); unapproved = None
+            stop(unapproved)
+            unapproved = None
             if receipt_after_revoke.get("result") != "TERMINATED" or canary.poll() is not None:
                 raise RuntimeError("revoked real AI was not autonomously terminated")
             return {"asset_model_sha256": provenance["model"]["sha256"], "asset_runner_sha256": provenance["llama"]["sha256"], "approved_generated_bytes": approved_bytes, "first_receipt": receipt, "result": "PASS", "second_receipt": receipt_after_revoke}
         finally:
             if unapproved is not None:
                 stop(unapproved)
-            if allowed is not None:
-                stop(allowed)
+            if allowed_started:
+                stop_selected(operator, run_name)
             stop(canary)
 
 
@@ -147,7 +221,21 @@ def main() -> int:
     try:
         pwd.getpwnam(args.user)
         runner, model, provenance = assets_from_manifest(args.assets_manifest)
-        values = [one(runner=runner, model=model, user=args.user, index=index, provenance=provenance) for index in range(args.repetitions)]
+        install = json.loads(
+            Path("/var/lib/lumi-eggcracker/install-manifest.json").read_text(encoding="utf-8")
+        )
+        operator = str(install["operator"])
+        values = [
+            one(
+                runner=runner,
+                model=model,
+                user=args.user,
+                operator=operator,
+                index=index,
+                provenance=provenance,
+            )
+            for index in range(args.repetitions)
+        ]
         args.output.write_text(json.dumps({"repetitions": values, "result": "PASS"}, sort_keys=True) + "\n", encoding="utf-8")
         return 0
     except (OSError, RuntimeError, TypeError, json.JSONDecodeError) as error:

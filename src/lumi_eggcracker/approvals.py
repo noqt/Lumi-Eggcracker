@@ -2,19 +2,65 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any
 
+from .artifacts import validate_gguf_fd
 from .discovery import argv_digest, executable_digest
+from .elfmarkers import inspect_path
 from .jsonio import JsonInputError, load_regular_json
 from .records import write_atomic
 
-SCHEMA = "lumi-eggcracker.approval.v2"
+SCHEMA = "lumi-eggcracker.approval.v4"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")
+LAUNCH_KINDS = {"NATIVE_LLAMA", "PYTHON_SCRIPT"}
+MAX_INTERPRETER_BYTES = 32 * 1024 * 1024
+MAX_SCRIPT_BYTES = 4 * 1024 * 1024
+MAX_MATERIAL_BYTES = 1024 * 1024 * 1024 * 1024
+MAX_BOUND_INPUTS = 32
+INPUT_KINDS = {"MODEL_ARTIFACT", "PYTHON_SCRIPT", "RUNTIME_MATERIAL"}
+
+
+def _runtime_is_root_controlled(metadata: os.stat_result) -> bool:
+    return metadata.st_uid == 0 and not metadata.st_mode & 0o022
+
+
+def _root_controlled_reference(path: Path) -> bool:
+    """Require every existing lexical component to be root-controlled.
+
+    This deliberately permits a root-owned interpreter symlink (for example a
+    root-created virtual environment) while preventing an operator-controlled
+    directory, symlink, or file from being exchanged after approval.
+    """
+    if not path.is_absolute() or Path(os.path.normpath(str(path))) != path:
+        return False
+    for item in (path, *path.parents):
+        try:
+            metadata = item.lstat()
+        except OSError:
+            return False
+        sticky_root_directory = stat.S_ISDIR(metadata.st_mode) and bool(
+            metadata.st_mode & stat.S_ISVTX
+        )
+        # Linux reports symlink permissions as 0777, but changing a symlink
+        # requires write access to its parent directory.  A root-owned link
+        # whose complete lexical path is root-controlled is therefore safe to
+        # resolve, provided the resolved target and all of its parents are
+        # independently checked below.
+        root_owned_symlink = stat.S_ISLNK(metadata.st_mode) and metadata.st_uid == 0
+        if metadata.st_uid != 0 or (
+            metadata.st_mode & 0o022
+            and not sticky_root_directory
+            and not root_owned_symlink
+        ):
+            return False
+    return True
 
 
 def _path(root: Path, name: str) -> Path:
@@ -24,7 +70,21 @@ def _path(root: Path, name: str) -> Path:
 
 
 def validate(value: dict[str, Any]) -> dict[str, Any]:
-    expected = {"administrator_uid", "argv_count", "argv_sha256", "created_monotonic_ns", "executable", "executable_device", "executable_inode", "executable_sha256", "name", "schema_version", "uid"}
+    expected = {
+        "administrator_uid",
+        "argv_count",
+        "argv_sha256",
+        "bound_inputs",
+        "created_monotonic_ns",
+        "executable",
+        "executable_device",
+        "executable_inode",
+        "executable_sha256",
+        "launch_kind",
+        "name",
+        "schema_version",
+        "uid",
+    }
     if set(value) != expected or value.get("schema_version") != SCHEMA:
         raise JsonInputError("approval schema is invalid")
     if not isinstance(value["name"], str) or not NAME.fullmatch(value["name"]):
@@ -39,7 +99,262 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
             raise JsonInputError("approval integer field is invalid")
     if value["administrator_uid"] != 0:
         raise JsonInputError("approval administrator must be root")
+    if value["launch_kind"] not in LAUNCH_KINDS:
+        raise JsonInputError("approval launch kind is invalid")
+    inputs = value["bound_inputs"]
+    if not isinstance(inputs, list):
+        raise JsonInputError("approval bound inputs are invalid")
+    if not 1 <= len(inputs) <= MAX_BOUND_INPUTS:
+        raise JsonInputError("approval requires bounded material inputs")
+    kinds = [item.get("kind") for item in inputs if isinstance(item, dict)]
+    if value["launch_kind"] == "NATIVE_LLAMA" and kinds != ["MODEL_ARTIFACT"]:
+        raise JsonInputError("native approval requires one bound model artifact")
+    if value["launch_kind"] == "PYTHON_SCRIPT" and (
+        not kinds or kinds[0] != "PYTHON_SCRIPT"
+    ):
+        raise JsonInputError("Python approval requires one staged script")
+    for item in inputs:
+        if not isinstance(item, dict) or set(item) != {
+            "argument_index",
+            "device",
+            "inode",
+            "kind",
+            "sha256",
+            "size",
+        }:
+            raise JsonInputError("approval bound input schema is invalid")
+        for key in ("argument_index", "device", "inode", "size"):
+            if isinstance(item[key], bool) or not isinstance(item[key], int) or item[key] < 1:
+                raise JsonInputError("approval bound input integer is invalid")
+        if item["argument_index"] >= value["argv_count"]:
+            raise JsonInputError("approval bound input index is invalid")
+        if item["kind"] not in INPUT_KINDS:
+            raise JsonInputError("approval bound input kind is invalid")
+        if not isinstance(item["sha256"], str) or not HEX.fullmatch(item["sha256"]):
+            raise JsonInputError("approval bound input digest is invalid")
+    indexes = [item["argument_index"] for item in inputs]
+    if len(set(indexes)) != len(indexes):
+        raise JsonInputError("approval bound input index is duplicated")
     return value
+
+
+def _hash_descriptor(descriptor: int, *, maximum: int) -> str:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < 1 or metadata.st_size > maximum:
+        raise JsonInputError("approval input is outside the supported size bound")
+    before = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    remaining = metadata.st_size
+    while remaining:
+        block = os.read(descriptor, min(1024 * 1024, remaining))
+        if not block:
+            raise JsonInputError("approval input changed during hashing")
+        digest.update(block)
+        remaining -= len(block)
+    after_metadata = os.fstat(descriptor)
+    after = (
+        after_metadata.st_dev,
+        after_metadata.st_ino,
+        after_metadata.st_size,
+        after_metadata.st_mtime_ns,
+        after_metadata.st_ctime_ns,
+    )
+    if after != before:
+        raise JsonInputError("approval input changed during hashing")
+    return digest.hexdigest()
+
+
+def _is_cpython(executable: Path) -> bool:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(executable, flags)
+    except OSError:
+        return False
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_INTERPRETER_BYTES:
+            return False
+        found_main = False
+        found_bytes_main = False
+        overlap = b""
+        remaining = metadata.st_size
+        while remaining:
+            block = os.read(descriptor, min(1024 * 1024, remaining))
+            if not block:
+                break
+            probe = overlap + block
+            found_main = found_main or b"Py_Main" in probe
+            found_bytes_main = found_bytes_main or b"Py_BytesMain" in probe
+            if found_main and found_bytes_main:
+                return True
+            overlap = probe[-32:]
+            remaining -= len(block)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def _open_bound_script(path_text: str) -> tuple[int, os.stat_result]:
+    supplied = Path(path_text)
+    if not supplied.is_absolute():
+        raise JsonInputError("approved Python script must use an absolute path")
+    try:
+        resolved = supplied.resolve(strict=True)
+    except OSError as error:
+        raise JsonInputError("approved Python script cannot be resolved") from error
+    if resolved != supplied:
+        raise JsonInputError("approved Python script cannot traverse a symlink")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as error:
+        raise JsonInputError("approved Python script cannot be opened") from error
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise JsonInputError("approved Python script must be regular")
+    return descriptor, metadata
+
+
+def _open_root_controlled_material(path_text: str) -> tuple[int, os.stat_result]:
+    supplied = Path(path_text)
+    if not supplied.is_absolute():
+        raise JsonInputError("approved material must use an absolute path")
+    try:
+        resolved = supplied.resolve(strict=True)
+    except OSError as error:
+        raise JsonInputError("approved material cannot be resolved") from error
+    if supplied != resolved or not _root_controlled_reference(supplied):
+        raise JsonInputError("approved material path must be root-controlled without symlinks")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as error:
+        raise JsonInputError("approved material cannot be opened") from error
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_mode & 0o022
+    ):
+        os.close(descriptor)
+        raise JsonInputError("approved material must be a root-controlled regular file")
+    return descriptor, metadata
+
+
+def _binding(
+    descriptor: int,
+    metadata: os.stat_result,
+    *,
+    argument_index: int,
+    kind: str,
+    maximum: int,
+) -> dict[str, Any]:
+    return {
+        "argument_index": argument_index,
+        "device": metadata.st_dev,
+        "inode": metadata.st_ino,
+        "kind": kind,
+        "sha256": _hash_descriptor(descriptor, maximum=maximum),
+        "size": metadata.st_size,
+    }
+
+
+def _native_model_index(argv: list[str]) -> int:
+    indexes: list[int] = []
+    for index, item in enumerate(argv[1:], start=1):
+        if item in {"-m", "--model"}:
+            if index + 1 >= len(argv):
+                raise JsonInputError("qualified native approval requires a model operand")
+            indexes.append(index + 1)
+        elif item.startswith("--model="):
+            raise JsonInputError("approved model must be a separate absolute operand")
+    if len(indexes) != 1:
+        raise JsonInputError("qualified native approval requires exactly one model operand")
+    return indexes[0]
+
+
+def _classify(executable: Path, metadata: os.stat_result, argv: list[str]) -> tuple[str, list[dict[str, Any]]]:
+    if not _runtime_is_root_controlled(metadata):
+        raise JsonInputError("approved runtime must be root-owned and not writable")
+    if inspect_path(executable) is not None:
+        index = _native_model_index(argv)
+        descriptor, model_metadata = _open_root_controlled_material(argv[index])
+        try:
+            if validate_gguf_fd(descriptor) is None:
+                raise JsonInputError("approved native model is not a valid GGUF artifact")
+            return (
+                "NATIVE_LLAMA",
+                [
+                    _binding(
+                        descriptor,
+                        model_metadata,
+                        argument_index=index,
+                        kind="MODEL_ARTIFACT",
+                        maximum=MAX_MATERIAL_BYTES,
+                    )
+                ],
+            )
+        finally:
+            os.close(descriptor)
+    if not _is_cpython(executable):
+        raise JsonInputError("approval supports only qualified llama or CPython runtimes")
+    if len(argv) < 2 or argv[1].startswith("-"):
+        raise JsonInputError("CPython approval requires one absolute script operand")
+    descriptor, script_metadata = _open_bound_script(argv[1])
+    try:
+        script_binding = _binding(
+            descriptor,
+            script_metadata,
+            argument_index=1,
+            kind="PYTHON_SCRIPT",
+            maximum=MAX_SCRIPT_BYTES,
+        )
+    finally:
+        os.close(descriptor)
+    bindings = [script_binding]
+    for index, item in enumerate(argv[2:], start=2):
+        candidate = Path(item)
+        if not candidate.is_absolute() or not candidate.exists():
+            continue
+        descriptor, input_metadata = _open_root_controlled_material(item)
+        try:
+            bindings.append(
+                _binding(
+                    descriptor,
+                    input_metadata,
+                    argument_index=index,
+                    kind="RUNTIME_MATERIAL",
+                    maximum=MAX_MATERIAL_BYTES,
+                )
+            )
+        finally:
+            os.close(descriptor)
+        if len(bindings) > MAX_BOUND_INPUTS:
+            raise JsonInputError("approval has too many material inputs")
+    return "PYTHON_SCRIPT", bindings
 
 
 def create(root: Path, *, name: str, uid: int, argv: list[str], administrator_uid: int) -> dict[str, Any]:
@@ -48,17 +363,22 @@ def create(root: Path, *, name: str, uid: int, argv: list[str], administrator_ui
     supplied = Path(argv[0])
     if not supplied.is_absolute():
         raise JsonInputError("approval executable must be an absolute regular file")
+    if not _root_controlled_reference(supplied):
+        raise JsonInputError("approval executable path must be root-controlled")
     try:
         executable = supplied.resolve(strict=True)
     except OSError as error:
         raise JsonInputError("approval executable cannot be resolved") from error
+    if not _root_controlled_reference(executable):
+        raise JsonInputError("resolved approval executable path must be root-controlled")
     metadata = executable.stat(follow_symlinks=False)
     if executable.is_symlink() or not executable.is_file():
         raise JsonInputError("approval executable must be regular")
     destination = _path(root, name)
     if destination.exists() or destination.is_symlink():
         raise JsonInputError("approval name is unavailable")
-    value = validate({"administrator_uid": administrator_uid, "argv_count": len(argv), "argv_sha256": argv_digest(argv), "created_monotonic_ns": time.monotonic_ns(), "executable": str(executable), "executable_device": metadata.st_dev, "executable_inode": metadata.st_ino, "executable_sha256": executable_digest(executable), "name": name, "schema_version": SCHEMA, "uid": uid})
+    launch_kind, bound_inputs = _classify(executable, metadata, argv)
+    value = validate({"administrator_uid": administrator_uid, "argv_count": len(argv), "argv_sha256": argv_digest(argv), "bound_inputs": bound_inputs, "created_monotonic_ns": time.monotonic_ns(), "executable": str(executable), "executable_device": metadata.st_dev, "executable_inode": metadata.st_ino, "executable_sha256": executable_digest(executable), "launch_kind": launch_kind, "name": name, "schema_version": SCHEMA, "uid": uid})
     write_atomic(destination, value)
     return value
 
@@ -79,32 +399,49 @@ def load_all(root: Path) -> list[dict[str, Any]]:
     return values
 
 
-def approved(
-    snapshot: Any,
-    digest: str,
-    approvals: list[dict[str, Any]],
-    *,
-    executable_metadata: os.stat_result | tuple[int, int] | None = None,
-) -> bool:
-    command_hash = argv_digest(snapshot.argv)
-    if executable_metadata is None:
-        try:
-            metadata = Path(snapshot.exe_path).stat(follow_symlinks=False)
-        except OSError:
-            return False
-    else:
-        metadata = executable_metadata
-    device = metadata.st_dev if hasattr(metadata, "st_dev") else metadata[0]
-    inode = metadata.st_ino if hasattr(metadata, "st_ino") else metadata[1]
-    return any(
-        item["uid"] == snapshot.uid
-        and item["executable"] == snapshot.exe_path
-        and item["executable_device"] == device
-        and item["executable_inode"] == inode
-        and item["executable_sha256"] == digest
-        and item["argv_count"] == len(snapshot.argv)
-        and item["argv_sha256"] == command_hash
-        for item in approvals
+def match_launch(
+    *, uid: int, argv: list[str], approvals: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Match one trusted, pre-exec launch request to a root approval.
+
+    Linux exposes ``/proc/<pid>/cmdline`` through memory controlled by the
+    process itself.  It is therefore evidence for diagnostics only and must
+    never grant authority after exec.  The supervisor calls this function on
+    the operator request before it releases its root-controlled launch gate.
+    """
+    if (
+        isinstance(uid, bool)
+        or not isinstance(uid, int)
+        or uid < 1
+        or not argv
+        or not all(isinstance(item, str) and item for item in argv)
+    ):
+        return None
+    try:
+        supplied = Path(argv[0])
+        if not _root_controlled_reference(supplied):
+            return None
+        executable = supplied.resolve(strict=True)
+        if not _root_controlled_reference(executable):
+            return None
+        metadata = executable.stat(follow_symlinks=False)
+        digest = executable_digest(executable)
+    except OSError:
+        return None
+    command_hash = argv_digest(argv)
+    return next(
+        (
+            item
+            for item in approvals
+            if item["uid"] == uid
+            and item["executable"] == str(executable)
+            and item["executable_device"] == metadata.st_dev
+            and item["executable_inode"] == metadata.st_ino
+            and item["executable_sha256"] == digest
+            and item["argv_count"] == len(argv)
+            and item["argv_sha256"] == command_hash
+        ),
+        None,
     )
 
 
@@ -118,4 +455,115 @@ def revoke(root: Path, name: str) -> dict[str, Any]:
 
 
 def public(value: dict[str, Any]) -> dict[str, Any]:
-    return {key: value[key] for key in ("administrator_uid", "argv_count", "argv_sha256", "created_monotonic_ns", "executable", "executable_sha256", "name", "uid")}
+    result = {key: value[key] for key in ("administrator_uid", "argv_count", "argv_sha256", "created_monotonic_ns", "executable", "executable_sha256", "launch_kind", "name", "uid")}
+    result["bound_input_count"] = len(value["bound_inputs"])
+    return result
+
+
+def stage_launch(
+    approval: dict[str, Any], argv: list[str], destination: Path
+) -> list[str]:
+    """Create a stable root-owned code snapshot before the gate is released."""
+    validate(approval)
+    if len(argv) != approval["argv_count"] or argv_digest(argv) != approval["argv_sha256"]:
+        raise JsonInputError("approved launch arguments drifted")
+    for binding in approval["bound_inputs"]:
+        if binding["kind"] == "PYTHON_SCRIPT":
+            continue
+        descriptor, metadata = _open_root_controlled_material(
+            argv[binding["argument_index"]]
+        )
+        try:
+            if (
+                metadata.st_dev != binding["device"]
+                or metadata.st_ino != binding["inode"]
+                or metadata.st_size != binding["size"]
+                or _hash_descriptor(descriptor, maximum=MAX_MATERIAL_BYTES)
+                != binding["sha256"]
+            ):
+                raise JsonInputError("approved material identity or content drifted")
+        finally:
+            os.close(descriptor)
+    if approval["launch_kind"] == "NATIVE_LLAMA":
+        return list(argv)
+    binding = approval["bound_inputs"][0]
+    descriptor, metadata = _open_bound_script(argv[binding["argument_index"]])
+    staged = destination / "script.py"
+    created = False
+    output = -1
+    try:
+        if (
+            metadata.st_dev != binding["device"]
+            or metadata.st_ino != binding["inode"]
+            or metadata.st_size != binding["size"]
+        ):
+            raise JsonInputError("approved Python script identity drifted")
+        destination.mkdir(mode=0o711, parents=False, exist_ok=False)
+        created = True
+        if hasattr(os, "chown"):
+            os.chown(destination, 0, 0)
+        os.chmod(destination, 0o711)
+        output = os.open(
+            staged,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            0o400,
+        )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        remaining = metadata.st_size
+        while remaining:
+            block = os.read(descriptor, min(1024 * 1024, remaining))
+            if not block:
+                raise JsonInputError("approved Python script changed during staging")
+            digest.update(block)
+            view = memoryview(block)
+            while view:
+                written = os.write(output, view)
+                if written < 1:
+                    raise JsonInputError("approved Python script staging failed")
+                view = view[written:]
+            remaining -= len(block)
+        os.fsync(output)
+        if digest.hexdigest() != binding["sha256"]:
+            raise JsonInputError("approved Python script content drifted")
+        after = os.fstat(descriptor)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ):
+            raise JsonInputError("approved Python script changed during staging")
+        if hasattr(os, "fchmod"):
+            os.fchmod(output, 0o444)
+        else:
+            os.close(output)
+            output = -1
+            staged.chmod(0o444)
+        effective = [argv[0], "-I", str(staged), *argv[2:]]
+        return effective
+    except Exception:
+        if output >= 0:
+            os.close(output)
+            output = -1
+        if staged.exists():
+            staged.chmod(0o600)
+            staged.unlink()
+        if created:
+            destination.rmdir()
+        raise
+    finally:
+        if output >= 0:
+            os.close(output)
+        os.close(descriptor)

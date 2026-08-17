@@ -50,6 +50,18 @@ def checksums(path: Path) -> dict[str, str]:
     return result
 
 
+def artifact_source_commit(path: Path) -> str:
+    with zipfile.ZipFile(path) as archive:
+        try:
+            raw = archive.read("lumi_eggcracker/build_info.py")
+        except KeyError as error:
+            raise SystemExit("artifact source identity is missing") from error
+    match = re.fullmatch(b'SOURCE_COMMIT = "([0-9a-f]{40})"\r?\n', raw)
+    if match is None:
+        raise SystemExit("artifact source identity is invalid")
+    return match.group(1).decode("ascii")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--artifact", required=True, type=Path)
@@ -84,6 +96,8 @@ def main() -> int:
         raise SystemExit("artifact version is inconsistent")
     if manifest.get("artifact") != args.artifact.name:
         raise SystemExit("release manifest is inconsistent")
+    if manifest.get("source_commit") != artifact_source_commit(args.artifact):
+        raise SystemExit("artifact and manifest source identities differ")
     expected = {
         prefix + name
         for name in (
@@ -101,6 +115,7 @@ def main() -> int:
             "scripts/install.py",
             "scripts/uninstall.py",
             "scripts/verify_uninstalled.py",
+            "scripts/verify_release.py",
             "scripts/prepare_ai_smoke.py",
             "scripts/prepare_safetensors_smoke.py",
             "scripts/ai_smoke_worker.py",
@@ -114,8 +129,19 @@ def main() -> int:
             "scripts/run_content_adversarial_matrix.py",
             "scripts/self_validate.py",
             "scripts/run_autonomous_matrix.py",
+            "scripts/run_native_matrix.py",
+            "scripts/run_p0_native.py",
+            "scripts/run_installer_p0.py",
             "scripts/benchmark_overhead.py",
             "scripts/verify_evidence.py",
+            "scripts/package_evidence.py",
+            "scripts/verify_evidence_archive.py",
+            "tests/fixtures/benign_model_handler.py",
+            "tests/fixtures/benign_near_limit.py",
+            "tests/fixtures/canary.py",
+            "tests/fixtures/fork_race.py",
+            "tests/fixtures/hostile_client.py",
+            "tests/fixtures/pid_pressure.py",
         )
     }
     with zipfile.ZipFile(args.release_bundle) as archive:
@@ -133,7 +159,21 @@ def main() -> int:
         args.source_archive.name: digest_bytes(args.source_archive.read_bytes()),
         args.release_bundle.name: digest_bytes(args.release_bundle.read_bytes()),
     }
-    if parsed_sums != expected_sums:
+    # A detached build directory carries the archive's checksum as its third
+    # entry. The checksum file embedded inside that archive cannot include a
+    # digest of its containing archive without recursion, so an extracted
+    # bundle carries only its artifact and source entries. In both modes the
+    # archive's exact member set and embedded payload digests were checked
+    # above; distribution still relies on the detached SHA256SUMS as its trust
+    # anchor.
+    if args.artifact.parent.resolve() == args.release_bundle.parent.resolve():
+        required_sums = expected_sums
+    else:
+        required_sums = {
+            args.artifact.name: expected_sums[args.artifact.name],
+            args.source_archive.name: expected_sums[args.source_archive.name],
+        }
+    if parsed_sums != required_sums:
         raise SystemExit("checksums do not match the published release assets")
     print(json.dumps({"result": "PASS", "version": version}, sort_keys=True))
     return 0

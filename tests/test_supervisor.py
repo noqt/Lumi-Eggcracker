@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+import socket
+import struct
 import tempfile
 import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from lumi_eggcracker.artifacts import ArtifactEvidence
 from lumi_eggcracker.containment import EmptyProof
@@ -18,8 +21,13 @@ from lumi_eggcracker.elfmarkers import (
     with_pytorch_pair,
 )
 from lumi_eggcracker.jsonio import JsonInputError
-from lumi_eggcracker.records import RUN_SCHEMA, command_summary
-from lumi_eggcracker.supervisor import Supervisor, _EvidenceCandidate
+from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
+from lumi_eggcracker.supervisor import (
+    QUERY_SOCKET,
+    Supervisor,
+    _EvidenceCandidate,
+    _receive,
+)
 
 
 def record() -> dict[str, object]:
@@ -43,7 +51,39 @@ class SupervisorTests(unittest.TestCase):
         value.discovery_done = {}
         value.discovery_lock = threading.Lock()
         value.content_scan_tick = 0
+        value.receipt_persistence_healthy = True
         return value
+
+    def test_oversized_valid_json_integer_is_rejected_without_escaping(self) -> None:
+        server, client = socket.socketpair()
+        try:
+            payload = (
+                b'{"action":"status","args":{"name":'
+                + b"9" * 5000
+                + b"}}"
+            )
+            self.assertLess(len(payload), 32 * 1024)
+            client.sendall(struct.pack("!I", len(payload)) + payload)
+            with self.assertRaisesRegex(JsonInputError, "integer is too large"):
+                _receive(server)
+        finally:
+            client.close()
+            server.close()
+
+    def test_connection_boundary_contains_validation_value_error(self) -> None:
+        supervisor = self._instance()
+        supervisor.policy["operator_uid"] = 1000
+        connection = MagicMock()
+        connection.getsockopt.return_value = struct.pack("3i", 42, 0, 0)
+        with patch(
+            "lumi_eggcracker.supervisor._receive",
+            side_effect=ValueError("bounded validation failure"),
+        ), patch("lumi_eggcracker.supervisor._send") as send:
+            supervisor._serve_connection(connection, QUERY_SOCKET)
+
+        send.assert_called_once_with(
+            connection, {"ok": False, "value": "bounded validation failure"}
+        )
 
     def test_recently_contained_identity_is_not_reenforced(self) -> None:
         supervisor = self._instance()
@@ -67,6 +107,332 @@ class SupervisorTests(unittest.TestCase):
             (),
         )
         self.assertTrue(supervisor._managed(snapshot))
+        self.assertFalse(supervisor._discovery_excluded(snapshot))
+
+    def test_group_refresh_replaces_preexec_gate_snapshot_without_losing_evidence(self) -> None:
+        identity = ProcessIdentity(10, 100)
+        stale = ProcessSnapshot(
+            identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3", "_gate"),
+            ("0::/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service",),
+            (),
+            (),
+        )
+        current = ProcessSnapshot(
+            identity,
+            2001,
+            "/opt/llama-cli",
+            "llama-cli",
+            ("llama-cli", "-m", "/models/qwen"),
+            stale.cgroups,
+            (),
+            (),
+        )
+        evidence = ArtifactEvidence("gguf-v3", "GGUF", 1, 2, 4096, "a" * 64)
+        candidate = _EvidenceCandidate(stale, (evidence,), (), 123)
+
+        with patch("lumi_eggcracker.supervisor.process_snapshot", return_value=current):
+            refreshed = Supervisor._refresh_group((candidate,))
+
+        self.assertEqual(1, len(refreshed))
+        self.assertEqual(current, refreshed[0].snapshot)
+        self.assertEqual((evidence,), refreshed[0].content)
+        with patch("lumi_eggcracker.supervisor.process_snapshot", return_value=None):
+            self.assertEqual((), Supervisor._refresh_group((candidate,)))
+
+    def test_selected_match_contains_every_process_in_exact_run_cgroup(self) -> None:
+        supervisor = self._instance()
+        run_id = "a" * 24
+        selected = f"/system.slice/lumi-eggcracker-workload-{run_id}.service"
+        evidence_id = ProcessIdentity(10, 100)
+        broker_id = ProcessIdentity(11, 101)
+        replacement_id = ProcessIdentity(12, 102)
+        canary_id = ProcessIdentity(13, 103)
+        evidence = ProcessSnapshot(
+            evidence_id,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + selected,),
+            (),
+            (),
+        )
+        broker = ProcessSnapshot(
+            broker_id,
+            2001,
+            "/usr/bin/broker",
+            "broker",
+            ("broker",),
+            ("0::" + selected,),
+            (),
+            (),
+        )
+        replacement = ProcessSnapshot(
+            replacement_id,
+            2001,
+            "/usr/bin/replacement",
+            "replacement",
+            ("replacement",),
+            ("0::" + selected,),
+            (),
+            (),
+        )
+        canary = ProcessSnapshot(
+            canary_id,
+            2001,
+            "/usr/bin/canary",
+            "canary",
+            ("canary",),
+            ("0::/system.slice/unrelated-canary.service",),
+            (),
+            (),
+        )
+        group = (_EvidenceCandidate(evidence, (), (), 1),)
+
+        targets = supervisor._discovery_containment_targets(
+            group,
+            {
+                evidence_id: evidence,
+                broker_id: broker,
+                replacement_id: replacement,
+                canary_id: canary,
+            },
+        )
+
+        self.assertEqual({evidence_id, broker_id, replacement_id}, targets)
+
+    def test_complete_identity_is_not_suppressed_or_broadened_by_64_partials(self) -> None:
+        supervisor = self._instance()
+        supervisor.catalogue = load_bundled()
+        parent = ProcessIdentity(10, 100)
+        parent_snapshot = ProcessSnapshot(
+            parent, 2001, "/usr/bin/worker", "worker", ("worker",), (), (), ()
+        )
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        snapshots = {parent: parent_snapshot}
+        candidates: list[_EvidenceCandidate] = []
+        for offset in range(64):
+            identity = ProcessIdentity(100 + offset, 1000 + offset)
+            current = ProcessSnapshot(
+                identity,
+                2001,
+                "/usr/bin/python3",
+                "python3",
+                ("python3",),
+                (),
+                (),
+                (),
+                parent=parent,
+            )
+            snapshots[identity] = current
+            candidates.append(_EvidenceCandidate(current, (content,), (), 1))
+        complete_identity = ProcessIdentity(999, 1999)
+        complete_snapshot = ProcessSnapshot(
+            complete_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            (),
+            (),
+            (),
+            parent=parent,
+        )
+        snapshots[complete_identity] = complete_snapshot
+        candidates.append(
+            _EvidenceCandidate(complete_snapshot, (content,), (runtime,), 2)
+        )
+
+        correlated = supervisor._correlate(candidates, snapshots)
+        self.assertEqual(1, len(correlated))
+        self.assertEqual(65, len(correlated[0][0]))
+
+        groups = supervisor._content_groups(candidates, snapshots)
+        self.assertEqual(1, len(groups))
+        self.assertEqual(
+            (complete_identity,),
+            tuple(item.snapshot.identity for item in groups[0].witness),
+        )
+        self.assertEqual(65, len(groups[0].scope))
+
+    def test_complete_sibling_storm_is_one_full_component_enforcement_scope(self) -> None:
+        supervisor = self._instance()
+        supervisor.catalogue = load_bundled()
+        parent = ProcessIdentity(20, 200)
+        snapshots = {
+            parent: ProcessSnapshot(
+                parent, 2001, "/usr/bin/worker", "worker", ("worker",), (), (), ()
+            )
+        }
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        candidates: list[_EvidenceCandidate] = []
+        for offset in range(18):
+            current_identity = ProcessIdentity(21 + offset, 201 + offset)
+            current = ProcessSnapshot(
+                current_identity,
+                2001,
+                "/usr/bin/python3",
+                "python3",
+                ("python3",),
+                (),
+                (),
+                (),
+                parent=parent,
+            )
+            snapshots[current_identity] = current
+            candidates.append(
+                _EvidenceCandidate(current, (content,), (runtime,), 1)
+            )
+
+        groups = supervisor._content_groups(candidates, snapshots)
+
+        self.assertEqual(1, len(groups))
+        self.assertEqual(18, len(groups[0].witness))
+        self.assertEqual(18, len(groups[0].scope))
+        self.assertEqual(
+            {parent, *(candidate.snapshot.identity for candidate in candidates)},
+            supervisor._discovery_containment_targets(groups[0].scope, snapshots),
+        )
+
+    def test_partial_peer_is_scope_but_not_witness_for_complete_identity(self) -> None:
+        supervisor = self._instance()
+        supervisor.catalogue = load_bundled()
+        parent = ProcessIdentity(40, 400)
+        snapshots = {
+            parent: ProcessSnapshot(
+                parent, 2001, "/usr/bin/worker", "worker", ("worker",), (), (), ()
+            )
+        }
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        complete_identity = ProcessIdentity(41, 401)
+        partial_identity = ProcessIdentity(42, 402)
+        complete = ProcessSnapshot(
+            complete_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            (),
+            (),
+            (),
+            parent=parent,
+        )
+        partial = ProcessSnapshot(
+            partial_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            (),
+            (),
+            (),
+            parent=parent,
+        )
+        snapshots.update({complete_identity: complete, partial_identity: partial})
+
+        groups = supervisor._content_groups(
+            [
+                _EvidenceCandidate(complete, (content,), (runtime,), 1),
+                _EvidenceCandidate(partial, (content,), (), 1),
+            ],
+            snapshots,
+        )
+
+        self.assertEqual(1, len(groups))
+        self.assertEqual((complete_identity,), tuple(item.snapshot.identity for item in groups[0].witness))
+        self.assertEqual(
+            {complete_identity, partial_identity},
+            {item.snapshot.identity for item in groups[0].scope},
+        )
+
+    def test_redundant_complete_sibling_pairs_expand_enforcement_scope(self) -> None:
+        supervisor = self._instance()
+        supervisor.catalogue = load_bundled()
+        parent = ProcessIdentity(20, 200)
+        snapshots = {
+            parent: ProcessSnapshot(
+                parent,
+                2001,
+                "/usr/bin/worker",
+                "worker",
+                ("worker",),
+                (),
+                (),
+                (),
+            )
+        }
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        candidates: list[_EvidenceCandidate] = []
+        for offset, evidence in enumerate(
+            ((content, None), (content, None), (None, runtime), (None, runtime))
+        ):
+            identity = ProcessIdentity(21 + offset, 201 + offset)
+            current = ProcessSnapshot(
+                identity,
+                2001,
+                "/usr/bin/python3",
+                "python3",
+                ("python3",),
+                (),
+                (),
+                (),
+                parent=parent,
+            )
+            snapshots[identity] = current
+            candidates.append(
+                _EvidenceCandidate(
+                    current,
+                    (evidence[0],) if evidence[0] is not None else (),
+                    (evidence[1],) if evidence[1] is not None else (),
+                    1,
+                )
+            )
+
+        groups = supervisor._content_groups(candidates, snapshots)
+        self.assertGreaterEqual(len(groups), 1)
+        for group in groups:
+            self.assertLessEqual(len(group.witness), 3)
+            self.assertEqual(4, len(group.scope))
+            self.assertEqual(
+                {parent, *(candidate.snapshot.identity for candidate in candidates)},
+                supervisor._discovery_containment_targets(group.scope, snapshots),
+            )
 
     def test_heartbeat_stops_when_no_scan_completed_within_health_bound(self) -> None:
         supervisor = self._instance()
@@ -80,6 +446,92 @@ class SupervisorTests(unittest.TestCase):
             supervisor._heartbeat()
         socket_factory.assert_not_called()
 
+    def test_detection_receipt_fault_latches_unhealthy_and_stops_heartbeat(self) -> None:
+        supervisor = self._instance()
+        supervisor.detections = Path(".")
+        with patch(
+            "lumi_eggcracker.supervisor.write_atomic", side_effect=OSError("read only")
+        ), self.assertRaises(OSError):
+            supervisor._store_detection({"event_id": "a" * 24})
+        self.assertFalse(supervisor.receipt_persistence_healthy)
+
+        supervisor.discovery_thread = type(
+            "LiveThread", (), {"is_alive": lambda _self: True}
+        )()
+        supervisor.last_heartbeat_sent = 0.0
+        supervisor.last_scan_completed_ns = time.monotonic_ns()
+        supervisor.discovery_failures = 0
+        supervisor.enforcement_saturation_until_ns = 0
+        with patch("lumi_eggcracker.supervisor.socket.socket") as socket_factory:
+            supervisor._heartbeat()
+        socket_factory.assert_not_called()
+
+        supervisor.catalogue = load_bundled()
+        supervisor.quarantine_root = Path("/owned")
+        supervisor.last_scan_duration_ns = 1
+        with patch(
+            "lumi_eggcracker.supervisor.Path.is_file", return_value=True
+        ), patch(
+            "lumi_eggcracker.supervisor.Path.read_text", return_value="pids"
+        ), patch("lumi_eggcracker.supervisor.pidfd_available", return_value=True):
+            doctor = supervisor.handle({"action": "doctor", "args": {}})
+        self.assertEqual("UNSUPPORTED", doctor["result"])
+        self.assertFalse(doctor["discovery"]["healthy"])
+        self.assertFalse(doctor["discovery"]["receipt_persistence_healthy"])
+
+    def test_synchronous_startup_scan_is_immediately_heartbeat_eligible(self) -> None:
+        supervisor = self._instance()
+        supervisor.discovery_thread = type(
+            "LiveThread", (), {"is_alive": lambda _self: True}
+        )()
+        supervisor.last_heartbeat_sent = 0.0
+        supervisor.last_scan_completed_ns = 0
+        supervisor.last_scan_duration_ns = 0
+        supervisor.discovery_failures = 2
+        supervisor.enforcement_saturation_until_ns = 0
+        supervisor.heartbeat_sequence = 0
+        with patch.object(supervisor, "_scan_once") as scan:
+            supervisor._scan_synchronously()
+        scan.assert_called_once_with(synchronous=True)
+        self.assertGreater(supervisor.last_scan_completed_ns, 0)
+        self.assertGreaterEqual(supervisor.last_scan_duration_ns, 0)
+        self.assertEqual(0, supervisor.discovery_failures)
+        with patch("lumi_eggcracker.supervisor.socket.AF_UNIX", 1, create=True), patch(
+            "lumi_eggcracker.supervisor.socket.SOCK_DGRAM", 2, create=True
+        ), patch("lumi_eggcracker.supervisor.socket.socket") as socket_factory:
+            supervisor._heartbeat()
+        socket_factory.assert_called_once()
+        self.assertEqual(1, supervisor.heartbeat_sequence)
+
+    def test_discovery_window_generation_survives_supervisor_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "discovery-progress.json"
+            first = self._instance()
+            first.discovery_progress_path = path
+            first._reserve_discovery_window()
+            second = self._instance()
+            second.discovery_progress_path = path
+            second._reserve_discovery_window()
+
+            self.assertEqual(0, first.discovery_window_generation)
+            self.assertEqual(1, second.discovery_window_generation)
+            self.assertEqual(64, second._window_start(64))
+            second.content_scan_tick = 2
+            self.assertEqual(128, second._window_start(64))
+            self.assertEqual(
+                2, json.loads(path.read_text(encoding="utf-8"))["generation"]
+            )
+
+    def test_invalid_discovery_progress_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "discovery-progress.json"
+            path.write_text('{"generation": true}', encoding="utf-8")
+            supervisor = self._instance()
+            supervisor.discovery_progress_path = path
+
+            with self.assertRaises(JsonInputError):
+                supervisor._reserve_discovery_window()
+
     def test_containment_orders_direct_kill_before_receipt_state_and_cleanup(self) -> None:
         supervisor = self._instance()
         response = {"result": "TERMINATED", "cleanup": {"attempted": False}}
@@ -89,6 +541,16 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual("cgroup.kill", supervisor.operations[0])
         self.assertLess(supervisor.operations.index("cgroup.kill"), supervisor.operations.index("durable-receipt"))
         self.assertLess(supervisor.operations.index("durable-receipt"), supervisor.operations.index("cleanup"))
+
+    def test_receipt_persistence_fault_is_terminal_but_never_reports_success(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        stored: list[str] = []
+        with patch("lumi_eggcracker.supervisor.validate_identity", return_value=Path("/owned")), patch("lumi_eggcracker.supervisor.kill_path", return_value=(11, 12)), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(13, EmptyProof(True, 1, 0, []))), patch.object(supervisor, "_write_receipt", side_effect=OSError("disk full")), patch.object(supervisor, "_store", side_effect=lambda value: stored.append(str(value["state"]))), patch.object(supervisor, "_cleanup") as cleanup, self.assertRaisesRegex(JsonInputError, "receipt persistence failed"):
+            supervisor._contain(item, "OPERATOR", 10)
+        self.assertEqual("CONTAINED_RECEIPT_FAILED", item["state"])
+        self.assertIn("CONTAINED_RECEIPT_FAILED", stored)
+        cleanup.assert_not_called()
 
     def test_exact_empty_cgroup_allows_normal_completion_without_systemctl(self) -> None:
         supervisor = self._instance()
@@ -146,7 +608,8 @@ class SupervisorTests(unittest.TestCase):
 
     def test_status_resolves_the_latest_terminal_run_after_name_reuse_is_enabled(self) -> None:
         supervisor = self._instance()
-        item = record(); item["state"] = "COMPLETED_ALLOWED"
+        item = record()
+        item["state"] = "COMPLETED_ALLOWED"
         with patch.object(supervisor, "_load", side_effect=JsonInputError("gone")), patch.object(supervisor, "_latest_by_name", return_value=item), patch.object(supervisor, "_store") as stored:
             value = supervisor.handle({"action": "status", "args": {"name": "demo"}})
         self.assertEqual("COMPLETED_ALLOWED", value["state"])
@@ -156,7 +619,8 @@ class SupervisorTests(unittest.TestCase):
         supervisor = self._instance()
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            supervisor.runs = root / "runs"; supervisor.names = root / "names"
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
             item = record()
             supervisor._store(item)
             self.assertTrue((supervisor.runs / ("a" * 24 + ".json")).is_file())
@@ -164,6 +628,24 @@ class SupervisorTests(unittest.TestCase):
             item["state"] = "TERMINATED"
             supervisor._store(item)
             self.assertFalse((supervisor.names / "demo.json").exists())
+
+    def test_autonomous_kill_terminal_state_wins_completion_race(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            item = record()
+            supervisor._store(item)
+            stale_watcher_record = item.copy()
+            supervisor._mark_discovered_runs_terminated({str(item["cgroup"])})
+            self.assertEqual(
+                "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
+            )
+            self.assertFalse(supervisor._mark_completed(stale_watcher_record))
+            self.assertEqual(
+                "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
+            )
 
     def test_correlation_requires_live_same_uid_parent_or_sibling_relation(self) -> None:
         supervisor = self._instance()
@@ -235,6 +717,66 @@ class SupervisorTests(unittest.TestCase):
                 for group, _boundary in unrelated_groups
             )
         )
+
+    def test_orphaned_roles_in_exact_active_selected_cgroup_are_related(self) -> None:
+        supervisor = self._instance()
+        selected = "/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service"
+        supervisor.active_cgroups = {selected}
+        init = ProcessIdentity(1, 1)
+        left_identity = ProcessIdentity(31, 301)
+        right_identity = ProcessIdentity(32, 302)
+        left = ProcessSnapshot(
+            left_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + selected,),
+            (),
+            (),
+            parent=init,
+        )
+        right = ProcessSnapshot(
+            right_identity,
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + selected,),
+            (),
+            (),
+            parent=init,
+        )
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            "pytorch-bridge-aten-pair-pinned-cpu",
+            "PyTorch/ATen",
+            "BUILD_ID_PAIR",
+            (),
+        )
+        left_candidate = _EvidenceCandidate(left, (content,), (), 1)
+        right_candidate = _EvidenceCandidate(right, (), (runtime,), 2)
+
+        with patch("lumi_eggcracker.supervisor.Path.is_symlink", return_value=False), patch(
+            "lumi_eggcracker.supervisor.Path.is_dir", return_value=True
+        ), patch("lumi_eggcracker.supervisor.Path.is_file", return_value=True):
+            related, boundary = supervisor._related(
+                left_candidate,
+                right_candidate,
+                {left_identity: left, right_identity: right},
+            )
+            self.assertTrue(related)
+            self.assertEqual("owned-cgroup", boundary)
+
+            supervisor.active_cgroups.clear()
+            related, _boundary = supervisor._related(
+                left_candidate,
+                right_candidate,
+                {left_identity: left, right_identity: right},
+            )
+            self.assertFalse(related)
 
     def test_unrelated_same_uid_partial_candidates_do_not_join_by_common_root(self) -> None:
         supervisor = self._instance()

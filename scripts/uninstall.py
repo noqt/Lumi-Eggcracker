@@ -2,6 +2,22 @@
 
 from __future__ import annotations
 
+import sys as _bootstrap_sys
+
+if not _bootstrap_sys.flags.isolated or not _bootstrap_sys.flags.no_site:
+    raise SystemExit(
+        "privileged uninstaller requires /usr/bin/python3 -I -S scripts/uninstall.py"
+    )
+
+import posix as _bootstrap_posix
+
+try:
+    _bootstrap_posix.readlink(__file__)
+except OSError:
+    pass
+else:
+    raise SystemExit("refusing a symlinked privileged uninstaller")
+
 import grp
 import hashlib
 import json
@@ -9,6 +25,7 @@ import os
 import pwd
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 LIB = Path("/usr/local/lib/lumi-eggcracker")
@@ -22,6 +39,11 @@ WATCHDOG_RUNTIME = Path("/run/lumi-eggcracker-watchdog")
 PREFIX = "lumi-eggcracker-workload-"
 SUPERVISOR = "lumi-eggcracker.service"
 WATCHDOG = "lumi-eggcracker-watchdog.service"
+SYSTEM_SLICE = Path("/sys/fs/cgroup/system.slice")
+SERVICE_CGROUPS = (
+    SYSTEM_SLICE / SUPERVISOR,
+    SYSTEM_SLICE / WATCHDOG,
+)
 
 
 def digest(path: Path) -> str:
@@ -97,6 +119,45 @@ def quarantine_empty() -> bool:
     return True
 
 
+def empty_stopped_service_cgroup(path: Path) -> None:
+    """Empty one exact Eggcracker service cgroup after systemd stopped it."""
+    if path not in SERVICE_CGROUPS:
+        raise SystemExit("refusing to empty an unexpected service cgroup")
+    if not path.exists():
+        return
+    if path.is_symlink() or not path.is_dir():
+        raise SystemExit(f"invalid stopped service cgroup: {path}")
+    events = path / "cgroup.events"
+    kill = path / "cgroup.kill"
+    try:
+        populated = dict(
+            line.split(" ", 1) for line in events.read_text(encoding="ascii").splitlines()
+        ).get("populated")
+    except OSError as exc:
+        raise SystemExit(f"cannot inspect stopped service cgroup: {path}") from exc
+    if populated == "1":
+        try:
+            kill.write_text("1\n", encoding="ascii")
+        except OSError as exc:
+            raise SystemExit(f"cannot empty stopped service cgroup: {path}") from exc
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not path.exists():
+            return
+        try:
+            populated = dict(
+                line.split(" ", 1) for line in events.read_text(encoding="ascii").splitlines()
+            ).get("populated")
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise SystemExit(f"cannot recheck stopped service cgroup: {path}") from exc
+        if populated == "0":
+            return
+        time.sleep(0.01)
+    raise SystemExit(f"stopped service cgroup remained populated: {path}")
+
+
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("uninstaller must run as root")
@@ -121,6 +182,8 @@ def main() -> int:
         require_success(["/usr/bin/systemctl", "stop", WATCHDOG])
         watchdog_stopped = True
         require_success(["/usr/bin/systemctl", "disable", WATCHDOG])
+        for service_cgroup in SERVICE_CGROUPS:
+            empty_stopped_service_cgroup(service_cgroup)
         if not owned_cgroups_empty() or not quarantine_empty():
             raise SystemExit("refusing uninstall because cgroups remained populated after stop")
         reset_failed(SUPERVISOR)
@@ -143,6 +206,11 @@ def main() -> int:
             if group:
                 require_success(["/usr/sbin/groupdel", group.gr_name])
         require_success(["/usr/bin/systemctl", "daemon-reload"])
+        # Removing the unit files can leave transient ``not-found`` objects in
+        # the manager.  A global reset after the daemon reload lets systemd
+        # garbage-collect them.  Naming a removed unit here would recreate the
+        # very not-found object the uninstall verifier rejects.
+        require_success(["/usr/bin/systemctl", "reset-failed"])
     except BaseException:
         # A refused or interrupted transaction must not leave protection
         # disabled.  Best-effort restoration is deliberately attempted for

@@ -13,7 +13,8 @@ from .jsonio import JsonInputError
 
 PROC = Path("/proc")
 MAX_READ = 64 * 1024
-MAX_MAP_BYTES = 256 * 1024
+MAX_CMDLINE_BYTES = 8 * 1024 * 1024
+MAX_MAP_BYTES = 8 * 1024 * 1024
 MAX_FDS = 256
 MAX_MAPS = 512
 
@@ -37,6 +38,8 @@ class ProcessSnapshot:
     fd_entries: tuple[tuple[int, str], ...] = ()
     map_paths: tuple[str, ...] = ()
     parent: ProcessIdentity | None = None
+    argv_complete: bool = True
+    executable_map_paths: tuple[str, ...] = ()
 
 
 def _read(path: Path, limit: int = MAX_READ) -> bytes:
@@ -79,7 +82,9 @@ def identity(pid: int, *, proc: Path = PROC) -> ProcessIdentity | None:
 
 
 def argv_digest(argv: tuple[str, ...] | list[str]) -> str:
-    return hashlib.sha256("\0".join(argv).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        "\0".join(argv).encode("utf-8", errors="surrogateescape")
+    ).hexdigest()
 
 
 def executable_digest(path: Path) -> str:
@@ -214,9 +219,11 @@ def _links(directory: Path, *, limit: int) -> tuple[str, ...]:
 
 def _fd_entries(directory: Path, *, limit: int) -> tuple[tuple[int, str], ...]:
     values: list[tuple[int, str]] = []
-    for item in sorted(directory.iterdir(), key=lambda value: value.name)[:limit]:
-        if not item.name.isdigit():
-            continue
+    entries = sorted(
+        (item for item in directory.iterdir() if item.name.isdigit()),
+        key=lambda value: int(value.name),
+    )
+    for item in entries[:limit]:
         try:
             target = os.readlink(item)
         except OSError:
@@ -229,7 +236,7 @@ def _fd_entries(directory: Path, *, limit: int) -> tuple[tuple[int, str], ...]:
 def _maps(path: Path) -> tuple[str, ...]:
     try:
         raw = _read(path, MAX_MAP_BYTES).decode("utf-8", errors="replace")
-    except OSError:
+    except (OSError, JsonInputError):
         return ()
     values: list[str] = []
     for line in raw.splitlines()[:MAX_MAPS]:
@@ -239,20 +246,29 @@ def _maps(path: Path) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _map_paths(path: Path) -> tuple[str, ...]:
+def _map_paths(path: Path, *, executable_only: bool = False) -> tuple[str, ...]:
     try:
         raw = _read(path, MAX_MAP_BYTES).decode("utf-8", errors="replace")
-    except OSError:
+    except (OSError, JsonInputError):
         return ()
     values: list[str] = []
     for line in raw.splitlines()[:MAX_MAPS]:
         parts = line.split(maxsplit=5)
-        if len(parts) == 6 and parts[5].startswith("/"):
+        if (
+            len(parts) == 6
+            and parts[5].startswith("/")
+            and (not executable_only or "x" in parts[1])
+        ):
             values.append(parts[5].removesuffix(" (deleted)"))
     return tuple(values)
 
 
-def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | None:
+def snapshot(
+    value: ProcessIdentity,
+    *,
+    proc: Path = PROC,
+    include_evidence: bool = True,
+) -> ProcessSnapshot | None:
     current = identity(value.pid, proc=proc)
     if current != value:
         return None
@@ -260,20 +276,47 @@ def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | 
     try:
         parent_pid, _start = parse_stat(_read(root / "stat", 4096).decode("utf-8"))
         exe = os.readlink(root / "exe")
-        command = tuple(
-            item for item in _read(root / "cmdline").decode("utf-8").split("\0") if item
-        )
         cgroups = tuple(
             line for line in _read(root / "cgroup", 8192).decode("utf-8").splitlines() if line
         )
         uid = _uid(_read(root / "status", 8192).decode("utf-8"))
-        fd_entries = _fd_entries(root / "fd", limit=MAX_FDS)
-        fd_paths = tuple(item[1] for item in fd_entries)
     except (OSError, UnicodeDecodeError, JsonInputError):
         return None
-    if not command or not exe or len(exe) > 4096:
+    if not exe or len(exe) > 4096:
         return None
-    maps = _map_paths(root / "maps")
+
+    # Linux argv is a byte sequence.  Invalid UTF-8 must not erase the whole
+    # process from discovery, and a bounded-read failure must make approval
+    # unavailable rather than making the process invisible.
+    try:
+        command = tuple(
+            item
+            for item in _read(root / "cmdline", MAX_CMDLINE_BYTES)
+            .decode("utf-8", errors="surrogateescape")
+            .split("\0")
+            if item
+        )
+        argv_complete = True
+    except (OSError, JsonInputError):
+        command = ()
+        argv_complete = False
+
+    fd_entries: tuple[tuple[int, str], ...] = ()
+    maps: tuple[str, ...] = ()
+    executable_maps: tuple[str, ...] = ()
+    if include_evidence:
+        try:
+            fd_entries = _fd_entries(root / "fd", limit=MAX_FDS)
+        except OSError:
+            fd_entries = ()
+        # Native runtime discovery uses stable /proc/<pid>/map_files handles.
+        # This fallback is retained for kernels/test fixtures without it and
+        # is deliberately isolated so one oversized maps file cannot abort a
+        # global discovery pass.
+        if not (root / "map_files").is_dir():
+            maps = _map_paths(root / "maps")
+            executable_maps = _map_paths(root / "maps", executable_only=True)
+    fd_paths = tuple(item[1] for item in fd_entries)
     parent = identity(parent_pid, proc=proc) if parent_pid > 0 else None
     return ProcessSnapshot(
         value,
@@ -287,11 +330,16 @@ def snapshot(value: ProcessIdentity, *, proc: Path = PROC) -> ProcessSnapshot | 
         fd_entries,
         maps,
         parent,
+        argv_complete,
+        executable_maps,
     )
 
 
 def scan(
-    *, proc: Path = PROC, exclude: Callable[[ProcessSnapshot], bool] | None = None
+    *,
+    proc: Path = PROC,
+    exclude: Callable[[ProcessSnapshot], bool] | None = None,
+    include_evidence: bool = True,
 ) -> list[ProcessSnapshot]:
     result: list[ProcessSnapshot] = []
     try:
@@ -302,7 +350,7 @@ def scan(
         item = identity(pid, proc=proc)
         if item is None:
             continue
-        current = snapshot(item, proc=proc)
+        current = snapshot(item, proc=proc, include_evidence=include_evidence)
         if current is not None and not (exclude and exclude(current)):
             result.append(current)
     return result

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import errno
-import hashlib
 import json
 import os
 import re
@@ -23,11 +22,11 @@ from typing import Any
 
 from . import __version__
 from .adoption import AdoptionResult, contain_many, open_pidfd, pidfd_available
-from .approvals import approved, revoke
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
+from .approvals import match_launch, revoke, stage_launch
 from .approvals import public as public_approval
-from .artifacts import ArtifactEvidence
+from .artifacts import MAX_FD_PROBES_PER_SCAN, MAX_MAP_PROBES_PER_SCAN, ArtifactEvidence
 from .artifacts import from_snapshot as artifacts_from_snapshot
 from .containment import (
     capture_identity,
@@ -40,13 +39,22 @@ from .detectors import Catalogue, DetectionMatch, load_catalogue, match, public_
 from .discovery import (
     ProcessIdentity,
     ProcessSnapshot,
+    argv_digest,
     executable_digest_for_identity,
     executable_metadata_for_identity,
     scan,
 )
-from .elfmarkers import RuntimeEvidence, with_pytorch_pair
+from .discovery import (
+    identity as process_identity,
+)
+from .discovery import snapshot as process_snapshot
+from .elfmarkers import MAX_RUNTIME_CANDIDATES, RuntimeEvidence, with_pytorch_pair
 from .elfmarkers import from_snapshot as runtime_from_snapshot
 from .jsonio import JsonInputError, load_regular_json
+from .launches import authorizes as launch_authorizes
+from .launches import create as create_launch_provenance
+from .launches import load_all as load_launch_provenance
+from .launches import provenance_path
 from .observation import ObservationStore
 from .records import (
     ACTIVE_STATES,
@@ -78,6 +86,9 @@ SOCKET_ACTIONS = {
 STATE_DIR = Path("/var/lib/lumi-eggcracker")
 UNIT_PREFIX = "lumi-eggcracker-workload-"
 GATES_DIR = Path("/run/lumi-eggcracker/gates")
+STAGED_DIR = Path("/run/lumi-eggcracker/staged")
+DISCOVERY_PROGRESS_SCHEMA = "lumi-eggcracker.discovery-progress.v1"
+DISCOVERY_PROGRESS = STATE_DIR / "discovery-progress.json"
 MAX_TERMINAL_RECORDS = 128
 DETECTION_LIMIT = 1000
 RECENT_DISCOVERY_NS = 5_000_000_000
@@ -97,6 +108,15 @@ class _EvidenceCandidate:
     fast_match: DetectionMatch | None = None
 
 
+@dataclass(frozen=True)
+class _DetectionGroup:
+    """A minimal detection witness plus its full related containment scope."""
+
+    witness: tuple[_EvidenceCandidate, ...]
+    scope: tuple[_EvidenceCandidate, ...]
+    boundary: str
+
+
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -104,6 +124,12 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise JsonInputError("duplicate JSON key")
         value[key] = item
     return value
+
+
+def _bounded_int(value: str) -> int:
+    if len(value.removeprefix("-")) > 128:
+        raise JsonInputError("request integer is too large")
+    return int(value)
 
 
 def _receive(connection: socket.socket) -> dict[str, Any]:
@@ -121,8 +147,12 @@ def _receive(connection: socket.socket) -> dict[str, Any]:
     if not 1 <= length <= MAX_FRAME:
         raise JsonInputError("invalid request frame size")
     try:
-        value = json.loads(exact(length).decode("utf-8"), object_pairs_hook=_pairs)
-    except (UnicodeDecodeError, json.JSONDecodeError, JsonInputError) as error:
+        value = json.loads(
+            exact(length).decode("utf-8"),
+            object_pairs_hook=_pairs,
+            parse_int=_bounded_int,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError, JsonInputError) as error:
         raise JsonInputError(f"invalid request JSON: {error}") from error
     if not isinstance(value, dict):
         raise JsonInputError("request root must be an object")
@@ -191,12 +221,14 @@ class Supervisor:
         self.names = STATE_DIR / "names"
         self.receipts = STATE_DIR / "receipts"
         self.approvals = STATE_DIR / "approvals"
+        self.launches = STATE_DIR / "launches"
         self.detections = STATE_DIR / "detections"
         self.quarantine_root: Path | None = None
         self.stop_event = threading.Event()
         self.locks: dict[str, threading.Lock] = {}
         self.lock_guard = threading.Lock()
         self.start_lock = threading.Lock()
+        self.approval_lock = threading.Lock()
         self.completed: dict[str, dict[str, Any]] = {}
         self.operations: list[str] = []  # Test-visible ordering only.
         self.discovery_lock = threading.Lock()
@@ -217,10 +249,17 @@ class Supervisor:
         ] = {}
         self.enforcement_slots = threading.BoundedSemaphore(MAX_ENFORCEMENT_TASKS)
         self.observations = ObservationStore()
+        self.artifact_fd_offsets: dict[ProcessIdentity, int] = {}
+        self.artifact_map_offsets: dict[ProcessIdentity, int] = {}
+        self.runtime_map_offsets: dict[ProcessIdentity, int] = {}
+        self.observed_content: dict[ProcessIdentity, dict[str, ArtifactEvidence]] = {}
+        self.observed_runtimes: dict[ProcessIdentity, dict[str, RuntimeEvidence]] = {}
         self.content_scan_tick = 0
+        self.discovery_window_generation = 0
         self.last_scan_completed_ns = 0
         self.last_scan_duration_ns = 0
         self.discovery_failures = 0
+        self.receipt_persistence_healthy = True
         self.enforcement_saturation_until_ns = 0
         self.heartbeat_sequence = 0
         self.last_heartbeat_sent = 0.0
@@ -279,7 +318,29 @@ class Supervisor:
                     pointer.unlink()
             except JsonInputError:
                 raise JsonInputError("workload name index is invalid")
+        if record["state"] not in ACTIVE_STATES and hasattr(self, "launches"):
+            provenance_path(self.launches, record["run_id"]).unlink(missing_ok=True)
+            self._clear_stage(record["run_id"])
         self._prune_terminal_records()
+
+    @staticmethod
+    def _clear_stage(run_id: str) -> None:
+        if not RUN_ID.fullmatch(run_id):
+            raise JsonInputError("staged launch identity is invalid")
+        root = STAGED_DIR / run_id
+        if not root.exists():
+            return
+        if root.is_symlink() or not root.is_dir():
+            raise JsonInputError("staged launch root is invalid")
+        children = list(root.iterdir())
+        if any(
+            child.name != "script.py" or child.is_symlink() or not child.is_file()
+            for child in children
+        ):
+            raise JsonInputError("staged launch contents are invalid")
+        for child in children:
+            child.unlink()
+        root.rmdir()
 
     def _prune_terminal_records(self) -> None:
         records: list[tuple[int, Path]] = []
@@ -326,11 +387,13 @@ class Supervisor:
         for path, mode, gid in (
             (QUERY_SOCKET.parent, 0o711, self.policy["operator_gid"]),
             (GATES_DIR, 0o710, self.policy["workload_gid"]),
+            (STAGED_DIR, 0o711, 0),
             (STATE_DIR, 0o700, 0),
             (self.runs, 0o700, 0),
             (self.names, 0o700, 0),
             (self.receipts, 0o700, 0),
             (self.approvals, 0o700, 0),
+            (self.launches, 0o700, 0),
             (self.detections, 0o700, 0),
         ):
             path.mkdir(mode=mode, parents=True, exist_ok=True)
@@ -339,9 +402,53 @@ class Supervisor:
         for path in (*SOCKET_ACTIONS, LEGACY_SOCKET):
             if path.exists() or path.is_symlink():
                 raise JsonInputError("Eggcracker socket already exists")
+        self._reserve_discovery_window()
         self._recover()
         self.quarantine_root = self._prepare_quarantine()
+        self._scan_synchronously()
+
+    def _scan_synchronously(self) -> None:
+        """Complete and health-account the required startup discovery scan."""
+        started = time.monotonic_ns()
         self._scan_once(synchronous=True)
+        completed = time.monotonic_ns()
+        self.last_scan_completed_ns = completed
+        self.last_scan_duration_ns = completed - started
+        self.discovery_failures = 0
+
+    def _reserve_discovery_window(self) -> None:
+        """Reserve a fair scan generation that survives supervisor recovery."""
+        path = getattr(self, "discovery_progress_path", DISCOVERY_PROGRESS)
+        generation = 0
+        if path.exists() or path.is_symlink():
+            value = load_regular_json(path)
+            if (
+                set(value) != {"generation", "schema_version"}
+                or value.get("schema_version") != DISCOVERY_PROGRESS_SCHEMA
+                or isinstance(value.get("generation"), bool)
+                or not isinstance(value.get("generation"), int)
+                or value["generation"] < 0
+            ):
+                raise JsonInputError("discovery progress state is invalid")
+            generation = value["generation"]
+        write_atomic(
+            path,
+            {
+                "generation": generation + 1,
+                "schema_version": DISCOVERY_PROGRESS_SCHEMA,
+            },
+        )
+        self.discovery_window_generation = generation
+
+    def _window_start(self, probes: int) -> int:
+        # A process first observed after an expensive scan must join the
+        # current fair window, not the supervisor-startup window.  The durable
+        # base advances on recovery; the scan tick advances while this process
+        # remains alive.
+        scan_generation = getattr(self, "content_scan_tick", 0) // CONTENT_SCAN_INTERVAL
+        return (
+            getattr(self, "discovery_window_generation", 0) + scan_generation
+        ) * probes
 
     def _prepare_quarantine(self) -> Path:
         """Create only the delegated child cgroup root of this exact service."""
@@ -374,22 +481,37 @@ class Supervisor:
         )
 
     def _owned_cgroup(self, snapshot: ProcessSnapshot) -> str | None:
-        """Return one exact supervisor-owned child cgroup, never an ancestor."""
+        """Return one exact Eggcracker-owned cgroup, never an ancestor."""
         prefix = "/system.slice/lumi-eggcracker.service/"
+        active_selected = getattr(self, "active_cgroups", set())
         for line in snapshot.cgroups:
             if not line.startswith("0::"):
                 continue
             value = line[3:]
-            if not value.startswith(prefix):
-                continue
-            relative = value.removeprefix(prefix)
-            if not relative or relative.startswith("quarantine/"):
-                continue
+            if value.startswith(prefix):
+                relative = value.removeprefix(prefix)
+                if not relative or relative.startswith("quarantine/"):
+                    continue
+            else:
+                unit = Path(value).name
+                if (
+                    value not in active_selected
+                    or value != f"/system.slice/{unit}"
+                    or not unit.startswith(UNIT_PREFIX)
+                    or not unit.endswith(".service")
+                    or not RUN_ID.fullmatch(
+                        unit.removeprefix(UNIT_PREFIX).removesuffix(".service")
+                    )
+                ):
+                    continue
             path = Path("/sys/fs/cgroup").joinpath(*value.lstrip("/").split("/"))
             if (
                 path.is_symlink()
                 or not path.is_dir()
-                or not all((path / item).is_file() for item in ("cgroup.events", "cgroup.procs", "cgroup.kill"))
+                or not all(
+                    (path / item).is_file()
+                    for item in ("cgroup.events", "cgroup.procs", "cgroup.kill")
+                )
             ):
                 continue
             return value
@@ -423,7 +545,11 @@ class Supervisor:
         candidates: list[_EvidenceCandidate],
         snapshots: dict[ProcessIdentity, ProcessSnapshot],
     ) -> list[tuple[tuple[_EvidenceCandidate, ...], str]]:
-        """Union only small evidence sets joined by an exact live relation."""
+        """Union evidence sets joined by an exact live relation.
+
+        Component size is never interpreted as absence.  Callers reduce a
+        component to a minimal complete evidence set before enforcement.
+        """
         if not candidates:
             return []
         parent = list(range(len(candidates)))
@@ -452,8 +578,6 @@ class Supervisor:
             groups.setdefault(find(index), []).append(index)
         result: list[tuple[tuple[_EvidenceCandidate, ...], str]] = []
         for indexes in groups.values():
-            if len(indexes) > MAX_CORRELATED_PROCESSES:
-                continue
             values = tuple(candidates[index] for index in indexes)
             boundary_types = {
                 value
@@ -463,6 +587,169 @@ class Supervisor:
             boundary = next(iter(boundary_types), "same-process") if len(values) > 1 else "same-process"
             result.append((values, boundary))
         return result
+
+    def _candidate_evidence(
+        self, candidates: tuple[_EvidenceCandidate, ...] | list[_EvidenceCandidate]
+    ) -> dict[str, set[str]]:
+        paired = with_pytorch_pair(
+            item for candidate in candidates for item in candidate.runtimes
+        )
+        return {
+            "MODEL_CONTENT": {
+                item.evidence_id for candidate in candidates for item in candidate.content
+            },
+            "MODEL_RUNTIME": {item.evidence_id for item in paired},
+        }
+
+    def _profile_match(
+        self,
+        candidates: tuple[_EvidenceCandidate, ...] | list[_EvidenceCandidate],
+        profile: Any,
+    ) -> DetectionMatch | None:
+        return match(
+            Catalogue(self.catalogue.digest, (profile,)),
+            candidates[0].snapshot,
+            evidence=self._candidate_evidence(candidates),
+        )
+
+    def _minimal_content_groups(
+        self,
+        candidates: list[_EvidenceCandidate],
+        scope: tuple[_EvidenceCandidate, ...],
+        boundary: str,
+    ) -> list[_DetectionGroup]:
+        """Find bounded partial-role witnesses without broadening approval.
+
+        Each evidence-bearing identity is used as an anchor.  A witness is
+        retained only when that anchor materially contributes to one exact
+        content profile.  Approval is later evaluated on the witness alone;
+        containment uses the complete related component.
+        """
+        result: list[_DetectionGroup] = []
+        seen_witnesses: set[tuple[ProcessIdentity, ...]] = set()
+        ordered = sorted(candidates, key=lambda item: item.snapshot.identity)
+        profiles = tuple(item for item in self.catalogue.profiles if item.path == "CONTENT")
+        for anchor in ordered:
+            for profile in profiles:
+                selected = [anchor]
+                seen_content = {item.evidence_id for item in anchor.content}
+                seen_runtime = {item.evidence_id for item in anchor.runtimes}
+                detected = self._profile_match(selected, profile)
+                while detected is None and len(selected) < MAX_CORRELATED_PROCESSES:
+                    best: _EvidenceCandidate | None = None
+                    best_score: tuple[int, int] = (0, 0)
+                    for candidate in ordered:
+                        if candidate in selected:
+                            continue
+                        content_ids = {item.evidence_id for item in candidate.content}
+                        runtime_ids = {item.evidence_id for item in candidate.runtimes}
+                        added = len(content_ids - seen_content) + len(
+                            runtime_ids - seen_runtime
+                        )
+                        if not added:
+                            continue
+                        completes = int(
+                            self._profile_match([*selected, candidate], profile) is not None
+                        )
+                        score = (completes, added)
+                        if score > best_score:
+                            best = candidate
+                            best_score = score
+                    if best is None:
+                        break
+                    selected.append(best)
+                    seen_content.update(item.evidence_id for item in best.content)
+                    seen_runtime.update(item.evidence_id for item in best.runtimes)
+                    detected = self._profile_match(selected, profile)
+                if detected is None:
+                    continue
+                without_anchor = [item for item in selected if item is not anchor]
+                if without_anchor and self._profile_match(without_anchor, profile) is not None:
+                    continue
+                key = tuple(sorted(item.snapshot.identity for item in selected))
+                if key in seen_witnesses:
+                    continue
+                seen_witnesses.add(key)
+                result.append(_DetectionGroup(tuple(selected), scope, boundary))
+        return result
+
+    def _content_groups(
+        self,
+        candidates: list[_EvidenceCandidate],
+        snapshots: dict[ProcessIdentity, ProcessSnapshot],
+    ) -> list[_DetectionGroup]:
+        """Separate match witnesses from full related containment components."""
+        result: list[_DetectionGroup] = []
+        for component, boundary in self._correlate(candidates, snapshots):
+            normalized: list[_EvidenceCandidate] = []
+            complete: list[_EvidenceCandidate] = []
+            partial: list[_EvidenceCandidate] = []
+            for item in component:
+                own_runtime = with_pytorch_pair(item.runtimes)
+                own_match = match(
+                    self.catalogue,
+                    item.snapshot,
+                    evidence={
+                        "MODEL_CONTENT": {
+                            value.evidence_id for value in item.content
+                        },
+                        "MODEL_RUNTIME": {
+                            value.evidence_id for value in own_runtime
+                        },
+                    },
+                )
+                current = _EvidenceCandidate(
+                    item.snapshot,
+                    item.content,
+                    tuple(own_runtime),
+                    item.first_seen_ns,
+                    own_match,
+                )
+                normalized.append(current)
+                (complete if own_match is not None else partial).append(current)
+            scope = tuple(normalized)
+            if complete:
+                # All independently complete identities in one related
+                # component share one enforcement task and one full scope.
+                result.append(_DetectionGroup(tuple(complete), scope, boundary))
+            result.extend(self._minimal_content_groups(partial, scope, boundary))
+        return result
+
+    @staticmethod
+    def _discovery_excluded(snapshot: ProcessSnapshot) -> bool:
+        """Exclude only the supervisor itself; a run record is not approval."""
+        return snapshot.identity.pid == os.getpid()
+
+    @staticmethod
+    def _refresh_group(
+        group: tuple[_EvidenceCandidate, ...],
+    ) -> tuple[_EvidenceCandidate, ...]:
+        """Refresh live identity facts after evidence inspection.
+
+        A protected gate can exec between the initial process snapshot and
+        descriptor-based evidence inspection without changing PID/start-time.
+        Approval must use the post-exec executable and cgroup facts, never the
+        stale gate snapshot.  Evidence is retained only for identities that
+        still exist with the exact captured start time.
+        """
+        refreshed: list[_EvidenceCandidate] = []
+        for candidate in group:
+            current = process_snapshot(
+                candidate.snapshot.identity,
+                include_evidence=False,
+            )
+            if current is None:
+                continue
+            refreshed.append(
+                _EvidenceCandidate(
+                    current,
+                    candidate.content,
+                    candidate.runtimes,
+                    candidate.first_seen_ns,
+                    candidate.fast_match,
+                )
+            )
+        return tuple(refreshed)
 
     def _cached_executable_digest(self, snapshot: ProcessSnapshot) -> str:
         metadata = executable_metadata_for_identity(snapshot.identity)
@@ -500,13 +787,112 @@ class Supervisor:
             raise JsonInputError("detection event identity is invalid")
         return self.detections / f"{event_id}.json"
 
-    def _store_detection(self, value: dict[str, Any]) -> None:
-        write_atomic(self._detection_path(value["event_id"]), value)
-        records = sorted(
-            self.detections.glob("*.json"), key=lambda item: item.stat().st_mtime_ns, reverse=True
+    def _discovered_run_cgroups(
+        self,
+        snapshot: ProcessSnapshot,
+        correlated: tuple[_EvidenceCandidate, ...],
+    ) -> set[str]:
+        values: set[str] = set()
+        candidates = correlated or (
+            _EvidenceCandidate(snapshot, (), (), time.monotonic_ns()),
         )
-        for path in records[DETECTION_LIMIT:]:
-            path.unlink(missing_ok=True)
+        for candidate in candidates:
+            for line in candidate.snapshot.cgroups:
+                if not line.startswith("0::/system.slice/"):
+                    continue
+                cgroup = line[3:]
+                unit = Path(cgroup).name
+                if (
+                    cgroup == f"/system.slice/{unit}"
+                    and unit.startswith(UNIT_PREFIX)
+                    and unit.endswith(".service")
+                    and RUN_ID.fullmatch(
+                        unit.removeprefix(UNIT_PREFIX).removesuffix(".service")
+                    )
+                ):
+                    values.add(cgroup)
+        return values
+
+    def _mark_discovered_runs_terminated(self, cgroups: set[str]) -> None:
+        """Prevent the cgroup watcher from relabelling a detector kill benign."""
+        if not cgroups:
+            return
+        for path in self.runs.glob("*.json"):
+            try:
+                current = load_run(self.runs, path.stem)
+            except JsonInputError:
+                continue
+            if current["cgroup"] not in cgroups:
+                continue
+            lock = self._new_lock(current["run_id"])
+            with lock:
+                try:
+                    latest = load_run(self.runs, current["run_id"])
+                except JsonInputError:
+                    latest = current
+                if latest["state"] != "TERMINATED":
+                    latest["state"] = "TERMINATED"
+                    self._store(latest)
+
+    def _discovery_containment_targets(
+        self,
+        group: tuple[_EvidenceCandidate, ...],
+        snapshots: dict[ProcessIdentity, ProcessSnapshot],
+    ) -> set[ProcessIdentity]:
+        """Select evidence roots or the complete exact selected workload.
+
+        A detector match inside an Eggcracker-launched systemd cgroup is a
+        violation by that selected workload.  Include every observed process
+        in that one exact owned unit so a broker, sibling, or replacement
+        cannot survive while the run is recorded as terminated.  Unmanaged
+        related-process matches remain limited to the evidence roots and
+        their descendants.
+        """
+        targets = {candidate.snapshot.identity for candidate in group}
+        selected_cgroups = self._discovered_run_cgroups(group[0].snapshot, group)
+        if not selected_cgroups:
+            # A live same-UID parent is the connector that makes direct
+            # siblings one claimed workload.  Stop it before capture so it
+            # cannot replenish a sibling while the component is moved.
+            parents = {
+                candidate.snapshot.parent
+                for candidate in group
+                if candidate.snapshot.parent is not None
+            }
+            for parent in parents:
+                connector = snapshots.get(parent)
+                if connector is not None and connector.uid == self.policy["workload_uid"]:
+                    related_children = sum(
+                        candidate.snapshot.parent == parent for candidate in group
+                    )
+                    if related_children >= 2:
+                        targets.add(parent)
+            return targets
+        for snapshot in snapshots.values():
+            if any(
+                line.startswith("0::") and line[3:] in selected_cgroups
+                for line in snapshot.cgroups
+            ):
+                targets.add(snapshot.identity)
+        return targets
+
+    def _store_detection(self, value: dict[str, Any]) -> None:
+        try:
+            write_atomic(self._detection_path(value["event_id"]), value)
+            records = sorted(
+                self.detections.glob("*.json"),
+                key=lambda item: item.stat().st_mtime_ns,
+                reverse=True,
+            )
+            for path in records[DETECTION_LIMIT:]:
+                path.unlink(missing_ok=True)
+        except (JsonInputError, OSError):
+            # Containment has already happened when this is called from the
+            # autonomous enforcement path.  A missing durable empty-state
+            # receipt must therefore make health fail closed until a root
+            # operator repairs storage and restarts the supervisor.
+            self.receipt_persistence_healthy = False
+            raise
 
     def _detection_sort_key(self, path: Path) -> tuple[int, str]:
         try:
@@ -571,7 +957,8 @@ class Supervisor:
             "executable": executable_record,
             "observed": {
                 "argv_count": len(snapshot.argv),
-                "argv_sha256": hashlib.sha256("\0".join(snapshot.argv).encode("utf-8")).hexdigest(),
+                "argv_sha256": argv_digest(snapshot.argv),
+                "argv_complete": snapshot.argv_complete,
                 "pid": snapshot.identity.pid,
                 "start_time": snapshot.identity.start_time,
                 "uid": snapshot.uid,
@@ -662,6 +1049,7 @@ class Supervisor:
     ) -> None:
         containment_started = False
         managed_targets = targets or {snapshot.identity}
+        discovered_run_cgroups = self._discovered_run_cgroups(snapshot, correlated)
         try:
             if self.quarantine_root is None:
                 raise JsonInputError("quarantine root is unavailable")
@@ -693,6 +1081,7 @@ class Supervisor:
                 dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
             )
             self._store_detection(receipt)
+            self._mark_discovered_runs_terminated(discovered_run_cgroups)
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
             receipt = self._detection_receipt(
                 event_id=event_id,
@@ -734,14 +1123,22 @@ class Supervisor:
     def _scan_once(self, *, synchronous: bool = False) -> None:
         self.content_scan_tick += 1
         content_due = synchronous or self.content_scan_tick % CONTENT_SCAN_INTERVAL == 0
-        try:
-            approvals = load_approvals(self.approvals)
-        except JsonInputError:
-            approvals = []  # A corrupt approval never authorizes a matching workload.
         snapshots = scan(
-            exclude=lambda item: item.identity.pid == os.getpid() or self._managed(item)
+            exclude=self._discovery_excluded,
+            include_evidence=content_due,
         )
         snapshot_map = {item.identity: item for item in snapshots}
+        live_identities = set(snapshot_map)
+        for cache in (
+            getattr(self, "artifact_fd_offsets", {}),
+            getattr(self, "artifact_map_offsets", {}),
+            getattr(self, "runtime_map_offsets", {}),
+            getattr(self, "observed_content", {}),
+            getattr(self, "observed_runtimes", {}),
+        ):
+            for identity in tuple(cache):
+                if identity not in live_identities:
+                    cache.pop(identity, None)
         candidates: list[_EvidenceCandidate] = []
         for snapshot in snapshots:
             fast_match = match(self.catalogue, snapshot)
@@ -749,38 +1146,134 @@ class Supervisor:
             runtimes: tuple[RuntimeEvidence, ...] = ()
             first_seen_ns = time.monotonic_ns()
             if content_due:
-                content = artifacts_from_snapshot(snapshot, cache=self.artifact_cache)
+                artifact_offsets = getattr(self, "artifact_fd_offsets", None)
+                if artifact_offsets is None:
+                    self.artifact_fd_offsets = {}
+                    artifact_offsets = self.artifact_fd_offsets
+                runtime_offsets = getattr(self, "runtime_map_offsets", None)
+                if runtime_offsets is None:
+                    self.runtime_map_offsets = {}
+                    runtime_offsets = self.runtime_map_offsets
+                artifact_map_offsets = getattr(self, "artifact_map_offsets", None)
+                if artifact_map_offsets is None:
+                    self.artifact_map_offsets = {}
+                    artifact_map_offsets = self.artifact_map_offsets
+                artifact_fd_start = artifact_offsets.get(
+                    snapshot.identity,
+                    self._window_start(MAX_FD_PROBES_PER_SCAN),
+                )
+                artifact_map_start = artifact_map_offsets.get(
+                    snapshot.identity,
+                    self._window_start(MAX_MAP_PROBES_PER_SCAN),
+                )
+                content_now = artifacts_from_snapshot(
+                    snapshot,
+                    cache=self.artifact_cache,
+                    fd_start_index=artifact_fd_start,
+                    map_start_index=artifact_map_start,
+                )
+                artifact_offsets[snapshot.identity] = (
+                    artifact_fd_start + MAX_FD_PROBES_PER_SCAN
+                )
+                artifact_map_offsets[snapshot.identity] = (
+                    artifact_map_start + MAX_MAP_PROBES_PER_SCAN
+                )
                 # Runtime evidence is intentionally collected independently so
                 # it can be correlated with content held by a bounded peer.
-                runtimes = runtime_from_snapshot(snapshot, cache=self.runtime_cache)
-                supplied = {
-                    "MODEL_CONTENT": {item.evidence_id for item in content},
-                    "MODEL_RUNTIME": {item.evidence_id for item in runtimes},
+                runtime_start = runtime_offsets.get(
+                    snapshot.identity,
+                    self._window_start(MAX_RUNTIME_CANDIDATES),
+                )
+                runtimes_now = runtime_from_snapshot(
+                    snapshot,
+                    cache=self.runtime_cache,
+                    start_index=runtime_start,
+                )
+                runtime_offsets[snapshot.identity] = runtime_start + MAX_RUNTIME_CANDIDATES
+                observed_content = getattr(self, "observed_content", None)
+                if observed_content is None:
+                    self.observed_content = {}
+                    observed_content = self.observed_content
+                observed_runtimes = getattr(self, "observed_runtimes", None)
+                if observed_runtimes is None:
+                    self.observed_runtimes = {}
+                    observed_runtimes = self.observed_runtimes
+                content_values = observed_content.setdefault(snapshot.identity, {})
+                runtime_values = observed_runtimes.setdefault(snapshot.identity, {})
+                content_values.update({item.evidence_id: item for item in content_now})
+                runtime_values.update({item.evidence_id: item for item in runtimes_now})
+                current_ids = {
+                    *(item.evidence_id for item in content_now),
+                    *(item.evidence_id for item in runtimes_now),
                 }
-                if content or runtimes:
+                if current_ids:
                     observation = self.observations.observe(
-                        snapshot.identity, set().union(*supplied.values())
+                        snapshot.identity, current_ids
                     )
                     first_seen_ns = observation.first_seen_ns
+                else:
+                    observation = self.observations.get(snapshot.identity)
+                if observation is not None:
+                    active = observation.evidence
+                    content = tuple(
+                        item for key, item in content_values.items() if key in active
+                    )
+                    runtimes = with_pytorch_pair(
+                        item for key, item in runtime_values.items() if key in active
+                    )
             if fast_match is None and not content and not runtimes:
                 continue
             candidates.append(
                 _EvidenceCandidate(snapshot, content, runtimes, first_seen_ns, fast_match)
             )
 
-        content_groups = self._correlate(
-            [item for item in candidates if (item.content or item.runtimes) and item.fast_match is None], snapshot_map
+        content_groups = self._content_groups(
+            [
+                item
+                for item in candidates
+                if (item.content or item.runtimes) and item.fast_match is None
+            ],
+            snapshot_map,
         )
-        groups = content_groups + [
-            ((item,), "same-process")
+        groups = [
+            _DetectionGroup((item,), (item,), "same-process")
             for item in candidates
             if item.fast_match is not None
-        ]
-        for group, boundary_type in groups:
-            trigger_candidate = group[0]
+        ] + content_groups
+        for detection_group in groups:
+            scope = self._refresh_group(detection_group.scope)
+            if not scope:
+                continue
+            refreshed_by_identity = {
+                candidate.snapshot.identity: candidate for candidate in scope
+            }
+            witness = tuple(
+                refreshed_by_identity[item.snapshot.identity]
+                for item in detection_group.witness
+                if item.snapshot.identity in refreshed_by_identity
+            )
+            if not witness:
+                continue
+            for candidate in scope:
+                snapshot_map[candidate.snapshot.identity] = candidate.snapshot
+            # Launch provenance is written before the protected gate releases.
+            # Load it only after refreshing the post-exec process identity;
+            # loading it at scan start can race a concurrent protected start
+            # and falsely kill an invocation admitted during that same scan.
+            try:
+                provenances = load_launch_provenance(self.launches)
+            except JsonInputError:
+                # Corrupt or incomplete provenance never authorizes a matching
+                # workload.  Post-exec procfs argv is intentionally not used.
+                provenances = []
+            provenance_by_identity = {
+                ProcessIdentity(item["pid"], item["start_time"]): item
+                for item in provenances
+            }
+            trigger_candidate = witness[0]
             aggregate_content: list[ArtifactEvidence] = []
             aggregate_runtimes: list[RuntimeEvidence] = []
-            for candidate in group:
+            for candidate in witness:
                 for evidence in candidate.content:
                     if evidence not in aggregate_content:
                         aggregate_content.append(evidence)
@@ -800,7 +1293,7 @@ class Supervisor:
             qualified_ns = time.monotonic_ns()
             unapproved: list[_EvidenceCandidate] = []
             executable_digests: dict[ProcessIdentity, str | None] = {}
-            for candidate in group:
+            for candidate in witness:
                 try:
                     executable_sha256 = self._cached_executable_digest(candidate.snapshot)
                 except (JsonInputError, OSError):
@@ -808,18 +1301,22 @@ class Supervisor:
                     unapproved.append(candidate)
                     continue
                 executable_digests[candidate.snapshot.identity] = executable_sha256
-                if not approved(
+                provenance = provenance_by_identity.get(candidate.snapshot.identity)
+                if provenance is None or not launch_authorizes(
                     candidate.snapshot,
                     executable_sha256,
-                    approvals,
-                    executable_metadata=getattr(self, "executable_metadata", {}).get(
+                    getattr(self, "executable_metadata", {}).get(
                         candidate.snapshot.identity
                     ),
+                    provenance,
                 ):
                     unapproved.append(candidate)
             if not unapproved:
                 continue
-            target_set = {candidate.snapshot.identity for candidate in group}
+            trigger_candidate = unapproved[0]
+            if trigger_candidate.fast_match is not None:
+                detected = trigger_candidate.fast_match
+            target_set = self._discovery_containment_targets(scope, snapshot_map)
             with self.discovery_lock:
                 now = time.monotonic_ns()
                 self.discovery_done = {
@@ -841,11 +1338,11 @@ class Supervisor:
                     self.discovery_active.difference_update(target_set)
                 continue
             executable_sha256 = executable_digests.get(snapshot.identity)
-            first_seen_ns = min(candidate.first_seen_ns for candidate in group)
+            first_seen_ns = min(candidate.first_seen_ns for candidate in witness)
             kwargs = {
                 "targets": target_set,
-                "correlated": tuple(group),
-                "boundary_type": boundary_type,
+                "correlated": tuple(scope),
+                "boundary_type": detection_group.boundary,
             }
             if synchronous:
                 self._enforce_discovery(
@@ -921,6 +1418,7 @@ class Supervisor:
             or self.last_scan_completed_ns <= 0
             or time.monotonic_ns() - self.last_scan_completed_ns > SCAN_HEALTH_TIMEOUT_NS
             or self.discovery_failures >= MAX_DISCOVERY_FAILURES
+            or not self.receipt_persistence_healthy
             or time.monotonic_ns() < self.enforcement_saturation_until_ns
         ):
             return
@@ -1017,10 +1515,15 @@ class Supervisor:
     def _mark_completed(self, record: dict[str, Any]) -> bool:
         lock = self._new_lock(record["run_id"])
         with lock:
-            if record["state"] not in ACTIVE_STATES:
+            try:
+                current = load_run(self.runs, record["run_id"])
+            except JsonInputError:
+                current = record
+            if current["state"] not in ACTIVE_STATES:
                 return False
-            record["state"] = "COMPLETED_ALLOWED"
-            self._store(record)
+            current["state"] = "COMPLETED_ALLOWED"
+            record.update(current)
+            self._store(current)
             return True
 
     def _watch_once(self, record: dict[str, Any], ready: threading.Event | None = None) -> None:
@@ -1109,6 +1612,21 @@ class Supervisor:
         finally:
             gate.unlink(missing_ok=True)
 
+    @staticmethod
+    def _gated_process(identity: Any) -> ProcessIdentity:
+        """Capture the one pre-exec gate identity in an exact owned cgroup."""
+        path = validate_identity(identity)
+        try:
+            raw = (path / "cgroup.procs").read_text(encoding="ascii").splitlines()
+        except OSError as error:
+            raise JsonInputError("cannot inspect gated workload process") from error
+        if len(raw) != 1 or not raw[0].isdigit():
+            raise JsonInputError("gated workload must contain exactly one process before exec")
+        value = process_identity(int(raw[0]))
+        if value is None:
+            raise JsonInputError("gated workload process identity vanished")
+        return value
+
     def _active_exists(self) -> bool:
         return bool(getattr(self, "active_cgroups", set()))
 
@@ -1126,14 +1644,31 @@ class Supervisor:
             raise JsonInputError("max_memory_mib must be from 64 to 131072")
         if isinstance(cpu_quota, bool) or not isinstance(cpu_quota, int) or not 10 <= cpu_quota <= 10_000:
             raise JsonInputError("cpu_quota_percent must be from 10 to 10000")
-        with self.start_lock:
+        with self.start_lock, self.approval_lock:
             if name_path(self.names, name).exists() or self._active_exists():
                 raise JsonInputError(
                     "one protected workload is already active or name is unavailable"
                 )
+            try:
+                approval = match_launch(
+                    uid=self.policy["workload_uid"],
+                    argv=argv,
+                    approvals=load_approvals(self.approvals),
+                )
+            except JsonInputError:
+                approval = None
             run_id = os.urandom(12).hex()
             unit = f"{UNIT_PREFIX}{run_id}.service"
-            gate = self._make_gate(run_id)
+            try:
+                effective_argv = (
+                    stage_launch(approval, argv, STAGED_DIR / run_id)
+                    if approval is not None
+                    else list(argv)
+                )
+                gate = self._make_gate(run_id)
+            except Exception:
+                self._clear_stage(run_id)
+                raise
             result = self._run(
                 [
                     "/usr/bin/systemd-run",
@@ -1152,18 +1687,38 @@ class Supervisor:
                     f"--property=CPUQuota={cpu_quota}%",
                     "--property=IOWeight=10",
                     "--property=LimitNOFILE=1024",
+                    "--working-directory=/",
+                    "--setenv=HOME=/nonexistent",
+                    "--setenv=BASH_ENV=/nonexistent",
+                    "--setenv=ENV=/nonexistent",
+                    "--setenv=GCONV_PATH=/nonexistent",
+                    "--setenv=LD_AUDIT=",
+                    "--setenv=LD_LIBRARY_PATH=",
+                    "--setenv=LD_PRELOAD=",
+                    "--setenv=LOCPATH=/nonexistent",
+                    "--setenv=NLSPATH=/nonexistent",
+                    "--setenv=PYTHONBREAKPOINT=0",
+                    "--setenv=PYTHONINSPECT=",
+                    "--setenv=PYTHONNOUSERSITE=1",
+                    "--setenv=PYTHONSAFEPATH=1",
+                    "--setenv=PYTHONPATH=/nonexistent",
+                    "--setenv=PYTHONSTARTUP=/nonexistent",
+                    "--setenv=PYTHONUSERBASE=/nonexistent",
                     "--",
                     "/usr/bin/python3",
+                    "-I",
+                    "-S",
                     "/usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz",
                     "_gate",
                     "--fifo",
                     str(gate),
                     "--",
-                    *argv,
+                    *effective_argv,
                 ]
             )
             if result.returncode:
                 gate.unlink(missing_ok=True)
+                self._clear_stage(run_id)
                 raise JsonInputError(result.stderr.strip() or "system workload launch failed")
             try:
                 deadline = time.monotonic() + 2.0
@@ -1196,6 +1751,14 @@ class Supervisor:
                     "workload_uid": self.policy["workload_uid"],
                 }
                 self._store(record)
+                gated_process = self._gated_process(identity)
+                if approval is not None:
+                    create_launch_provenance(
+                        self.launches,
+                        run=record,
+                        process=gated_process,
+                        approval=approval,
+                    )
                 ready = threading.Event()
                 watcher = threading.Thread(target=self._watch, args=(record, ready), daemon=True)
                 watcher.start()
@@ -1218,6 +1781,8 @@ class Supervisor:
                 }
             except Exception:
                 gate.unlink(missing_ok=True)
+                provenance_path(self.launches, run_id).unlink(missing_ok=True)
+                self._clear_stage(run_id)
                 try:
                     # Best effort rollback after a launch failure; direct kill is still authoritative.
                     identity = capture_identity(props["ControlGroup"], run_id, unit)
@@ -1313,7 +1878,21 @@ class Supervisor:
                 and "pids"
                 in Path("/sys/fs/cgroup/cgroup.controllers").read_text(encoding="ascii").split()
             )
-            ready = available and pidfd_available() and self.quarantine_root is not None
+            now_ns = time.monotonic_ns()
+            scan_healthy = (
+                self.last_scan_completed_ns > 0
+                and now_ns - self.last_scan_completed_ns <= SCAN_HEALTH_TIMEOUT_NS
+                and self.discovery_failures < MAX_DISCOVERY_FAILURES
+                and self.receipt_persistence_healthy
+                and self.discovery_thread is not None
+                and self.discovery_thread.is_alive()
+            )
+            ready = (
+                available
+                and pidfd_available()
+                and self.quarantine_root is not None
+                and scan_healthy
+            )
             return {
                 "autonomous_discovery": ready,
                 "backend": "root-supervisor",
@@ -1323,6 +1902,8 @@ class Supervisor:
                     "consecutive_failures": self.discovery_failures,
                     "last_scan_duration_ms": self.last_scan_duration_ns / 1_000_000,
                     "last_scan_completed": self.last_scan_completed_ns > 0,
+                    "receipt_persistence_healthy": self.receipt_persistence_healthy,
+                    "healthy": scan_healthy,
                     "scan_health_timeout_ms": SCAN_HEALTH_TIMEOUT_NS / 1_000_000,
                 },
                 "pidfd": pidfd_available(),
@@ -1351,20 +1932,25 @@ class Supervisor:
             ]
             return {"runs": runs}
         if action == "approve" and set(args) == {"argv", "name", "uid"}:
-            value = create_approval(
-                self.approvals,
-                name=args["name"],
-                uid=args["uid"],
-                argv=args["argv"],
-                administrator_uid=0,
-            )
+            with self.approval_lock:
+                value = create_approval(
+                    self.approvals,
+                    name=args["name"],
+                    uid=args["uid"],
+                    argv=args["argv"],
+                    administrator_uid=0,
+                )
             return {"approval": public_approval(value), "result": "APPROVED"}
         if action == "revoke" and set(args) == {"name"}:
-            return revoke(self.approvals, args["name"])
+            with self.approval_lock:
+                return revoke(self.approvals, args["name"])
         if action == "approvals" and not args:
-            return {
-                "approvals": [public_approval(value) for value in load_approvals(self.approvals)]
-            }
+            with self.approval_lock:
+                return {
+                    "approvals": [
+                        public_approval(value) for value in load_approvals(self.approvals)
+                    ]
+                }
         if action == "detections" and not args:
             values: list[dict[str, Any]] = []
             for path in sorted(
@@ -1402,16 +1988,29 @@ class Supervisor:
                 if action not in SOCKET_ACTIONS[path]:
                     raise JsonInputError("action is not permitted on this socket")
                 _send(connection, {"ok": True, "value": self.handle(value)})
-            except (JsonInputError, OSError, struct.error) as error:
+            except (
+                JsonInputError,
+                OSError,
+                OverflowError,
+                RecursionError,
+                TypeError,
+                ValueError,
+                struct.error,
+            ) as error:
                 try:
                     _send(connection, {"ok": False, "value": str(error)})
-                except OSError:
+                except (OSError, OverflowError, RecursionError, TypeError, ValueError):
                     pass
 
     def serve(self) -> int:
         self._prepare()
         self.discovery_thread = threading.Thread(target=self._discovery_loop, daemon=True)
         self.discovery_thread.start()
+        # The required synchronous startup scan is already complete and the
+        # discovery worker is live. Emit its health proof immediately so a
+        # sequence of deliberate restarts cannot starve the watchdog merely
+        # because each detected workload is contained before the next scan.
+        self._heartbeat()
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
         self.heartbeat_thread.start()
         listeners: dict[socket.socket, Path] = {}

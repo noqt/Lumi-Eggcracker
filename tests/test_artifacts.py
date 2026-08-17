@@ -6,8 +6,23 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from lumi_eggcracker.artifacts import from_snapshot, validate_path
+from lumi_eggcracker.artifacts import (
+    from_mapped_files,
+    from_process_fds,
+    from_snapshot,
+    validate_gguf_fd,
+    validate_path,
+)
+from lumi_eggcracker.discovery import ProcessIdentity
+from lumi_eggcracker.jsonio import JsonInputError
+from lumi_eggcracker.procfd import (
+    MAX_PROC_MAP_BYTES,
+    StableFileMetadata,
+    executable_mapping_references,
+    unique_mapping_references,
+)
 
 
 def gguf(*, version: int = 3, tensors: int = 1, metadata: int = 0, padding: int = 64) -> bytes:
@@ -26,6 +41,138 @@ def safetensors(*, dtype: str = "F32", shape: list[int] | None = None, offsets: 
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_executable_mapping_parser_excludes_data_maps_and_binds_mount(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            root = proc / "42"
+            root.mkdir()
+            (root / "maps").write_text(
+                "1000-2000 r--p 00000000 00:2a 11 /data\n"
+                "3000-4000 r-xp 00001000 00:2a 12 /runtime\n",
+                encoding="utf-8",
+            )
+            (root / "mountinfo").write_text(
+                "77 1 0:42 / /mnt/c rw - 9p drvfs rw\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                (("3000-4000", 12, (77,)),),
+                tuple(
+                    (item.name, item.inode, item.mount_ids)
+                    for item in executable_mapping_references(42, proc=proc)
+                ),
+            )
+
+    def test_executable_mapping_parser_does_not_truncate_at_4096_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            root = proc / "42"
+            root.mkdir()
+            lines = [
+                f"{index + 1:x}-{index + 2:x} r-xp 00000000 00:2a {index + 1} /decoy/{index}\n"
+                for index in range(4286)
+            ]
+            lines.append("20000-21000 r-xp 00000000 00:2a 9001 /runtime\n")
+            (root / "maps").write_text("".join(lines), encoding="utf-8")
+            (root / "mountinfo").write_text("", encoding="utf-8")
+
+            references = executable_mapping_references(42, proc=proc)
+
+            self.assertEqual(4287, len(references))
+            self.assertEqual(9001, references[-1].inode)
+
+    def test_oversized_mapping_table_fails_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            root = proc / "42"
+            root.mkdir()
+            (root / "maps").write_bytes(b"x" * (MAX_PROC_MAP_BYTES + 1))
+
+            with self.assertRaisesRegex(JsonInputError, "bounded inspection limit"):
+                executable_mapping_references(42, proc=proc)
+
+    def test_mapping_segments_are_deduplicated_by_stable_inode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            mappings = proc / "42" / "map_files"
+            mappings.mkdir(parents=True)
+            first = mappings / "1-2"
+            first.write_bytes(b"runtime")
+            os.link(first, mappings / "2-3")
+            (mappings / "3-4").write_bytes(b"other")
+
+            self.assertEqual(
+                ("1-2", "3-4"), unique_mapping_references(42, proc=proc)
+            )
+
+    def test_readable_deleted_drvfs_duplicate_does_not_require_fstat(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "model"
+            path.write_bytes(gguf())
+            descriptor = os.open(path, os.O_RDONLY)
+            try:
+                fallback = StableFileMetadata(7, 11, path.stat().st_size)
+                with patch(
+                    "lumi_eggcracker.artifacts.os.fstat",
+                    side_effect=FileNotFoundError(2, "deleted DrvFS descriptor"),
+                ):
+                    evidence = validate_gguf_fd(descriptor, fallback=fallback)
+            finally:
+                os.close(descriptor)
+            self.assertEqual("gguf-v3", evidence.evidence_id)
+            self.assertEqual((7, 11), (evidence.device, evidence.inode))
+
+    def test_mapping_windows_eventually_cover_model_after_fd_close(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            mappings = proc / "42" / "map_files"
+            mappings.mkdir(parents=True)
+            for index in range(65):
+                (mappings / f"{index + 1:x}-{index + 2:x}").write_bytes(b"not a model")
+            (mappings / "3f-40").write_bytes(gguf())
+            sample = type(
+                "Snapshot",
+                (),
+                {"identity": type("Identity", (), {"pid": 42})()},
+            )()
+
+            self.assertEqual((), from_mapped_files(sample, proc=proc, start_index=0))
+            evidence = from_mapped_files(sample, proc=proc, start_index=64)
+
+            self.assertEqual(("gguf-v3",), tuple(item.evidence_id for item in evidence))
+
+    def test_descriptor_windows_eventually_cover_late_model_fd(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            directory = proc / "42" / "fd"
+            directory.mkdir(parents=True)
+            for number in range(20):
+                (directory / str(number)).write_bytes(b"harmless")
+            (directory / "18").write_bytes(gguf())
+            sample = type("Snapshot", (), {"identity": ProcessIdentity(42, 100), "fd_entries": ()})()
+            self.assertEqual(
+                (), from_process_fds(sample, proc=proc, start_index=0, max_probes=16)
+            )
+            evidence = from_process_fds(
+                sample, proc=proc, start_index=16, max_probes=16
+            )
+            self.assertEqual({"gguf-v3"}, {item.evidence_id for item in evidence})
+
+    def test_descriptor_stripe_always_samples_highest_fd(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            directory = proc / "42" / "fd"
+            directory.mkdir(parents=True)
+            for number in range(704):
+                (directory / str(number)).write_bytes(b"harmless")
+            (directory / "703").write_bytes(gguf())
+            sample = type(
+                "Snapshot", (), {"identity": ProcessIdentity(42, 100), "fd_entries": ()}
+            )()
+
+            evidence = from_process_fds(sample, proc=proc, start_index=0, max_probes=64)
+
+            self.assertEqual({"gguf-v3"}, {item.evidence_id for item in evidence})
+
     def test_valid_gguf_content_does_not_depend_on_filename(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "opaque-input"

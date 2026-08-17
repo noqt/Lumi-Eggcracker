@@ -10,12 +10,22 @@ import struct
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .jsonio import JsonInputError
+from .procfd import (
+    StableFileMetadata,
+    descriptor_size,
+    fair_window,
+    open_process_fd,
+    unique_mapping_references,
+)
 
 MAX_ARTIFACT_BYTES = 1 * 1024 * 1024
 MAX_ARTIFACTS = 16
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
+MAX_FD_PROBES_PER_SCAN = 64
+MAX_MAP_PROBES_PER_SCAN = 64
 MAX_GGUF_ITEMS = 10_000_000
 MAX_SAFETENSORS_TENSORS = 100_000
 MAX_SAFETENSORS_DIMS = 64
@@ -68,7 +78,16 @@ ArtifactCacheKey = tuple[int, int, int, int, int]
 ArtifactCache = MutableMapping[ArtifactCacheKey, ArtifactEvidence | None]
 
 
-def _cache_key(metadata: os.stat_result) -> ArtifactCacheKey:
+class _Metadata(Protocol):
+    st_dev: int
+    st_ino: int
+    st_size: int
+    st_mtime_ns: int
+    st_ctime_ns: int
+    st_mode: int
+
+
+def _cache_key(metadata: _Metadata) -> ArtifactCacheKey:
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -88,8 +107,18 @@ def _size_bucket(size: int) -> str:
     return ">=8GiB"
 
 
-def _regular(descriptor: int, *, minimum: int = 1) -> os.stat_result:
-    metadata = os.fstat(descriptor)
+def _regular(
+    descriptor: int,
+    *,
+    minimum: int = 1,
+    fallback: StableFileMetadata | None = None,
+) -> _Metadata:
+    try:
+        metadata: _Metadata = os.fstat(descriptor)
+    except OSError:
+        if fallback is None or descriptor_size(descriptor) != fallback.st_size:
+            raise
+        metadata = fallback
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_size < minimum:
         raise JsonInputError("candidate model artifact is not a usable regular file")
     return metadata
@@ -106,9 +135,11 @@ def _read_exact(descriptor: int, amount: int) -> bytes:
     return bytes(value)
 
 
-def validate_gguf_fd(descriptor: int) -> ArtifactEvidence:
+def validate_gguf_fd(
+    descriptor: int, *, fallback: StableFileMetadata | None = None
+) -> ArtifactEvidence:
     """Validate the fixed GGUF v2/v3 header without reading a model body."""
-    before = _regular(descriptor, minimum=25)
+    before = _regular(descriptor, minimum=25, fallback=fallback)
     raw = _read_exact(descriptor, 24)
     if len(raw) != 24 or raw[:4] != b"GGUF":
         raise JsonInputError("candidate is not GGUF")
@@ -121,7 +152,7 @@ def validate_gguf_fd(descriptor: int) -> ArtifactEvidence:
     if minimum > before.st_size or minimum > MAX_ARTIFACT_BYTES:
         raise JsonInputError("GGUF declared header exceeds the inspection budget")
     header = _read_exact(descriptor, min(before.st_size, MAX_ARTIFACT_BYTES))
-    after = _regular(descriptor)
+    after = _regular(descriptor, fallback=fallback)
     if (before.st_dev, before.st_ino, before.st_size) != (
         after.st_dev,
         after.st_ino,
@@ -147,9 +178,11 @@ def _json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return value
 
 
-def validate_safetensors_fd(descriptor: int) -> ArtifactEvidence:
+def validate_safetensors_fd(
+    descriptor: int, *, fallback: StableFileMetadata | None = None
+) -> ArtifactEvidence:
     """Validate one bounded Safetensors header through an opened descriptor."""
-    before = _regular(descriptor, minimum=8)
+    before = _regular(descriptor, minimum=8, fallback=fallback)
     prefix = _read_exact(descriptor, 8)
     if len(prefix) != 8:
         raise JsonInputError("Safetensors header length is truncated")
@@ -234,7 +267,7 @@ def validate_safetensors_fd(descriptor: int) -> ArtifactEvidence:
         previous_end = end
     if previous_end != data_size:
         raise JsonInputError("Safetensors data offsets leave trailing data")
-    after = _regular(descriptor, minimum=8)
+    after = _regular(descriptor, minimum=8, fallback=fallback)
     if (before.st_dev, before.st_ino, before.st_size) != (
         after.st_dev,
         after.st_ino,
@@ -287,51 +320,88 @@ def _looks_like_artifact(path: Path) -> bool:
         os.close(descriptor)
 
 
+def _evidence_from_descriptor(
+    descriptor: int,
+    cache: ArtifactCache | None,
+    fallback: StableFileMetadata | None = None,
+) -> ArtifactEvidence | None:
+    metadata = _regular(descriptor, fallback=fallback)
+    key = _cache_key(metadata)
+    if cache is not None and key in cache:
+        return cache[key]
+    evidence = None
+    for validator in (validate_gguf_fd, validate_safetensors_fd):
+        try:
+            evidence = validator(descriptor, fallback=fallback)
+            break
+        except (JsonInputError, OSError):
+            continue
+    if cache is not None:
+        cache[key] = evidence
+    return evidence
+
+
 def from_process_fds(
     snapshot: object,
     *,
     proc: Path = Path("/proc"),
     cache: ArtifactCache | None = None,
+    start_index: int = 0,
+    max_probes: int = MAX_FD_PROBES_PER_SCAN,
 ) -> tuple[ArtifactEvidence, ...]:
-    """Inspect a bounded set of currently open target descriptors.
+    """Inspect one fair bounded window of currently open target descriptors.
 
     The descriptor is opened through ``/proc/<pid>/fd/<n>``.  The link name is
     used only to find a descriptor number; it is never accepted as evidence.
+    Callers advance ``start_index`` between scans so a held-open artifact
+    cannot be hidden permanently behind harmless lower-numbered descriptors.
     """
-    identity = snapshot.identity
-    entries = tuple(getattr(snapshot, "fd_entries", ()))[:MAX_ARTIFACTS]
+    identity = getattr(snapshot, "identity", None)
+    if isinstance(start_index, bool) or not isinstance(start_index, int) or start_index < 0:
+        raise JsonInputError("artifact descriptor cursor is invalid")
+    if isinstance(max_probes, bool) or not isinstance(max_probes, int) or max_probes < 1:
+        raise JsonInputError("artifact descriptor probe limit is invalid")
+    pid = getattr(identity, "pid", None)
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid >= 1:
+        directory = proc / str(pid) / "fd"
+        try:
+            numbers = sorted(
+                int(item.name) for item in directory.iterdir() if item.name.isdigit()
+            )
+        except OSError:
+            numbers = sorted(
+                {
+                    number
+                    for number, _target in tuple(getattr(snapshot, "fd_entries", ()))
+                    if isinstance(number, int)
+                    and not isinstance(number, bool)
+                    and number >= 0
+                }
+            )
+    else:
+        # Synthetic snapshots and partially collected /proc records can still
+        # contribute stable pathname evidence through ``from_snapshot``.  A
+        # missing process identity must not prevent that fallback path.
+        numbers = []
+    selected = fair_window(numbers, start_index=start_index, max_probes=max_probes)
     result: list[ArtifactEvidence] = []
     consumed = 0
-    for number, _target in entries:
-        if not isinstance(number, int) or number < 0:
-            continue
+    for number in selected:
         # /proc/<pid>/fd/<n> is necessarily a procfs symlink.  We open that
         # exact descriptor target, then validate the opened inode; O_NOFOLLOW
         # would reject every legitimate procfs descriptor.
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         try:
-            descriptor = os.open(proc / str(identity.pid) / "fd" / str(number), flags)
-        except OSError:
+            descriptor, fallback = open_process_fd(identity, number, proc=proc)
+        except (JsonInputError, OSError, ProcessLookupError):
             continue
         try:
-            key = _cache_key(os.fstat(descriptor))
-            if cache is not None and key in cache:
-                evidence = cache[key]
-                if evidence is not None and evidence not in result:
-                    result.append(evidence)
-                continue
-            evidence = None
-            for validator in (validate_gguf_fd, validate_safetensors_fd):
-                try:
-                    evidence = validator(descriptor)
-                    break
-                except (JsonInputError, OSError):
-                    continue
-            if cache is not None:
-                cache[key] = evidence
+            evidence = _evidence_from_descriptor(descriptor, cache, fallback)
             if evidence is None:
                 continue
-            header_bytes = min(os.fstat(descriptor).st_size, MAX_ARTIFACT_BYTES)
+            header_bytes = min(
+                _regular(descriptor, fallback=fallback).st_size,
+                MAX_ARTIFACT_BYTES,
+            )
             if consumed + header_bytes > MAX_TOTAL_BYTES:
                 break
             consumed += header_bytes
@@ -344,14 +414,82 @@ def from_process_fds(
     return tuple(result)
 
 
+def _mapping_references(snapshot: object, proc: Path) -> tuple[str, ...]:
+    identity = getattr(snapshot, "identity", None)
+    pid = getattr(identity, "pid", None)
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+        return ()
+    return unique_mapping_references(pid, proc=proc)
+
+
+def from_mapped_files(
+    snapshot: object,
+    *,
+    proc: Path = Path("/proc"),
+    cache: ArtifactCache | None = None,
+    start_index: int = 0,
+    max_probes: int = MAX_MAP_PROBES_PER_SCAN,
+) -> tuple[ArtifactEvidence, ...]:
+    """Inspect a rotating bounded window of live mapped-file descriptors."""
+    if isinstance(start_index, bool) or not isinstance(start_index, int) or start_index < 0:
+        raise JsonInputError("artifact mapping cursor is invalid")
+    if isinstance(max_probes, bool) or not isinstance(max_probes, int) or max_probes < 1:
+        raise JsonInputError("artifact mapping probe limit is invalid")
+    references = _mapping_references(snapshot, proc)
+    if not references:
+        return ()
+    selected = fair_window(references, start_index=start_index, max_probes=max_probes)
+    result: list[ArtifactEvidence] = []
+    for reference in selected:
+        try:
+            descriptor = os.open(
+                proc / str(snapshot.identity.pid) / "map_files" / reference,
+                os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+            )
+        except (AttributeError, OSError):
+            continue
+        try:
+            evidence = _evidence_from_descriptor(descriptor, cache)
+            if evidence is not None and evidence not in result:
+                result.append(evidence)
+                if len(result) >= MAX_ARTIFACTS:
+                    break
+        except (JsonInputError, OSError):
+            pass
+        finally:
+            os.close(descriptor)
+    return tuple(result)
+
+
 def from_snapshot(
     snapshot: object,
     *,
     proc: Path = Path("/proc"),
     cache: ArtifactCache | None = None,
+    fd_start_index: int = 0,
+    fd_max_probes: int = MAX_FD_PROBES_PER_SCAN,
+    map_start_index: int = 0,
+    map_max_probes: int = MAX_MAP_PROBES_PER_SCAN,
 ) -> tuple[ArtifactEvidence, ...]:
-    """Collect bounded GGUF evidence from open descriptors and mapped files."""
-    result = list(from_process_fds(snapshot, proc=proc, cache=cache))
+    """Collect bounded content evidence from open and mapped descriptors."""
+    result = list(
+        from_process_fds(
+            snapshot,
+            proc=proc,
+            cache=cache,
+            start_index=fd_start_index,
+            max_probes=fd_max_probes,
+        )
+    )
+    for evidence in from_mapped_files(
+        snapshot,
+        proc=proc,
+        cache=cache,
+        start_index=map_start_index,
+        max_probes=map_max_probes,
+    ):
+        if evidence not in result:
+            result.append(evidence)
     for raw in tuple(getattr(snapshot, "map_paths", ())):
         if not isinstance(raw, str) or not raw.startswith("/"):
             continue

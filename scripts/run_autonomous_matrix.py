@@ -18,6 +18,7 @@ from smoke_content_ai import assets, command
 
 CLI = "/usr/local/bin/eggcracker"
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
+RUNS = Path("/var/lib/lumi-eggcracker/runs")
 
 
 def run(argv: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
@@ -33,6 +34,28 @@ def call(operator: str, argv: list[str]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("invalid Eggcracker response")
     return value
+
+
+def wait_for_armed_doctor(operator: str, *, timeout: float = 45) -> dict[str, Any]:
+    """Wait through truthful between-scan UNSUPPORTED responses."""
+    deadline = time.monotonic() + timeout
+    last: dict[str, Any] | None = None
+    command = ["/usr/sbin/runuser", "-u", operator, "--", CLI, "doctor"]
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=False, timeout=30
+        )
+        raw = result.stdout.strip() or result.stderr.strip()
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            value = None
+        if isinstance(value, dict):
+            last = value
+            if value.get("result") == "PASS" and value.get("autonomous_discovery"):
+                return value
+        time.sleep(0.05)
+    raise RuntimeError(f"autonomous discovery did not become armed: {last}")
 
 
 def stop(process: subprocess.Popen[bytes]) -> None:
@@ -59,6 +82,10 @@ def percentile(values: list[float], percent: int) -> float:
     return ordered[max(0, (len(ordered) * percent + 99) // 100 - 1)]
 
 
+def approved_outcome(state: object) -> bool:
+    return state in {"RUNNING", "COMPLETED_ALLOWED"}
+
+
 def launch(user: str, argv: list[str]) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         ["/usr/sbin/runuser", "-u", user, "--", *argv],
@@ -66,6 +93,32 @@ def launch(user: str, argv: list[str]) -> subprocess.Popen[bytes]:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+
+def stop_selected(operator: str, name: str) -> None:
+    receipt = Path(f"/tmp/lumi-autonomous-kill-{secrets.token_hex(8)}.json")
+    try:
+        try:
+            call(operator, ["kill", "--name", name, "--receipt", str(receipt)])
+        except RuntimeError:
+            # The real runner can finish between the RUNNING status proof and
+            # this best-effort cleanup call.  Accept only one exact durable
+            # benign-completion record for that randomized run name; do not
+            # mask TERMINATED, containment-failure, or ambiguous states.
+            completed = []
+            for path in RUNS.glob("*.json"):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                try:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if value.get("name") == name:
+                    completed.append(value)
+            if len(completed) != 1 or completed[0].get("state") != "COMPLETED_ALLOWED":
+                raise
+    finally:
+        receipt.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -94,14 +147,13 @@ def main() -> int:
         runner, model, _manifest = assets(args.assets_manifest)
         argv = command(runner, model)
         try:
-            doctor = call(operator, ["doctor"])
-            if doctor.get("result") != "PASS" or not doctor.get("autonomous_discovery"):
-                raise RuntimeError("autonomous discovery is not armed")
+            wait_for_armed_doctor(operator)
             for index in range(args.discoveries):
                 canary = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
                 process: subprocess.Popen[bytes] | None = None
                 try:
-                    before = set(DETECTIONS.glob("*.json")); started = time.monotonic_ns()
+                    before = set(DETECTIONS.glob("*.json"))
+                    started = time.monotonic_ns()
                     process = launch(user, argv)
                     receipt = new_receipt(before)
                     stop(process)
@@ -109,24 +161,60 @@ def main() -> int:
                         raise RuntimeError("autonomous fixture containment or canary proof failed")
                     starts.append((receipt["containment"]["first_stop_monotonic_ns"] - started) / 1_000_000)
                     empties.append(float(receipt["containment"]["trigger_to_empty_ms"]))
-                    results["discoveries"].append(receipt["event_id"]); results["canary_survival"] += 1
+                    results["discoveries"].append(receipt["event_id"])
+                    results["canary_survival"] += 1
                 finally:
                     if process is not None:
                         stop(process)
                     stop(canary)
             for index in range(args.approved):
-                name = f"allow-{secrets.token_hex(6)}"
-                call(operator, ["approve", "--name", name, "--uid", str(uid), "--", *argv])
+                approval_name = f"allow-{secrets.token_hex(6)}"
+                run_name = f"approved-{secrets.token_hex(6)}"
+                call(
+                    operator,
+                    ["approve", "--name", approval_name, "--uid", str(uid), "--", *argv],
+                )
                 before = set(DETECTIONS.glob("*.json"))
-                process = launch(user, argv)
+                started = False
                 try:
-                    time.sleep(0.2)
+                    response = call(
+                        operator,
+                        [
+                            "start",
+                            "--name",
+                            run_name,
+                            "--max-pids",
+                            "64",
+                            "--max-memory-mib",
+                            "4096",
+                            "--cpu-quota-percent",
+                            "1200",
+                            "--",
+                            *argv,
+                        ],
+                    )
+                    started = True
+                    if response.get("state") != "RUNNING":
+                        raise RuntimeError("protected approved invocation did not start")
+                    # The real runner normally exposes its complete content and
+                    # runtime evidence during this interval.  Approval is valid
+                    # only because the exact command crossed the protected
+                    # pre-exec start gate.
+                    time.sleep(2.5)
                     if set(DETECTIONS.glob("*.json")) - before:
                         raise RuntimeError("exact approved invocation was killed")
-                    results["approved"].append(name)
+                    state = call(operator, ["status", "--name", run_name]).get("state")
+                    if not approved_outcome(state):
+                        raise RuntimeError("exact approved invocation was not allowed")
+                    # A small real model may finish its bounded context before
+                    # cleanup.  That is a successful approval outcome, not a
+                    # false kill, and no active cgroup remains to stop.
+                    started = state == "RUNNING"
+                    results["approved"].append(approval_name)
                 finally:
-                    stop(process)
-                    call(operator, ["revoke", "--name", name])
+                    if started:
+                        stop_selected(operator, run_name)
+                    call(operator, ["revoke", "--name", approval_name])
             for _ in range(args.benign):
                 process = subprocess.Popen(["/usr/sbin/runuser", "-u", user, "--", sys.executable, "-c", "import time; time.sleep(0.03)"], start_new_session=True)
                 process.wait(timeout=5)

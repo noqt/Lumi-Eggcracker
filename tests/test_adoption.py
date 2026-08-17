@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
 from lumi_eggcracker import adoption
 from lumi_eggcracker.adoption import QuarantineIdentity, children, contain_many, descendants
 from lumi_eggcracker.discovery import ProcessIdentity
+from lumi_eggcracker.jsonio import JsonInputError
 
 
 def stat(pid: int, parent: int, start: int) -> str:
@@ -15,6 +17,35 @@ def stat(pid: int, parent: int, start: int) -> str:
 
 
 class AdoptionTests(unittest.TestCase):
+    def test_missing_delegated_quarantine_root_is_recreated(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw) / "lumi-eggcracker.service"
+            parent.mkdir()
+            for name in ("cgroup.events", "cgroup.kill", "cgroup.procs"):
+                (parent / name).touch()
+            root = parent / "quarantine"
+            event_id = "a" * 24
+
+            original_mkdir = Path.mkdir
+
+            def materialize_controls(path: Path, *args: object, **kwargs: object) -> None:
+                original_mkdir(path, *args, **kwargs)
+                if path == root or path == root / event_id:
+                    for name in ("cgroup.events", "cgroup.kill", "cgroup.procs"):
+                        (path / name).touch()
+
+            with patch.object(Path, "mkdir", autospec=True, side_effect=materialize_controls):
+                identity_value = adoption.create_quarantine(root, event_id)
+
+            self.assertTrue(root.is_dir())
+            self.assertEqual(root / event_id, identity_value.path)
+
+    def test_quarantine_root_recovery_rejects_an_arbitrary_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "quarantine"
+            with self.assertRaisesRegex(JsonInputError, "parent is invalid"):
+                adoption._ensure_quarantine_root(root)
+
     def test_open_pidfd_revalidates_before_returning_descriptor(self) -> None:
         value = ProcessIdentity(10, 100)
         with patch.object(adoption, "pidfd_available", return_value=True), patch.object(adoption, "_same", return_value=True), patch.object(adoption.os, "pidfd_open", return_value=17, create=True), patch.object(adoption.os, "close") as close:
@@ -44,7 +75,8 @@ class AdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             proc = Path(raw)
             for pid, parent, start in ((10, 1, 100), (11, 10, 101), (12, 10, 102)):
-                entry = proc / str(pid); (entry / "task" / str(pid)).mkdir(parents=True)
+                entry = proc / str(pid)
+                (entry / "task" / str(pid)).mkdir(parents=True)
                 (entry / "stat").write_text(stat(pid, parent, start), encoding="ascii")
             (proc / "10" / "task" / "10" / "children").write_text("11 12\n", encoding="ascii")
             (proc / "11" / "task" / "11" / "children").write_text("", encoding="ascii")
@@ -65,3 +97,78 @@ class AdoptionTests(unittest.TestCase):
         self.assertEqual(2, opened.call_count)
         self.assertEqual(2, stopped.call_count)
         self.assertEqual({17, 18}, {call.args[0] for call in close.call_args_list})
+
+    def test_containment_faults_cannot_return_a_success_result(self) -> None:
+        target = ProcessIdentity(10, 100)
+        identity = QuarantineIdentity(Path("/quarantine/aa"), 1, 2, "a" * 24)
+        proof = adoption.EmptyProof(False, 1, 1, [10])
+
+        def invoke(*, kill_error: bool, empty: adoption.EmptyProof | None = None):
+            with ExitStack() as stack:
+                for current in (
+                    patch.object(adoption, "open_pidfd", return_value=17),
+                    patch.object(adoption, "stop_pidfd", return_value=20),
+                    patch.object(adoption, "stop"),
+                    patch.object(adoption, "descendants", return_value={target}),
+                    patch.object(adoption, "_move", return_value=True),
+                    patch.object(adoption, "create_quarantine", return_value=identity),
+                    patch.object(adoption, "_validate", return_value=identity.path),
+                    patch.object(adoption, "_remove"),
+                    patch.object(adoption, "_kill"),
+                    patch.object(adoption.os, "close"),
+                ):
+                    stack.enter_context(current)
+                stack.enter_context(
+                    patch.object(
+                        adoption,
+                        "kill_path",
+                        side_effect=OSError("cgroup.kill failed")
+                        if kill_error
+                        else None,
+                        return_value=None if kill_error else (30, 31),
+                    )
+                )
+                if empty is not None:
+                    stack.enter_context(
+                        patch.object(adoption, "verify_empty", return_value=(32, empty))
+                    )
+                return contain_many({target}, Path("/quarantine"), "a" * 24)
+
+        with self.assertRaises(OSError):
+            invoke(kill_error=True)
+        with self.assertRaisesRegex(JsonInputError, "did not become empty"):
+            invoke(kill_error=False, empty=proof)
+
+    def test_each_enforcement_stage_fault_prevents_a_success_result(self) -> None:
+        target = ProcessIdentity(10, 100)
+        identity = QuarantineIdentity(Path("/quarantine/aa"), 1, 2, "a" * 24)
+        proof = adoption.EmptyProof(True, 1, 0, [])
+        results = {
+            "open_pidfd": 17,
+            "stop_pidfd": 20,
+            "stop": 21,
+            "descendants": {target},
+            "create_quarantine": identity,
+            "_move": True,
+            "_validate": identity.path,
+            "kill_path": (30, 31),
+            "verify_empty": (32, proof),
+            "_remove": None,
+        }
+        for failed in results:
+            with self.subTest(stage=failed), ExitStack() as stack:
+                for name, result in results.items():
+                    stack.enter_context(
+                        patch.object(
+                            adoption,
+                            name,
+                            side_effect=OSError(f"injected {name}")
+                            if name == failed
+                            else None,
+                            return_value=result,
+                        )
+                    )
+                stack.enter_context(patch.object(adoption, "_kill"))
+                stack.enter_context(patch.object(adoption.os, "close"))
+                with self.assertRaisesRegex(OSError, f"injected {failed}"):
+                    contain_many({target}, Path("/quarantine"), "a" * 24)

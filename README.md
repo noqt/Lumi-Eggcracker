@@ -15,13 +15,17 @@ There is no alert-only phase for an unapproved catalogue match. Containment begi
 ## What it does
 
 - continuously scans host processes and performs a startup scan before accepting control commands;
-- detects only the two contract-qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
-- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header and either two llama.cpp/GGML ELF runtime markers or the exact pinned llama.cpp launcher build ID are both required;
-- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and the exact pinned CPU PyTorch bridge-plus-ATen ELF build-ID pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
-- lets the configured operator approve one exact executable, UID and invocation before it is run;
+- distributes bounded descriptor inspection across each complete live descriptor table and advances its root-owned scan generation across supervisor recovery, so watchdog restart cannot permanently return a high-FD workload to the same uninspected window;
+- detects only the two publicly qualified content/runtime profiles below; unqualified name-only catalogue entries are not active in this release;
+- recognises the qualified `content.gguf-llama` profile without depending on executable or model filename: a bounded plausible GGUF v2/v3 header plus the full-file SHA-256-authenticated, structurally loadable qualified llama.cpp runtime observed as the running executable or an executable mapping;
+- recognises `content.safetensors-pytorch` when a structurally valid Safetensors artifact and full-file SHA-256-authenticated, structurally loadable, executable-mapped members of the exact pinned CPU PyTorch bridge-plus-ATen pair appear in one process or across a bounded related workload using the installed dedicated workload UID (a live direct parent/child or sibling relation, or one exact Eggcracker-owned workload cgroup); unrelated same-UID or common-init processes are not joined;
+- lets root approve one exact qualified native llama invocation or one root-owned CPython interpreter plus an absolute regular script, workload UID and invocation, then lets the configured operator consume that approval only through the protected pre-exec `start` gate;
 - automatically stops, captures and kills unapproved matches with `pidfd_send_signal` and cgroup-v2 `cgroup.kill`;
 - preserves the existing protected `start` and operator `kill` workflow;
-- records bounded post-containment receipts, status and detection summaries.
+- records bounded post-containment receipts, status and detection summaries; if a
+  post-containment detection receipt cannot be made durable, health becomes
+  `UNSUPPORTED` and supervisor heartbeats stop until root repairs storage and
+  restarts the service.
 
 ## What it does not do
 
@@ -31,19 +35,16 @@ A successful receipt proves the captured quarantine cgroup is empty. It does not
 
 ## Active contract-qualified profiles
 
-The table states the exact profile contract implemented by this source. Project
-records report that these profiles passed the native qualification gates for
-commit `418f877f0d450aeb26d4a1233257746808c490e5` on one WSL2 Ubuntu host.
-The corresponding checksum-bound native evidence pack is not retained in this
-repository or a public GitHub Release, so that result is not independently
-re-verifiable from the durable public surface. Run the qualification in
-[QUALIFICATION.md](QUALIFICATION.md) on the exact commit and target host before
-relying on it.
+The table states the exact profile contract implemented by this source. A 0.5.0
+package is qualified only when its `release-manifest.json`, installed policy,
+receipts, source archive and portable evidence archive all name the same exact
+source commit and the gates in [QUALIFICATION.md](QUALIFICATION.md) pass on the
+target host. Do not transfer a qualification result between commits or hosts.
 
-| Profile | Exact qualification | Active in 0.4.0 |
+| Profile | Exact qualification | Active in 0.5.0 |
 | --- | --- | --- |
-| `content.gguf-llama` | Renamed llama.cpp runner, extensionless GGUF path, bounded GGUF header, qualified ELF identity | Yes |
-| `content.safetensors-pytorch` | Pinned CPU PyTorch bridge-plus-ATen pair, valid contiguous Safetensors layout, real model smoke and ATen-only negative control | Yes |
+| `content.gguf-llama` | Renamed full-file-pinned llama.cpp runner, extensionless GGUF path, bounded GGUF header, executable ELF identity | Yes |
+| `content.safetensors-pytorch` | Full-file-pinned CPU PyTorch bridge-plus-ATen pair, valid contiguous Safetensors layout, real model smoke and ATen-only negative control | Yes |
 | Ollama, vLLM, TGI, LocalAI, llamafile and agent CLIs | Invocation-specific fixtures and launcher identity still require qualification | No |
 
 ## Requirements
@@ -55,40 +56,43 @@ relying on it.
 
 ## Quick start
 
-There is currently no v0.4.0 GitHub Release or durable anonymous download for
-the Linux bundle. To evaluate the tagged source, build it locally in a disposable
-Ubuntu VM:
+0.5.0 is prepared as a new engineering-preview line; the historical `v0.4.0`
+tag is not moved. Until a reviewed 0.5.0 tag and release exist, evaluate an
+explicit reviewed commit in a disposable Ubuntu 24.04 VM and retain the
+generated manifest:
 
 ```sh
-git clone --branch v0.4.0 --depth 1 https://github.com/noqt/Lumi-Eggcracker.git
+git clone https://github.com/noqt/Lumi-Eggcracker.git
 cd Lumi-Eggcracker
-test "$(git rev-parse HEAD)" = "418f877f0d450aeb26d4a1233257746808c490e5"
+git checkout <reviewed-0.5.0-commit>
 python3 scripts/build_release.py --output dist/local
 python3 scripts/verify_release.py \
-  --artifact dist/local/lumi-eggcracker-0.4.0.pyz \
-  --source-archive dist/local/lumi-eggcracker-0.4.0-source.zip \
-  --release-bundle dist/local/lumi-eggcracker-0.4.0-linux.zip
+  --artifact dist/local/lumi-eggcracker-0.5.0.pyz \
+  --source-archive dist/local/lumi-eggcracker-0.5.0-source.zip \
+  --release-bundle dist/local/lumi-eggcracker-0.5.0-linux.zip
 ```
 
-Alternatively, a signed-in GitHub user may download the authenticated
-`lumi-eggcracker-v0.4.0` artifact from the
-[successful `v0.4.0` tag workflow](https://github.com/noqt/Lumi-Eggcracker/actions/runs/31472099403)
-while GitHub retains it, then perform the same source-commit and
-`verify_release.py` checks. A CI artifact is not a durable anonymous Release
-channel. After validation, extract `lumi-eggcracker-0.4.0-linux.zip` and run as
-root:
+After validation, extract `lumi-eggcracker-0.5.0-linux.zip`, compare the
+manifest commit to the reviewed source, and install through the isolated system
+Python with the manifest-bound artifact digest:
 
 ```sh
-cd lumi-eggcracker-0.4.0
-sudo python3 scripts/install.py --operator "$USER" --artifact ./lumi-eggcracker-0.4.0.pyz
+cd lumi-eggcracker-0.5.0
+artifact_sha=$(python3 -c 'import json; print(json.load(open("release-manifest.json"))["sha256"])')
+sudo /usr/bin/python3 -I -S scripts/install.py \
+  --operator "$USER" --artifact "$PWD/lumi-eggcracker-0.5.0.pyz" \
+  --expected-sha256 "$artifact_sha"
 eggcracker doctor
 eggcracker approvals
 ```
 
-An unapproved complete qualified content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, approve it before launch. The approval stores hashes, not its raw arguments:
+An unapproved complete qualified content profile is killed automatically when it starts; Eggcracker does not pause for confirmation. To allow a known invocation, root must approve it and the operator must launch that exact command through `eggcracker start`. The approval stores hashes, not its raw arguments. Approval is deliberately limited to the qualified native llama runtime and CPython's single absolute-script form; Python `-c`, `-m`, relative paths, directories, symlinks and unsupported launchers are rejected. An approval by itself never exempts a process launched directly or by another tool:
 
 ```sh
-sudo eggcracker approve --name local-qwen --uid "$(id -u)" -- \
+sudo eggcracker approve --name local-qwen --uid "$(id -u lumi-eggcracker-workload)" -- \
+  /opt/llama.cpp/llama-cli -m /opt/models/qwen.gguf -p "Hello" -n 256
+eggcracker start --name local-qwen-run --max-pids 64 \
+  --max-memory-mib 4096 --cpu-quota-percent 400 -- \
   /opt/llama.cpp/llama-cli -m /opt/models/qwen.gguf -p "Hello" -n 256
 ```
 
@@ -98,7 +102,7 @@ Inspect autonomous containment summaries with:
 eggcracker detections
 ```
 
-Remove an approval for future launches with `sudo eggcracker revoke --name local-qwen`. Revocation does not kill a workload that was already approved and running.
+Remove an approval for future protected launches with `sudo eggcracker revoke --name local-qwen`. Revocation does not kill a workload that was already admitted and running. Approval is bound before exec to the exact Eggcracker-owned PID/start-time, executable identity and cgroup; mutable post-exec `/proc/<pid>/cmdline` data can never grant approval. For CPython, the approved script identity and digest are also bound, and the supervisor copies the same validated file descriptor into a root-owned per-run stage before releasing the gate. Script drift aborts `start`. Descendants and siblings do not inherit approval.
 
 The selected-workload command remains available for controlled tests and explicit workloads:
 
@@ -119,12 +123,12 @@ sudo python3 scripts/smoke_autonomous_ai.py \
   --user "$USER" --repetitions 5 --output ./autonomous-ai-smoke.json
 ```
 
-The smoke launches the model directly, outside `eggcracker start`, verifies that Eggcracker kills the unapproved invocation, then proves that the same exact invocation survives only when approved. The companion `smoke_content_ai.py` uses a renamed runner, unfamiliar wrapper and extensionless GGUF path to exercise the content profile.
+The smoke launches the model directly first and verifies that Eggcracker kills the unapproved invocation. It then proves that the same exact invocation survives only after root approval and protected operator launch, before revoking the approval and proving a direct relaunch is killed again. The companion `smoke_content_ai.py` uses a renamed runner, unfamiliar wrapper and extensionless GGUF path to exercise the content profile.
 
 To remove Eggcracker completely:
 
 ```sh
-sudo python3 scripts/uninstall.py
+sudo /usr/bin/python3 -I -S scripts/uninstall.py
 ```
 
 ## Local validation
@@ -140,6 +144,13 @@ sudo python3 scripts/self_validate.py \
 ```
 
 It runs the real-AI approval smoke, Safetensors approval smoke, ATen-only negative control, renamed content matrix, benign model-handling matrix, descendants/startup/restart checks, autonomous regression, selected-workload security regression, and the host-overhead benchmark. The resulting `overhead-benchmark.json` is included in the checksum-verified evidence pack.
+
+The 0.5.0 closure additionally runs the bundled `run_p0_native.py` workload
+campaign, `run_installer_p0.py` privileged-boundary campaign, deterministic
+enforcement/receipt fault injection, the frozen 41-case Daybreak replay, and a
+fresh no-history Daybreak assessment. Package the resulting evidence with
+`package_evidence.py`; its tar archive preserves POSIX symlink and hardlink
+semantics and is verified without extraction on a second host.
 
 Measure host cost separately in the disposable qualification VM:
 

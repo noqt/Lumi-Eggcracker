@@ -2,6 +2,22 @@
 
 from __future__ import annotations
 
+import sys as _bootstrap_sys
+
+if not _bootstrap_sys.flags.isolated or not _bootstrap_sys.flags.no_site:
+    raise SystemExit(
+        "privileged verifier requires /usr/bin/python3 -I -S scripts/verify_uninstalled.py"
+    )
+
+import posix as _bootstrap_posix
+
+try:
+    _bootstrap_posix.readlink(__file__)
+except OSError:
+    pass
+else:
+    raise SystemExit("refusing a symlinked privileged verifier")
+
 import grp
 import os
 import pwd

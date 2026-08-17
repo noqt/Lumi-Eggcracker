@@ -107,6 +107,7 @@ def main() -> int:
         ROOT / "scripts" / "install.py": "scripts/install.py",
         ROOT / "scripts" / "uninstall.py": "scripts/uninstall.py",
         ROOT / "scripts" / "verify_uninstalled.py": "scripts/verify_uninstalled.py",
+        ROOT / "scripts" / "verify_release.py": "scripts/verify_release.py",
         ROOT / "scripts" / "prepare_ai_smoke.py": "scripts/prepare_ai_smoke.py",
         ROOT / "scripts" / "prepare_safetensors_smoke.py": "scripts/prepare_safetensors_smoke.py",
         ROOT / "scripts" / "ai_smoke_worker.py": "scripts/ai_smoke_worker.py",
@@ -120,8 +121,19 @@ def main() -> int:
         ROOT / "scripts" / "run_content_adversarial_matrix.py": "scripts/run_content_adversarial_matrix.py",
         ROOT / "scripts" / "self_validate.py": "scripts/self_validate.py",
         ROOT / "scripts" / "run_autonomous_matrix.py": "scripts/run_autonomous_matrix.py",
+        ROOT / "scripts" / "run_native_matrix.py": "scripts/run_native_matrix.py",
+        ROOT / "scripts" / "run_p0_native.py": "scripts/run_p0_native.py",
+        ROOT / "scripts" / "run_installer_p0.py": "scripts/run_installer_p0.py",
         ROOT / "scripts" / "benchmark_overhead.py": "scripts/benchmark_overhead.py",
         ROOT / "scripts" / "verify_evidence.py": "scripts/verify_evidence.py",
+        ROOT / "scripts" / "package_evidence.py": "scripts/package_evidence.py",
+        ROOT / "scripts" / "verify_evidence_archive.py": "scripts/verify_evidence_archive.py",
+        ROOT / "tests" / "fixtures" / "benign_model_handler.py": "tests/fixtures/benign_model_handler.py",
+        ROOT / "tests" / "fixtures" / "benign_near_limit.py": "tests/fixtures/benign_near_limit.py",
+        ROOT / "tests" / "fixtures" / "canary.py": "tests/fixtures/canary.py",
+        ROOT / "tests" / "fixtures" / "fork_race.py": "tests/fixtures/fork_race.py",
+        ROOT / "tests" / "fixtures" / "hostile_client.py": "tests/fixtures/hostile_client.py",
+        ROOT / "tests" / "fixtures" / "pid_pressure.py": "tests/fixtures/pid_pressure.py",
     }
     with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path, name in release_files.items():

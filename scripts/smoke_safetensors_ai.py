@@ -46,8 +46,11 @@ def load_assets(path: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
     return python, model, config, value
 
 
-def control(argv: list[str]) -> dict[str, Any]:
-    result = subprocess.run([CLI, *argv], capture_output=True, text=True, check=False, timeout=30)
+def control(argv: list[str], *, operator: str | None = None) -> dict[str, Any]:
+    command = [CLI, *argv]
+    if operator is not None:
+        command = ["/usr/sbin/runuser", "-u", operator, "--", *command]
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "Eggcracker control failed")
     value = json.loads(result.stdout)
@@ -56,10 +59,34 @@ def control(argv: list[str]) -> dict[str, Any]:
     return value
 
 
+def rejected_control(argv: list[str], *, operator: str) -> dict[str, Any]:
+    result = subprocess.run(
+        ["/usr/sbin/runuser", "-u", operator, "--", CLI, *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode == 0 or "approved Python script" not in result.stderr:
+        raise RuntimeError("mutable approved script was not rejected before launch")
+    return {"returncode": result.returncode, "stderr": result.stderr.strip()}
+
+
 def stop(process: subprocess.Popen[bytes] | None) -> None:
     if process is not None and process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
         process.wait(timeout=5)
+
+
+def stop_selected(operator: str, name: str) -> None:
+    receipt = Path(f"/tmp/lumi-safetensors-kill-{secrets.token_hex(8)}.json")
+    try:
+        control(
+            ["kill", "--name", name, "--receipt", str(receipt)],
+            operator=operator,
+        )
+    finally:
+        receipt.unlink(missing_ok=True)
 
 
 def receipt_after(before: set[Path], *, timeout: float = 90) -> dict[str, Any]:
@@ -107,24 +134,38 @@ def launch(python: Path, user: str, wrapper: Path, weights: Path, config: Path, 
     )
 
 
-def one(python: Path, model: Path, config: Path, user: str, index: int) -> dict[str, Any]:
+def one(
+    python: Path,
+    model: Path,
+    config: Path,
+    user: str,
+    operator: str,
+    index: int,
+) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="lumi-safetensors-smoke-", dir="/tmp") as raw:
         root = Path(raw)
-        # The unprivileged workload must be able to write its bounded smoke
-        # output, while model/config/wrapper inputs remain read-only files.
-        os.chmod(root, 0o733)
-        weights = root / "weights"
-        config_copy = root / "config.json"
-        wrapper = root / secrets.token_hex(12)
-        output = root / "output"
+        # Approval-bound inputs live below a root-controlled directory.  Only
+        # the separate output directory is writable by the workload identity.
+        os.chmod(root, 0o711)
+        inputs = root / "inputs"
+        outputs = root / "outputs"
+        inputs.mkdir(mode=0o711)
+        outputs.mkdir(mode=0o733)
+        os.chmod(inputs, 0o711)
+        os.chmod(outputs, 0o733)
+        weights = inputs / "weights"
+        config_copy = inputs / "config.json"
+        wrapper = inputs / secrets.token_hex(12)
+        output = outputs / "output"
         shutil.copyfile(model, weights)
         shutil.copyfile(config, config_copy)
         wrapper.write_text(wrapper_source(), encoding="utf-8")
         user_uid = pwd.getpwnam(user).pw_uid
         canary = subprocess.Popen(["/bin/sleep", "180"], start_new_session=True)
         first_process: subprocess.Popen[bytes] | None = None
-        approved_process: subprocess.Popen[bytes] | None = None
+        approved_started = False
         name = f"safetensors-{index}-{secrets.token_hex(4)}"
+        run_name = f"safetensors-run-{index}-{secrets.token_hex(4)}"
         argv = [str(python), str(wrapper), str(weights), str(config_copy), str(output)]
         try:
             before = set(DETECTIONS.glob("*.json"))
@@ -140,18 +181,65 @@ def one(python: Path, model: Path, config: Path, user: str, index: int) -> dict[
                 raise RuntimeError("Safetensors/PyTorch profile or canary proof failed")
             if any(secret in json.dumps(first, sort_keys=True) for secret in (str(weights), str(wrapper))):
                 raise RuntimeError("Safetensors receipt leaked local paths")
+            output.unlink(missing_ok=True)
             approval = control(["approve", "--name", name, "--uid", str(user_uid), "--", *argv])
             if approval.get("result") != "APPROVED":
                 raise RuntimeError("exact Safetensors approval failed")
-            approved_process = launch(python, user, wrapper, weights, config_copy, output)
+            approved_source = wrapper.read_bytes()
+            try:
+                wrapper.write_bytes(b"raise SystemExit('mutated after approval')\n")
+                mutation_rejection = rejected_control(
+                    [
+                        "start",
+                        "--name",
+                        run_name,
+                        "--max-pids",
+                        "64",
+                        "--max-memory-mib",
+                        "4096",
+                        "--cpu-quota-percent",
+                        "1200",
+                        "--",
+                        *argv,
+                    ],
+                    operator=operator,
+                )
+            finally:
+                wrapper.write_bytes(approved_source)
+            response = control(
+                [
+                    "start",
+                    "--name",
+                    run_name,
+                    "--max-pids",
+                    "64",
+                    "--max-memory-mib",
+                    "4096",
+                    "--cpu-quota-percent",
+                    "1200",
+                    "--",
+                    *argv,
+                ],
+                operator=operator,
+            )
+            approved_started = True
+            if response.get("state") != "RUNNING":
+                raise RuntimeError("protected approved causal model did not start")
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline and (not output.is_file() or output.stat().st_size < 32):
                 time.sleep(0.05)
-            if approved_process.poll() is not None or output.stat().st_size < 32:
+            if (
+                not output.is_file()
+                or output.stat().st_size < 32
+                or control(["status", "--name", run_name], operator=operator).get("state")
+                != "RUNNING"
+            ):
                 raise RuntimeError("approved causal model did not generate output")
             generated = output.stat().st_size
-            stop(approved_process)
-            approved_process = None
+            stop_selected(operator, run_name)
+            approved_started = False
+            if any(Path("/run/lumi-eggcracker/staged").iterdir()):
+                raise RuntimeError("approved script stage survived workload termination")
             control(["revoke", "--name", name])
             before = set(DETECTIONS.glob("*.json"))
             first_process = launch(python, user, wrapper, weights, config_copy, output)
@@ -160,10 +248,11 @@ def one(python: Path, model: Path, config: Path, user: str, index: int) -> dict[
             first_process = None
             if second.get("detector", {}).get("profile") != "content.safetensors-pytorch" or canary.poll() is not None:
                 raise RuntimeError("revoked Safetensors/PyTorch model was not terminated")
-            return {"approved_generated_bytes": generated, "first_receipt": first, "result": "PASS", "second_receipt": second}
+            return {"approved_generated_bytes": generated, "first_receipt": first, "mutable_script_rejection": mutation_rejection, "result": "PASS", "second_receipt": second}
         finally:
             stop(first_process)
-            stop(approved_process)
+            if approved_started:
+                stop_selected(operator, run_name)
             stop(canary)
 
 
@@ -180,7 +269,14 @@ def main() -> int:
         raise SystemExit("output must be new and repetitions must equal five")
     try:
         python, model, config, _manifest = load_assets(args.assets_manifest)
-        values = [one(python, model, config, args.user, index) for index in range(args.repetitions)]
+        install = json.loads(
+            Path("/var/lib/lumi-eggcracker/install-manifest.json").read_text(encoding="utf-8")
+        )
+        operator = str(install["operator"])
+        values = [
+            one(python, model, config, args.user, operator, index)
+            for index in range(args.repetitions)
+        ]
         args.output.write_text(json.dumps({"repetitions": values, "result": "PASS"}, sort_keys=True) + "\n", encoding="utf-8")
         return 0
     except (OSError, RuntimeError, TypeError, json.JSONDecodeError) as error:

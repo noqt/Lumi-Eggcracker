@@ -1,14 +1,23 @@
 # Changelog
 
+## 0.5.0
+
+- Repair the independently reported Linux artifact-cache regression and test the supported Python 3.11, 3.12 and 3.13 runtimes in CI.
+- Carry forward the Daybreak approval, containment-scope, runtime-authentication, descriptor-fairness, watchdog and lifecycle repairs on a new release identity; the immutable `v0.4.0` tag remains historical evidence only.
+- Add portable, metadata-preserving release-evidence packaging and verification.
+- Require the five focused P0 campaigns, exact 41-case adversarial replay and ordinary Ubuntu 24.04 qualification before publishing the engineering preview.
+
 ## 0.4.0
 
 - Add bounded Safetensors structural validation and exact pinned CPU PyTorch/ATen build-ID-pair recognition.
 - Migrate content catalogue groups to `MODEL_RUNTIME` in schema v3 while preserving GGUF/llama behavior.
 - Contain unapproved complete Safetensors/PyTorch matches autonomously, including converters and inspectors; partial matches survive.
 - Limit the active public catalogue to the two qualified content profiles; withhold unqualified name-only runtime entries.
-- Bind executable approval hashing to the live `/proc/<pid>/exe` descriptor and PID/start-time identity.
+- Bind approval consumption before exec to the exact protected `start` PID/start-time, owned cgroup and executable identity; never grant approval from mutable post-exec arguments.
+- Bind supported CPython approvals to an immutable staged script and reject mutable or unsupported interpreter forms before launch.
+- Capture the full bounded related evidence component and connector parent after a minimal complete match, preventing incomplete sibling-pair containment receipts.
 - Tie supervisor heartbeats to recent successful scan completion and bound enforcement admission.
-- Preflight cgroups before uninstall and validate every published release checksum.
+- Preflight and empty only exact stopped service cgroups before uninstall, and validate every published release checksum.
 
 ## 0.3.0
 

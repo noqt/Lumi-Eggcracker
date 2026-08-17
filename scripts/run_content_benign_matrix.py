@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -36,31 +37,37 @@ def main() -> int:
     result: dict[str, object] = {"classes": {}, "kills": 0, "result": "FAIL"}
     try:
         _runner, model, _manifest = assets(args.assets_manifest)
-        fixture = ROOT / "tests" / "fixtures" / "benign_model_handler.py"
+        source_fixture = ROOT / "tests" / "fixtures" / "benign_model_handler.py"
         with tempfile.TemporaryDirectory(prefix="lumi-content-benign-", dir="/tmp") as raw:
             root = Path(raw)
             os.chmod(root, 0o777)
+            fixture = root / "benign_model_handler.py"
+            shutil.copyfile(source_fixture, fixture)
+            os.chmod(fixture, 0o644)
             for index in range(args.repetitions):
                 mode = MODES[index % len(MODES)]
                 destination = root / f"copy-{index}"
                 before = set(DETECTIONS.glob("*.json"))
-                process = subprocess.run(
-                    [
-                        "/usr/sbin/runuser",
-                        "-u",
-                        args.user,
-                        "--",
-                        sys.executable,
-                        str(fixture),
-                        str(model),
-                        mode,
-                        str(destination),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=10,
-                )
+                try:
+                    process = subprocess.run(
+                        [
+                            "/usr/sbin/runuser",
+                            "-u",
+                            args.user,
+                            "--",
+                            sys.executable,
+                            str(fixture),
+                            str(model),
+                            mode,
+                            str(destination),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=30 if mode == "copy" else 10,
+                    )
+                finally:
+                    destination.unlink(missing_ok=True)
                 if process.returncode:
                     raise RuntimeError(
                         process.stderr.strip() or "benign model handler was interrupted"

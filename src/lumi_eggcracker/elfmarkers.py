@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import struct
 from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from .jsonio import JsonInputError
+from .procfd import (
+    ExecutableMappingReference,
+    StableFileMetadata,
+    descriptor_size,
+    executable_mapping_references,
+    fair_window,
+    open_process_fd,
+)
 
 MAX_ELF_BYTES = 4 * 1024 * 1024
 MAX_SECTIONS = 1024
+MAX_RUNTIME_FD_PROBES = 32
 LLAMA_MARKERS = frozenset(
     {
         "llama_decode",
@@ -22,15 +33,34 @@ LLAMA_MARKERS = frozenset(
     }
 )
 PINNED_LLAMA_BUILD_IDS = frozenset({"7c2bca7f8ea49e1c6e86adb14861e721e041f95e"})
+PINNED_LLAMA_FILES = {
+    "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5": 1_248_024
+}
 # Exact GNU build IDs from the pinned CPU-only PyTorch 2.5.1 wheel used by the
 # real smoke environment.  Names and paths are deliberately not part of the
 # qualification rule.
 PINNED_PYTORCH_BRIDGE_BUILD_IDS = frozenset({"0ba50bfa63eb5fd0dd19cabca2ee1de77c4c1398"})
 PINNED_PYTORCH_ATEN_BUILD_IDS = frozenset({"ad9ab6eeec3b28a0ec3f12f266627610de90813b"})
+PINNED_PYTORCH_BRIDGE_FILES = {
+    "0ba50bfa63eb5fd0dd19cabca2ee1de77c4c1398": (
+        26_113_896,
+        "b576248e3a0f6ff37de11baa3beac0e53ca1500208b9cf4974db2f3b67cfc8c5",
+    )
+}
+PINNED_PYTORCH_ATEN_FILES = {
+    "ad9ab6eeec3b28a0ec3f12f266627610de90813b": (
+        433_155_401,
+        "dacb42735f5a59a8b2abbf06fe7fdeba359849a08f418ad830a84ffadc316802",
+    )
+}
 PYTORCH_BRIDGE_EVIDENCE_ID = "pytorch-bridge-build-id-pinned-cpu"
 PYTORCH_ATEN_EVIDENCE_ID = "pytorch-aten-build-id-pinned-cpu"
 PYTORCH_PAIR_EVIDENCE_ID = "pytorch-bridge-aten-pair-pinned-cpu"
-MAX_RUNTIME_CANDIDATES = 128
+MAX_RUNTIME_CANDIDATES = 256
+MAX_RUNTIME_AUTH_BYTES_PER_SCAN = 512 * 1024 * 1024
+PT_LOAD = 1
+PT_NOTE = 4
+PF_X = 1
 
 
 @dataclass(frozen=True)
@@ -48,7 +78,36 @@ RuntimeCacheKey = tuple[int, int, int, int, int]
 RuntimeCache = MutableMapping[RuntimeCacheKey, tuple[RuntimeEvidence, ...]]
 
 
-def _cache_key(metadata: os.stat_result) -> RuntimeCacheKey:
+class _Metadata(Protocol):
+    st_dev: int
+    st_ino: int
+    st_size: int
+    st_mtime_ns: int
+    st_ctime_ns: int
+    st_mode: int
+
+
+@dataclass(frozen=True)
+class _ProgramHeader:
+    kind: int
+    flags: int
+    offset: int
+    virtual: int
+    file_size: int
+    memory_size: int
+    alignment: int
+
+
+@dataclass
+class _AuthenticationBudget:
+    remaining: int = MAX_RUNTIME_AUTH_BYTES_PER_SCAN
+
+
+class _AuthenticationDeferred(Exception):
+    """The current bounded scan exhausted its full-file authentication budget."""
+
+
+def _cache_key(metadata: _Metadata) -> RuntimeCacheKey:
     return (
         metadata.st_dev,
         metadata.st_ino,
@@ -74,7 +133,101 @@ def _read(descriptor: int, offset: int, count: int, *, allow_distant_offset: boo
     return value
 
 
+def _loadable_programs(descriptor: int, size: int) -> tuple[_ProgramHeader, ...]:
+    """Validate a loadable ELF64 layout and return its bounded program table."""
+    header = _read(descriptor, 0, 64)
+    if (
+        header[:4] != b"\x7fELF"
+        or header[4:7] != b"\x02\x01\x01"
+        or header[18:20] != struct.pack("<H", 62)
+    ):
+        raise JsonInputError("candidate runtime is not little-endian x86-64 ELF")
+    values = struct.unpack("<HHIQQQIHHHHHH", header[16:])
+    elf_type, version = values[0], values[2]
+    program_offset, header_size, entry_size, count = (
+        values[4],
+        values[7],
+        values[8],
+        values[9],
+    )
+    if (
+        elf_type not in {2, 3}
+        or version != 1
+        or header_size != 64
+        or entry_size < 56
+        or not 1 <= count <= MAX_SECTIONS
+        or program_offset + entry_size * count > size
+        or program_offset + entry_size * count > MAX_ELF_BYTES
+    ):
+        raise JsonInputError("ELF program table is not loadable")
+
+    result: list[_ProgramHeader] = []
+    loadable = False
+    executable = False
+    for index in range(count):
+        entry = _read(descriptor, program_offset + index * entry_size, 56)
+        kind, flags, offset, virtual, _physical, file_size, memory_size, alignment = (
+            struct.unpack("<IIQQQQQQ", entry)
+        )
+        current = _ProgramHeader(
+            kind, flags, offset, virtual, file_size, memory_size, alignment
+        )
+        result.append(current)
+        if kind != PT_LOAD:
+            continue
+        if (
+            memory_size < 1
+            or file_size > memory_size
+            or offset + file_size > size
+            or (
+                alignment not in {0, 1}
+                and (
+                    alignment & (alignment - 1)
+                    or offset % alignment != virtual % alignment
+                )
+            )
+        ):
+            raise JsonInputError("ELF load segment is invalid")
+        loadable = True
+        if flags & PF_X and file_size:
+            executable = True
+    if not loadable or not executable:
+        raise JsonInputError("ELF lacks an executable load segment")
+    return tuple(result)
+
+
+def _authenticated_sha256(
+    descriptor: int,
+    size: int,
+    expected: dict[str, int] | tuple[int, str],
+    budget: _AuthenticationBudget | None,
+) -> bool:
+    """Authenticate the complete stable runtime file against the release pin."""
+    if isinstance(expected, tuple):
+        expected_size, expected_digest = expected
+        allowed = {expected_digest: expected_size}
+    else:
+        allowed = expected
+    if size not in allowed.values():
+        return False
+    if budget is not None:
+        if budget.remaining < size:
+            raise _AuthenticationDeferred
+        budget.remaining -= size
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining:
+        block = os.read(descriptor, min(1024 * 1024, remaining))
+        if not block:
+            return False
+        digest.update(block)
+        remaining -= len(block)
+    return allowed.get(digest.hexdigest()) == size
+
+
 def _symbols(descriptor: int, size: int) -> set[str]:
+    _loadable_programs(descriptor, size)
     header = _read(descriptor, 0, 64)
     if header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01" or header[18:20] != struct.pack("<H", 62):
         raise JsonInputError("candidate runtime is not little-endian ELF64")
@@ -146,27 +299,20 @@ def _symbols(descriptor: int, size: int) -> set[str]:
 
 def _build_id(descriptor: int, size: int) -> str | None:
     """Return a GNU build ID from a bounded ELF program-note segment."""
-    header = _read(descriptor, 0, 64)
-    if header[:4] != b"\x7fELF" or header[4:6] != b"\x02\x01" or header[18:20] != struct.pack("<H", 62):
-        raise JsonInputError("candidate runtime is not little-endian ELF64")
-    values = struct.unpack("<HHIQQQIHHHHHH", header[16:])
-    program_offset, entry_size, count = values[4], values[8], values[9]
-    if count == 0:
-        return None
-    if (
-        entry_size < 56
-        or not 1 <= count <= MAX_SECTIONS
-        or program_offset + entry_size * count > size
-    ):
-        raise JsonInputError("ELF program table is invalid")
-    for index in range(count):
-        entry = _read(descriptor, program_offset + index * entry_size, 56)
-        kind, _flags, offset, _virtual, _physical, length, _memory, _align = struct.unpack(
-            "<IIQQQQQQ", entry
-        )
-        if kind != 4 or not length or length > MAX_ELF_BYTES or offset + length > size:
+    for entry in _loadable_programs(descriptor, size):
+        if (
+            entry.kind != PT_NOTE
+            or not entry.file_size
+            or entry.file_size > MAX_ELF_BYTES
+            or entry.offset + entry.file_size > size
+        ):
             continue
-        note = _read(descriptor, offset, length, allow_distant_offset=True)
+        note = _read(
+            descriptor,
+            entry.offset,
+            entry.file_size,
+            allow_distant_offset=True,
+        )
         cursor = 0
         while cursor + 12 <= len(note):
             names, descriptor_size, note_type = struct.unpack("<III", note[cursor : cursor + 12])
@@ -182,15 +328,41 @@ def _build_id(descriptor: int, size: int) -> str | None:
     return None
 
 
-def inspect_path(path: Path) -> RuntimeEvidence | None:
-    """Recognise a llama/GGML ELF by two valid symbol-table markers, not name."""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+def _metadata(
+    descriptor: int, fallback: StableFileMetadata | None = None
+) -> _Metadata:
     try:
-        descriptor = os.open(path, flags)
+        return os.fstat(descriptor)
     except OSError:
-        return None
+        if fallback is None or descriptor_size(descriptor) != fallback.st_size:
+            raise
+        return fallback
+
+
+def _same_metadata(before: _Metadata, after: _Metadata) -> bool:
+    return (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) == (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+
+
+def _inspect_llama_descriptor(
+    descriptor: int,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
+) -> RuntimeEvidence | None:
+    """Recognise llama/GGML through one already-open, stable descriptor."""
     try:
-        before = os.fstat(descriptor)
+        before = _metadata(descriptor, fallback)
         if not stat.S_ISREG(before.st_mode) or before.st_size < 64 or before.st_size > (1 << 40):
             return None
         build_id = _build_id(descriptor, before.st_size)
@@ -200,63 +372,105 @@ def inspect_path(path: Path) -> RuntimeEvidence | None:
             # A large object can keep its section table beyond the bounded
             # window. It may still qualify only through the exact build ID.
             found = ()
-        after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_size) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
+        if (
+            (len(found) >= 2 or build_id in PINNED_LLAMA_BUILD_IDS)
+            and _authenticated_sha256(
+                descriptor, before.st_size, PINNED_LLAMA_FILES, budget
+            )
+            and _same_metadata(before, _metadata(descriptor, fallback))
         ):
-            return None
-        if len(found) >= 2:
-            return RuntimeEvidence("llama-elf", "llama.cpp/GGML", "ELF_MARKERS", found)
-        if build_id in PINNED_LLAMA_BUILD_IDS:
-            return RuntimeEvidence("llama-build-id", "llama.cpp", "BUILD_ID", ())
+            return RuntimeEvidence(
+                "llama-build-id", "llama.cpp", "SHA256", found
+            )
         return None
+    except _AuthenticationDeferred:
+        raise
     except (JsonInputError, OSError, struct.error):
         return None
-    finally:
-        os.close(descriptor)
 
 
-def inspect_pytorch_path(path: Path) -> RuntimeEvidence | None:
-    """Recognise one exact pinned PyTorch bridge/ATen ELF identity."""
+def _inspect_pytorch_descriptor(
+    descriptor: int,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
+) -> RuntimeEvidence | None:
+    """Recognise one exact pinned PyTorch bridge/ATen descriptor identity."""
+    try:
+        before = _metadata(descriptor, fallback)
+        if not stat.S_ISREG(before.st_mode) or before.st_size < 64:
+            return None
+        build_id = _build_id(descriptor, before.st_size)
+        if build_id in PINNED_PYTORCH_BRIDGE_BUILD_IDS and _authenticated_sha256(
+            descriptor,
+            before.st_size,
+            PINNED_PYTORCH_BRIDGE_FILES[build_id],
+            budget,
+        ) and _same_metadata(before, _metadata(descriptor, fallback)):
+            return RuntimeEvidence(
+                PYTORCH_BRIDGE_EVIDENCE_ID, "PyTorch/ATen", "SHA256", ()
+            )
+        if build_id in PINNED_PYTORCH_ATEN_BUILD_IDS and _authenticated_sha256(
+            descriptor,
+            before.st_size,
+            PINNED_PYTORCH_ATEN_FILES[build_id],
+            budget,
+        ) and _same_metadata(before, _metadata(descriptor, fallback)):
+            return RuntimeEvidence(
+                PYTORCH_ATEN_EVIDENCE_ID, "PyTorch/ATen", "SHA256", ()
+            )
+        return None
+    except _AuthenticationDeferred:
+        raise
+    except (JsonInputError, OSError, KeyError, struct.error):
+        return None
+
+
+def _inspect_descriptor(
+    descriptor: int,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
+) -> tuple[RuntimeEvidence, ...]:
+    values: list[RuntimeEvidence] = []
+    llama = _inspect_llama_descriptor(descriptor, fallback, budget)
+    if llama is not None:
+        values.append(llama)
+    pytorch = _inspect_pytorch_descriptor(descriptor, fallback, budget)
+    if pytorch is not None and pytorch not in values:
+        values.append(pytorch)
+    return tuple(values)
+
+
+def inspect_path(path: Path) -> RuntimeEvidence | None:
+    """Recognise the exact qualified llama/GGML runtime, independent of name."""
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError:
         return None
     try:
-        before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode) or before.st_size < 64:
-            return None
-        build_id = _build_id(descriptor, before.st_size)
-        after = os.fstat(descriptor)
-        if (before.st_dev, before.st_ino, before.st_size) != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-        ):
-            return None
-        if build_id in PINNED_PYTORCH_BRIDGE_BUILD_IDS:
-            return RuntimeEvidence(
-                PYTORCH_BRIDGE_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID", ()
-            )
-        if build_id in PINNED_PYTORCH_ATEN_BUILD_IDS:
-            return RuntimeEvidence(
-                PYTORCH_ATEN_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID", ()
-            )
+        return _inspect_llama_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def inspect_pytorch_path(path: Path) -> RuntimeEvidence | None:
+    """Recognise one full-file authenticated PyTorch bridge/ATen identity."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
         return None
-    except (JsonInputError, OSError, struct.error):
-        return None
+    try:
+        return _inspect_pytorch_descriptor(descriptor)
     finally:
         os.close(descriptor)
 
 
 def _inspect_candidate(path: Path) -> tuple[RuntimeEvidence, ...]:
     values: list[RuntimeEvidence] = []
-    evidence = inspect_path(path)
-    if evidence is not None:
-        values.append(evidence)
+    llama = inspect_path(path)
+    if llama is not None:
+        values.append(llama)
     pytorch = inspect_pytorch_path(path)
     if pytorch is not None and pytorch not in values:
         values.append(pytorch)
@@ -272,42 +486,209 @@ def with_pytorch_pair(values: Iterable[RuntimeEvidence]) -> tuple[RuntimeEvidenc
         and PYTORCH_ATEN_EVIDENCE_ID in evidence_ids
         and PYTORCH_PAIR_EVIDENCE_ID not in evidence_ids
     ):
-        result.append(RuntimeEvidence(PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "BUILD_ID_PAIR", ()))
+        result.append(
+            RuntimeEvidence(
+                PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "SHA256_PAIR", ()
+            )
+        )
     return tuple(result)
 
 
-def from_snapshot(
-    snapshot: object, *, cache: RuntimeCache | None = None
+def _cached_descriptor(
+    descriptor: int,
+    cache: RuntimeCache | None,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
 ) -> tuple[RuntimeEvidence, ...]:
-    """Inspect executable and mapped regular files; their names are ignored."""
-    # ``/proc/<pid>/maps`` repeats each shared object once per mapped segment.
-    # Deduplicate before applying the bounded candidate cap; otherwise a busy
-    # Python/AI process can exhaust the cap on unrelated NumPy/locale segments
-    # and hide the exact PyTorch bridge/ATen objects that are mapped later.
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for raw in (getattr(snapshot, "exe_path", ""), *getattr(snapshot, "map_paths", ())):
-        if isinstance(raw, str) and raw not in seen:
-            seen.add(raw)
-            candidates.append(raw)
-    result: list[RuntimeEvidence] = []
-    for raw in candidates[:MAX_RUNTIME_CANDIDATES]:
-        if not isinstance(raw, str) or not raw.startswith("/"):
+    try:
+        metadata = _metadata(descriptor, fallback)
+        key = _cache_key(metadata)
+    except OSError:
+        return ()
+    cacheable = not isinstance(metadata, StableFileMetadata)
+    if cache is not None and cacheable and key in cache:
+        return cache[key]
+    try:
+        values = _inspect_descriptor(descriptor, fallback, budget)
+    except _AuthenticationDeferred:
+        return ()
+    if cache is not None and cacheable:
+        cache[key] = values
+    return values
+
+
+def _mapping_references(
+    snapshot: object, proc: Path
+) -> tuple[ExecutableMappingReference, ...]:
+    identity = getattr(snapshot, "identity", None)
+    pid = getattr(identity, "pid", None)
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+        return ()
+    return executable_mapping_references(pid, proc=proc)
+
+
+def _matches_mapping(
+    metadata: _Metadata,
+    references: tuple[ExecutableMappingReference, ...] | list[ExecutableMappingReference],
+) -> bool:
+    """Bind a fallback process descriptor to one exact executable mapping."""
+    for reference in references:
+        if metadata.st_ino != reference.inode:
             continue
-        path = Path(raw)
-        if cache is None:
-            values = _inspect_candidate(path)
-        else:
-            try:
-                key = _cache_key(path.stat())
-            except OSError:
-                continue
-            if key in cache:
-                values = cache[key]
-            else:
-                values = _inspect_candidate(path)
-                cache[key] = values
+        # Deleted DrvFS pidfd duplicates expose mnt_id rather than a device
+        # number through the stable fallback.  The kernel inode is still the
+        # exact identity shared with /proc/PID/maps.  Ordinary descriptors can
+        # and must match both device and inode.
+        if isinstance(metadata, StableFileMetadata):
+            return metadata.st_dev in reference.mount_ids
+        try:
+            if (
+                os.major(metadata.st_dev) == reference.device_major
+                and os.minor(metadata.st_dev) == reference.device_minor
+            ):
+                return True
+        except (AttributeError, ValueError):
+            continue
+    return False
+
+
+def from_snapshot(
+    snapshot: object,
+    *,
+    cache: RuntimeCache | None = None,
+    proc: Path = Path("/proc"),
+    start_index: int = 0,
+    max_candidates: int = MAX_RUNTIME_CANDIDATES,
+) -> tuple[RuntimeEvidence, ...]:
+    """Inspect one fair window of live executable/mapping descriptors.
+
+    Native Linux inspection opens only executable ``map_files`` ranges.
+    Runtime bytes held merely as an ordinary descriptor or read-only data
+    mapping are not execution evidence.  If a deleted executable mapping
+    cannot be reopened, only an exact device/inode-matched retained descriptor
+    may stand in for that mapping.  Path reopening is a compatibility fallback
+    for fixtures or kernels where ``map_files`` is unavailable.
+    """
+    if isinstance(start_index, bool) or not isinstance(start_index, int) or start_index < 0:
+        raise JsonInputError("runtime mapping cursor is invalid")
+    if isinstance(max_candidates, bool) or not isinstance(max_candidates, int) or max_candidates < 1:
+        raise JsonInputError("runtime candidate limit is invalid")
+
+    result: list[RuntimeEvidence] = []
+    budget = _AuthenticationBudget()
+
+    def add(values: tuple[RuntimeEvidence, ...]) -> None:
         for evidence in values:
             if evidence not in result:
                 result.append(evidence)
+
+    # Bind the executable through procfs as well; a deleted executable path is
+    # not an excuse to lose an otherwise exact runtime identity.
+    try:
+        executable = proc / str(snapshot.identity.pid) / "exe"
+        descriptor = os.open(executable, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except (AttributeError, OSError):
+        descriptor = -1
+    if descriptor >= 0:
+        try:
+            add(_cached_descriptor(descriptor, cache, budget=budget))
+        finally:
+            os.close(descriptor)
+
+    references = _mapping_references(snapshot, proc)
+    if references:
+        selected = fair_window(
+            references, start_index=start_index, max_probes=max_candidates
+        )
+        unresolved: list[ExecutableMappingReference] = []
+        for reference in selected:
+            try:
+                descriptor = os.open(
+                    proc / str(snapshot.identity.pid) / "map_files" / reference.name,
+                    os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+                )
+            except (AttributeError, OSError):
+                unresolved.append(reference)
+                continue
+            try:
+                add(_cached_descriptor(descriptor, cache, budget=budget))
+            finally:
+                os.close(descriptor)
+
+        # WSL DrvFS can leave an executable mapping whose map_files magic link
+        # is unreopenable.  Recover only through a retained descriptor that
+        # matches the executable mapping's kernel identity.  This is not an
+        # arbitrary-FD recognition path.
+        if unresolved:
+            try:
+                numbers = sorted(
+                    int(item.name)
+                    for item in (proc / str(snapshot.identity.pid) / "fd").iterdir()
+                    if item.name.isdigit()
+                )
+            except (AttributeError, OSError):
+                numbers = sorted(
+                    {
+                        number
+                        for number, _target in tuple(
+                            getattr(snapshot, "fd_entries", ())
+                        )
+                        if isinstance(number, int)
+                        and not isinstance(number, bool)
+                        and number >= 0
+                    }
+                )
+            runtime_generation = start_index // max_candidates
+            for number in fair_window(
+                numbers,
+                start_index=runtime_generation * MAX_RUNTIME_FD_PROBES,
+                max_probes=MAX_RUNTIME_FD_PROBES,
+            ):
+                descriptor = -1
+                try:
+                    descriptor, fallback = open_process_fd(
+                        snapshot.identity, number, proc=proc
+                    )
+                    metadata = _metadata(descriptor, fallback)
+                except (JsonInputError, OSError, ProcessLookupError):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                    continue
+                try:
+                    if _matches_mapping(metadata, unresolved):
+                        add(
+                            _cached_descriptor(
+                                descriptor, cache, fallback, budget=budget
+                            )
+                        )
+                finally:
+                    os.close(descriptor)
+    else:
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for raw in (
+            getattr(snapshot, "exe_path", ""),
+            *getattr(snapshot, "executable_map_paths", ()),
+        ):
+            if isinstance(raw, str) and raw.startswith("/") and raw not in seen:
+                seen.add(raw)
+                candidates.append(raw)
+        if candidates:
+            for raw_path in fair_window(
+                candidates, start_index=start_index, max_probes=max_candidates
+            ):
+                path = Path(raw_path)
+                if cache is None:
+                    values = _inspect_candidate(path)
+                else:
+                    try:
+                        key = _cache_key(path.stat())
+                    except OSError:
+                        continue
+                    if key in cache:
+                        values = cache[key]
+                    else:
+                        values = _inspect_candidate(path)
+                        cache[key] = values
+                add(values)
     return with_pytorch_pair(result)

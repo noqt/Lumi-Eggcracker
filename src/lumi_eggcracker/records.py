@@ -24,26 +24,55 @@ def write_atomic(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(raw)
+    closed = False
+    directory = -1
+    published = False
+    new_target = not path.exists() and not path.is_symlink()
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(descriptor, 0o600)
-        os.write(descriptor, canonical_bytes(value))
+        pending = memoryview(canonical_bytes(value))
+        while pending:
+            written = os.write(descriptor, pending)
+            if written < 1:
+                raise OSError("atomic record write made no progress")
+            pending = pending[written:]
         os.fsync(descriptor)
-    finally:
         os.close(descriptor)
-    if not hasattr(os, "fchmod"):
-        os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
-    try:
-        directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    except OSError:
-        return  # Directory fsync is unavailable on Windows test hosts.
-    try:
-        os.fsync(directory)
-    except OSError:
-        return
+        closed = True
+        if not hasattr(os, "fchmod"):
+            os.chmod(temporary, 0o600)
+        try:
+            directory = os.open(
+                path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+        except OSError:
+            if os.name != "nt":
+                raise
+        os.replace(temporary, path)
+        published = True
+        if directory >= 0:
+            os.fsync(directory)
+    except BaseException:
+        if not closed:
+            os.close(descriptor)
+        if temporary.exists() and not temporary.is_symlink():
+            temporary.unlink()
+        # Receipt paths are new event identities.  If the final directory
+        # durability barrier fails, remove that newly published success
+        # record before reporting failure so no caller can mistake it for a
+        # durable containment receipt.
+        if published and new_target and path.exists() and not path.is_symlink():
+            path.unlink()
+            if directory >= 0:
+                try:
+                    os.fsync(directory)
+                except OSError:
+                    pass
+        raise
     finally:
-        os.close(directory)
+        if directory >= 0:
+            os.close(directory)
 
 
 def run_path(runs: Path, run_id: str) -> Path:
