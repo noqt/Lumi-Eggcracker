@@ -32,6 +32,12 @@ finally:
 
 
 class AiSmokeTests(unittest.TestCase):
+    def test_autonomous_approved_outcomes_exclude_termination(self) -> None:
+        self.assertTrue(autonomous_matrix.approved_outcome("RUNNING"))
+        self.assertTrue(autonomous_matrix.approved_outcome("COMPLETED_ALLOWED"))
+        self.assertFalse(autonomous_matrix.approved_outcome("TERMINATED"))
+        self.assertFalse(autonomous_matrix.approved_outcome("CONTAINMENT_FAILED"))
+
     def test_autonomous_cleanup_accepts_one_exact_benign_completion(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             runs = Path(raw)

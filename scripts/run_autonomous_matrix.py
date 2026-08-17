@@ -82,6 +82,10 @@ def percentile(values: list[float], percent: int) -> float:
     return ordered[max(0, (len(ordered) * percent + 99) // 100 - 1)]
 
 
+def approved_outcome(state: object) -> bool:
+    return state in {"RUNNING", "COMPLETED_ALLOWED"}
+
+
 def launch(user: str, argv: list[str]) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         ["/usr/sbin/runuser", "-u", user, "--", *argv],
@@ -199,8 +203,13 @@ def main() -> int:
                     time.sleep(2.5)
                     if set(DETECTIONS.glob("*.json")) - before:
                         raise RuntimeError("exact approved invocation was killed")
-                    if call(operator, ["status", "--name", run_name]).get("state") != "RUNNING":
-                        raise RuntimeError("exact approved invocation did not remain running")
+                    state = call(operator, ["status", "--name", run_name]).get("state")
+                    if not approved_outcome(state):
+                        raise RuntimeError("exact approved invocation was not allowed")
+                    # A small real model may finish its bounded context before
+                    # cleanup.  That is a successful approval outcome, not a
+                    # false kill, and no active cgroup remains to stop.
+                    started = state == "RUNNING"
                     results["approved"].append(approval_name)
                 finally:
                     if started:
