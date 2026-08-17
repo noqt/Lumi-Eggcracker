@@ -130,6 +130,7 @@ def main() -> int:
             "scripts/run_autonomous_matrix.py",
             "scripts/run_native_matrix.py",
             "scripts/run_p0_native.py",
+            "scripts/run_installer_p0.py",
             "scripts/benchmark_overhead.py",
             "scripts/verify_evidence.py",
             "scripts/package_evidence.py",

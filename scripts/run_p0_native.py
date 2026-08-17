@@ -15,6 +15,7 @@ import json
 import mmap
 import os
 import pwd
+import resource
 import secrets
 import shutil
 import signal
@@ -109,6 +110,20 @@ def fixture_evidence(argv: list[str]) -> int:
     parser.add_argument("--post-fds", type=int, default=0)
     parser.add_argument("--decoy-maps", type=int, default=0)
     args = parser.parse_args(argv)
+
+    # CPython's mmap object retains its own duplicate of the backing
+    # descriptor, so each decoy consumes two slots until teardown.
+    required_descriptors = (
+        args.pre_fds + args.post_fds + args.decoy_maps * 2 + 64
+    )
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if required_descriptors > hard_limit:
+        raise RuntimeError("fixture descriptor requirement exceeds the hard limit")
+    if soft_limit < required_descriptors:
+        resource.setrlimit(
+            resource.RLIMIT_NOFILE,
+            (required_descriptors, hard_limit),
+        )
 
     descriptors: list[int] = []
     mappings: list[mmap.mmap] = []
@@ -318,10 +333,22 @@ def fixture_exec(argv: list[str]) -> int:
         model = f"/proc/self/fd/{model_descriptor}"
         os.execve(args.runtime, runner_command(str(args.runtime), model), environment)
 
+    copied = False
     if args.mode in {"memfd-exec", "execveat-memfd"}:
         runtime_descriptor = os.memfd_create("p0-executable", flags=0)
     elif args.mode == "otmpfile-exec":
-        runtime_descriptor = os.open(args.work, os.O_TMPFILE | os.O_RDWR, 0o700)
+        writer = os.open(args.work, os.O_TMPFILE | os.O_RDWR, 0o700)
+        try:
+            copy_to_descriptor(args.runtime, writer)
+            os.fchmod(writer, 0o700)
+            # A regular O_TMPFILE held open for writing cannot be executed
+            # (ETXTBSY).  Reopen the same anonymous inode read-only through
+            # procfs before dropping the writer, preserving its pathless
+            # identity while producing a valid execution fixture.
+            runtime_descriptor = os.open(f"/proc/self/fd/{writer}", os.O_RDONLY)
+            copied = True
+        finally:
+            os.close(writer)
     elif args.mode == "deleted-exec":
         private = args.work / f"deleted-exec-{os.getpid()}"
         shutil.copyfile(args.runtime, private)
@@ -330,7 +357,7 @@ def fixture_exec(argv: list[str]) -> int:
         private.unlink()
     else:
         raise RuntimeError("unknown pathless execution mode")
-    if args.mode != "deleted-exec":
+    if args.mode != "deleted-exec" and not copied:
         copy_to_descriptor(args.runtime, runtime_descriptor)
         os.fchmod(runtime_descriptor, 0o700)
     marker(args.ready, {"pid": os.getpid(), "state": "READY"})
@@ -464,7 +491,6 @@ def launch_fixture(
 
 
 def wait_for_kills(
-    processes: list[subprocess.Popen[bytes]],
     target_pids: list[int],
     before: set[Path],
     expected: int,
@@ -474,11 +500,6 @@ def wait_for_kills(
     while time.monotonic() < deadline:
         values = receipts_after(before)
         if len(values) >= expected and not any(alive(pid) for pid in target_pids):
-            for process in processes:
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    pass
             return values
         time.sleep(0.05)
     raise RuntimeError(
@@ -581,7 +602,6 @@ class Campaign:
             gate.write_bytes(b"go\n")
             gate.chmod(0o444)
             receipts = wait_for_kills(
-                [process],
                 [int(identity["pid"])],
                 before,
                 1,
@@ -630,7 +650,6 @@ class Campaign:
             gate.write_bytes(b"go\n")
             gate.chmod(0o444)
             receipts = wait_for_kills(
-                [process],
                 [int(identity["pid"])],
                 before,
                 1,
@@ -685,7 +704,6 @@ class Campaign:
             gate.write_bytes(b"go\n")
             gate.chmod(0o444)
             receipts = wait_for_kills(
-                processes,
                 [int(item["pid"]) for item in identities],
                 before,
                 count,
@@ -740,7 +758,6 @@ class Campaign:
             gate.chmod(0o444)
             if role == "complete":
                 receipts = wait_for_kills(
-                    [process],
                     [int(identity["pid"]), *children],
                     before,
                     1,

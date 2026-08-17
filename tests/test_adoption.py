@@ -138,3 +138,37 @@ class AdoptionTests(unittest.TestCase):
             invoke(kill_error=True)
         with self.assertRaisesRegex(JsonInputError, "did not become empty"):
             invoke(kill_error=False, empty=proof)
+
+    def test_each_enforcement_stage_fault_prevents_a_success_result(self) -> None:
+        target = ProcessIdentity(10, 100)
+        identity = QuarantineIdentity(Path("/quarantine/aa"), 1, 2, "a" * 24)
+        proof = adoption.EmptyProof(True, 1, 0, [])
+        results = {
+            "open_pidfd": 17,
+            "stop_pidfd": 20,
+            "stop": 21,
+            "descendants": {target},
+            "create_quarantine": identity,
+            "_move": True,
+            "_validate": identity.path,
+            "kill_path": (30, 31),
+            "verify_empty": (32, proof),
+            "_remove": None,
+        }
+        for failed in results:
+            with self.subTest(stage=failed), ExitStack() as stack:
+                for name, result in results.items():
+                    stack.enter_context(
+                        patch.object(
+                            adoption,
+                            name,
+                            side_effect=OSError(f"injected {name}")
+                            if name == failed
+                            else None,
+                            return_value=result,
+                        )
+                    )
+                stack.enter_context(patch.object(adoption, "_kill"))
+                stack.enter_context(patch.object(adoption.os, "close"))
+                with self.assertRaisesRegex(OSError, f"injected {failed}"):
+                    contain_many({target}, Path("/quarantine"), "a" * 24)

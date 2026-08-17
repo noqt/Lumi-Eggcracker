@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,6 +51,38 @@ class RecordTests(unittest.TestCase):
 
             with patch(
                 "lumi_eggcracker.records.os.replace", side_effect=OSError("read only")
+            ), self.assertRaises(OSError):
+                write_atomic(target, {"result": "TERMINATED"})
+            self.assertFalse(target.exists())
+            self.assertEqual([], list(root.iterdir()))
+
+    def test_directory_durability_faults_do_not_publish_a_success_receipt(self) -> None:
+        real_open = os.open
+        real_fsync = os.fsync
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target = root / "receipt.json"
+
+            def fail_directory_open(path: object, flags: int, *args: object) -> int:
+                if Path(path) == root:
+                    raise OSError("directory unavailable")
+                return real_open(path, flags, *args)
+
+            with patch(
+                "lumi_eggcracker.records.os.open", side_effect=fail_directory_open
+            ), self.assertRaises(OSError):
+                write_atomic(target, {"result": "TERMINATED"})
+            self.assertFalse(target.exists())
+            self.assertEqual([], list(root.iterdir()))
+
+            def fail_directory_fsync(descriptor: int) -> None:
+                if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                    raise OSError("directory fsync failed")
+                real_fsync(descriptor)
+
+            with patch(
+                "lumi_eggcracker.records.os.fsync", side_effect=fail_directory_fsync
             ), self.assertRaises(OSError):
                 write_atomic(target, {"result": "TERMINATED"})
             self.assertFalse(target.exists())
