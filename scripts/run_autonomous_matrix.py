@@ -18,6 +18,7 @@ from smoke_content_ai import assets, command
 
 CLI = "/usr/local/bin/eggcracker"
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
+RUNS = Path("/var/lib/lumi-eggcracker/runs")
 
 
 def run(argv: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
@@ -93,7 +94,25 @@ def launch(user: str, argv: list[str]) -> subprocess.Popen[bytes]:
 def stop_selected(operator: str, name: str) -> None:
     receipt = Path(f"/tmp/lumi-autonomous-kill-{secrets.token_hex(8)}.json")
     try:
-        call(operator, ["kill", "--name", name, "--receipt", str(receipt)])
+        try:
+            call(operator, ["kill", "--name", name, "--receipt", str(receipt)])
+        except RuntimeError:
+            # The real runner can finish between the RUNNING status proof and
+            # this best-effort cleanup call.  Accept only one exact durable
+            # benign-completion record for that randomized run name; do not
+            # mask TERMINATED, containment-failure, or ambiguous states.
+            completed = []
+            for path in RUNS.glob("*.json"):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                try:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if value.get("name") == name:
+                    completed.append(value)
+            if len(completed) != 1 or completed[0].get("state") != "COMPLETED_ALLOWED":
+                raise
     finally:
         receipt.unlink(missing_ok=True)
 

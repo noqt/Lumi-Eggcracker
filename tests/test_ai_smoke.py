@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,9 +24,49 @@ def load_script(name: str):
 smoke = load_script("smoke_local_ai")
 content_smoke = load_script("smoke_content_ai")
 prepare = load_script("prepare_ai_smoke")
+sys.path.insert(0, str(ROOT / "scripts"))
+try:
+    autonomous_matrix = load_script("run_autonomous_matrix")
+finally:
+    sys.path.pop(0)
 
 
 class AiSmokeTests(unittest.TestCase):
+    def test_autonomous_cleanup_accepts_one_exact_benign_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runs = Path(raw)
+            (runs / "a.json").write_text(
+                json.dumps({"name": "approved-test", "state": "COMPLETED_ALLOWED"}),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(autonomous_matrix, "RUNS", runs),
+                mock.patch.object(
+                    autonomous_matrix,
+                    "call",
+                    side_effect=RuntimeError("workload name is unavailable"),
+                ),
+            ):
+                autonomous_matrix.stop_selected("operator", "approved-test")
+
+    def test_autonomous_cleanup_does_not_mask_termination(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runs = Path(raw)
+            (runs / "a.json").write_text(
+                json.dumps({"name": "approved-test", "state": "TERMINATED"}),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(autonomous_matrix, "RUNS", runs),
+                mock.patch.object(
+                    autonomous_matrix,
+                    "call",
+                    side_effect=RuntimeError("workload name is unavailable"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "workload name is unavailable"),
+            ):
+                autonomous_matrix.stop_selected("operator", "approved-test")
+
     def test_manifest_assets_must_match_their_recorded_digests(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
