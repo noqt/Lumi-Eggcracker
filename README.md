@@ -5,7 +5,7 @@
 Eggcracker is a privileged Linux enforcement daemon for a narrow,
 published catalogue of locally observed AI workloads.
 
-> Engineering preview: when a complete qualified match has no exact root approval,
+> Public release: when a complete qualified match has no exact root approval,
 > Eggcracker stops the process, captures the bounded related workload, and kills
 > its root-owned cgroup. Validate this exact release in a disposable Ubuntu VM
 > before installing it on a workstation or server.
@@ -56,7 +56,7 @@ target host. Do not transfer a qualification result between commits or hosts.
 
 ## Quick start
 
-0.5.0 is published as a Linux engineering preview. The historical `v0.4.0`
+0.5.0 is published as a Linux release. The historical `v0.4.0`
 tag is unchanged. The source tag and downloadable assets are bound to the
 qualified candidate commit `eb342808f56cdc213c0861726d5309a146965bef`.
 
@@ -79,6 +79,29 @@ python3 scripts/verify_release.py \
   --source-archive lumi-eggcracker-0.5.0-source.zip \
   --release-bundle ../lumi-eggcracker-0.5.0-linux.zip
 ```
+
+### Release signing
+
+The annotated `v0.5.0` tag was signed by the Eggcracker release key. Verify
+the key fingerprint before trusting the tag:
+
+```text
+5378 6DEB 0014 5995 6A2E 1B86 A3F2 9F7A 2763 6DC7
+```
+
+Import the public key published with the release, then verify the tag locally:
+
+```sh
+curl -fsSLO https://github.com/noqt/Lumi-Eggcracker/releases/download/v0.5.0/eggcracker-release-key.asc
+gpg --import eggcracker-release-key.asc
+gpg --fingerprint 53786DEB001459956A2E1B86A3F29F7A27636DC7
+git tag -v v0.5.0
+```
+
+The public key is also included in the release evidence pack. GitHub may show
+the tag as unverified until this key is registered with the publishing account;
+the local `gpg --fingerprint` and `git tag -v` checks above are the release
+verification path.
 
 After validation, extract `lumi-eggcracker-0.5.0-linux.zip`, compare the
 manifest commit to the reviewed source, and install through the isolated system
@@ -177,4 +200,4 @@ seconds with 1,000. Content inspection occurs on alternating scans, so high
 process density can create multi-second observation delay. Results are
 host-specific; run the bundled benchmark before deployment.
 
-See [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md), and [QUALIFICATION.md](QUALIFICATION.md) before using this engineering preview.
+See [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md), and [QUALIFICATION.md](QUALIFICATION.md) before using this release.
