@@ -56,20 +56,28 @@ target host. Do not transfer a qualification result between commits or hosts.
 
 ## Quick start
 
-0.5.0 is prepared as a new engineering-preview line; the historical `v0.4.0`
-tag is not moved. Until a reviewed 0.5.0 tag and release exist, evaluate an
-explicit reviewed commit in a disposable Ubuntu 24.04 VM and retain the
-generated manifest:
+0.5.0 is published as a Linux engineering preview. The historical `v0.4.0`
+tag is unchanged. The source tag and downloadable assets are bound to the
+qualified candidate commit `eb342808f56cdc213c0861726d5309a146965bef`.
+
+Clone the exact release tag and verify the durable release asset before
+installing it in a disposable Ubuntu 24.04 VM:
 
 ```sh
-git clone https://github.com/noqt/Lumi-Eggcracker.git
+git clone --branch v0.5.0 --depth 1 https://github.com/noqt/Lumi-Eggcracker.git
 cd Lumi-Eggcracker
-git checkout <reviewed-0.5.0-commit>
-python3 scripts/build_release.py --output dist/local
+test "$(git rev-parse HEAD)" = "eb342808f56cdc213c0861726d5309a146965bef"
+mkdir -p /tmp/eggcracker-0.5.0
+cd /tmp/eggcracker-0.5.0
+curl -fsSLO https://github.com/noqt/Lumi-Eggcracker/releases/download/v0.5.0/lumi-eggcracker-0.5.0-linux.zip
+unzip -q lumi-eggcracker-0.5.0-linux.zip
+cd lumi-eggcracker-0.5.0
+curl -fsSLO https://github.com/noqt/Lumi-Eggcracker/releases/download/v0.5.0/SHA256SUMS
+sha256sum -c SHA256SUMS
 python3 scripts/verify_release.py \
-  --artifact dist/local/lumi-eggcracker-0.5.0.pyz \
-  --source-archive dist/local/lumi-eggcracker-0.5.0-source.zip \
-  --release-bundle dist/local/lumi-eggcracker-0.5.0-linux.zip
+  --artifact lumi-eggcracker-0.5.0.pyz \
+  --source-archive lumi-eggcracker-0.5.0-source.zip \
+  --release-bundle ../lumi-eggcracker-0.5.0-linux.zip
 ```
 
 After validation, extract `lumi-eggcracker-0.5.0-linux.zip`, compare the
