@@ -23,6 +23,7 @@ LLAMA_COMMIT = "0b14b87d7c20cb753b94b96854dd7b45306fc696"
 MODEL_URL = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf"
 MODEL_SHA256 = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db"
 MODEL_NAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
 MAX_MODEL_BYTES = 600 * 1024 * 1024
 
 
@@ -120,6 +121,10 @@ def verify_manifest(workspace: Path) -> dict[str, Any]:
         raise RuntimeError("model provenance differs from the pinned smoke input")
     if digest(runner) != llama["sha256"] or runner.stat().st_size != llama["size"]:
         raise RuntimeError("runner digest or size differs from manifest")
+    if llama["sha256"] != QUALIFIED_LLAMA_SHA256:
+        raise RuntimeError(
+            "runner is not the qualified release build; use /opt/lumi-eggcracker-ai-smoke"
+        )
     if digest(gguf) != MODEL_SHA256 or gguf.stat().st_size != model["size"]:
         raise RuntimeError("model digest or size differs from manifest")
     return value

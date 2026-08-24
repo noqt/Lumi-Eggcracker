@@ -1,6 +1,6 @@
-# Lumi Eggcracker 0.5.0
+# Lumi Eggcracker 0.5.0 — The kill switch outside the sandbox
 
-0.5.0 is a new engineering-preview release line and does not move or replace
+0.5.0 is a public-alpha release line and does not move or replace
 the historical `v0.4.0` tag. It closes the independent release-review items:
 the Linux artifact-cache regression, exact artifact/source/manifest identity,
 root-isolated installer execution, descriptor-bound installation, portable
@@ -34,4 +34,4 @@ The mandatory synchronous startup scan is now accounted as the first healthy com
 
 Native autonomous qualification now waits boundedly through truthful between-scan `UNSUPPORTED` responses after the restart matrix instead of misclassifying that fail-closed health window as a product failure.
 
-The release remains a Linux engineering preview. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.
+The release remains a deliberately narrow Linux public alpha. It does not claim universal AI recognition, behavioural detection, network isolation, malware prevention or EDR replacement. The existing real-AI assets remain external and are not distributed in release archives.

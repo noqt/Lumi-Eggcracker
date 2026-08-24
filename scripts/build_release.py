@@ -108,6 +108,8 @@ def main() -> int:
         ROOT / "scripts" / "uninstall.py": "scripts/uninstall.py",
         ROOT / "scripts" / "verify_uninstalled.py": "scripts/verify_uninstalled.py",
         ROOT / "scripts" / "verify_release.py": "scripts/verify_release.py",
+        ROOT / "scripts" / "first_kill.py": "scripts/first_kill.py",
+        ROOT / "scripts" / "support_bundle.py": "scripts/support_bundle.py",
         ROOT / "scripts" / "prepare_ai_smoke.py": "scripts/prepare_ai_smoke.py",
         ROOT / "scripts" / "prepare_safetensors_smoke.py": "scripts/prepare_safetensors_smoke.py",
         ROOT / "scripts" / "ai_smoke_worker.py": "scripts/ai_smoke_worker.py",

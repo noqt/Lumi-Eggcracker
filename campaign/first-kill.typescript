@@ -1,0 +1,24 @@
+Script started on 2026-08-24 18:09:42+10:00 [COMMAND="/usr/bin/python3 -I -S /tmp/eggcracker-campaign-repo-test/scripts/first_kill.py --operator lumi --workspace /home/lumi/eggcracker-first-kill --ai-workspace /opt/lumi-eggcracker-ai-smoke --accept-third-party-downloads --demo-delay-seconds 56 --remove" TERM="xterm-256color" TTY="/dev/pts/0" COLUMNS="80" LINES="24"]
+[eggcracker] checking Linux, cgroup-v2, pidfd and clean-install compatibility
+[eggcracker] downloading and checking signed v0.5.0 release assets
+[eggcracker] signature and release identity verified: v0.5.0 -> eb342808f56cdc213c0861726d5309a146965bef
+[eggcracker] installing the root-controlled supervisor
+[eggcracker] preparing the pinned real local-AI smoke assets (explicit third-party download)
+[eggcracker] launching an unapproved model and waiting for the complete-tree kill
+[eggcracker] real unapproved AI workload started (pid 1526)
+[eggcracker] workload state: RUNNING; waiting for Eggcracker detection
+{
+  "captured_processes": 1,
+  "primitive": "pidfd-stop+cgroup.kill",
+  "profile": "content.gguf-llama",
+  "result": "TERMINATED",
+  "root_populated": 0,
+  "surviving_pids": [],
+  "trigger": "UNAPPROVED_AI_MATCH",
+  "trigger_to_empty_ms": 35.426071
+}
+[eggcracker] first-kill demonstration passed: the real workload was terminated and its canary survived
+[eggcracker] removing Eggcracker and temporary smoke assets
+[eggcracker] clean removal passed
+
+Script done on 2026-08-24 18:10:45+10:00 [COMMAND_EXIT_CODE="0"]

@@ -141,13 +141,29 @@ def command(runner: Path, model: Path) -> list[str]:
     ]
 
 
-def launch(user: str, wrapper: Path, argv: list[str], output: Path) -> subprocess.Popen[bytes]:
+def launch(
+    user: str,
+    wrapper: Path,
+    argv: list[str],
+    output: Path,
+    library_path: Path,
+) -> subprocess.Popen[bytes]:
     handle = output.open("wb")
     try:
         # The wrapper is deliberately unfamiliar and replaces itself; the
         # observed executable/argv0 is a copied random filename, not Python.
         return subprocess.Popen(
-            ["/usr/sbin/runuser", "-u", user, "--", "/usr/bin/python3", str(wrapper), *argv],
+            [
+                "/usr/sbin/runuser",
+                "-u",
+                user,
+                "--",
+                "/usr/bin/env",
+                f"LD_LIBRARY_PATH={library_path}",
+                "/usr/bin/python3",
+                str(wrapper),
+                *argv,
+            ],
             stdout=handle,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -194,7 +210,7 @@ def one(
         run_name = f"content-run-{index}-{secrets.token_hex(4)}"
         try:
             before = set(DETECTIONS.glob("*.json"))
-            unapproved = launch(user, wrapper, final_argv, output)
+            unapproved = launch(user, wrapper, final_argv, output, runner.parent)
             first = receipt_after(before)
             stop(unapproved)
             unapproved = None
@@ -259,7 +275,7 @@ def one(
             allowed_started = False
             control(operator, ["revoke", "--name", name])
             before = set(DETECTIONS.glob("*.json"))
-            unapproved = launch(user, wrapper, final_argv, output)
+            unapproved = launch(user, wrapper, final_argv, output, runner.parent)
             second = receipt_after(before)
             stop(unapproved)
             unapproved = None

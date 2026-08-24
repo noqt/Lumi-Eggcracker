@@ -13,6 +13,7 @@ from .client import request
 from .gate import main as gate_main
 from .jsonio import JsonInputError, write_new_json
 from .supervisor import main as supervisor_main
+from .support_bundle import main as support_bundle_main
 from .watchdog import main as watchdog_main
 
 
@@ -40,6 +41,10 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("approvals", help="list exact AI runtime approvals")
     commands.add_parser("detections", help="list autonomous containment summaries")
     commands.add_parser("doctor", help="check the installed protected supervisor")
+    support = commands.add_parser(
+        "support-bundle", help="write a local redacted health and receipt bundle"
+    )
+    support.add_argument("--output", required=True, type=Path)
     commands.add_parser("version", help="print the public version")
     return parser
 
@@ -60,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "version":
         print(__version__)
         return 0
+    if args.command == "support-bundle":
+        return support_bundle_main(args.output)
     try:
         if args.command == "doctor":
             value = request("doctor")
