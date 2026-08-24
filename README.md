@@ -1,31 +1,66 @@
 # Lumi Eggcracker
 
+[![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
+
+[v0.5.0 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v0.5.0)
+· [Run the first kill](#run-the-first-kill)
+· [Design-partner Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions)
+· [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
+
 ## The kill switch outside the sandbox
 
-Eggcracker is a Linux guard for local AI. It watches for a complete,
+Lumi Eggcracker is a Linux guard for local AI. It watches for a complete,
 unapproved AI workload, stops it automatically, kills its whole cgroup-v2
 process tree, and leaves a bounded receipt proving the tree is empty.
 
-> **Seeking three design partners**
+> **Run the kill. Find the miss.**
 >
-> We are looking for three people or small teams running local models who will
-> try Eggcracker on a disposable Ubuntu machine, tell us where it helps, and
-> show us what it misses. There is no telemetry, no paid plan, and no sales
-> call. Open a [design-partner discussion](https://github.com/noqt/Lumi-Eggcracker/discussions)
-> with your Linux version and the local-AI workflow you want to protect.
+> On a disposable native Ubuntu host, the first-kill path verifies the signed
+> v0.5.0 Release, launches a pinned real Qwen workload, and shows whether
+> Eggcracker terminates the complete process tree while an unrelated canary
+> survives. We are opening three design-partner places for people who will run
+> it, challenge the two supported profiles, and report friction or a
+> reproducible miss. There is no telemetry, paid plan or sales call.
 
-### See the first kill
+## Run the first kill
 
 The public demonstration launches a real Qwen model through a pinned
 llama.cpp runner, shows it running, lets Eggcracker recognise the unapproved
 workload, and prints the post-kill receipt. It also checks that an unrelated
 canary survives.
 
-The 62-second terminal capture is in [`campaign/first-kill.typescript`](campaign/first-kill.typescript)
-with [`campaign/first-kill.timing`](campaign/first-kill.timing). Replay it on
-Linux with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.typescript`.
+The recorded 62-second run produced this bounded result:
 
-Run it on a disposable native Ubuntu machine:
+```text
+[eggcracker] signature and release identity verified: v0.5.0 -> eb342808f56cdc213c0861726d5309a146965bef
+{
+  "primitive": "pidfd-stop+cgroup.kill",
+  "profile": "content.gguf-llama",
+  "result": "TERMINATED",
+  "root_populated": 0,
+  "surviving_pids": [],
+  "trigger_to_empty_ms": 35.426071
+}
+[eggcracker] first-kill demonstration passed: the real workload was terminated and its canary survived
+[eggcracker] clean removal passed
+```
+
+The complete terminal capture is in
+[`campaign/first-kill.typescript`](campaign/first-kill.typescript) with its
+[`campaign/first-kill.timing`](campaign/first-kill.timing). Replay it on Linux
+with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.typescript`.
+
+### Prerequisites and safety
+
+Use a disposable, supported native Ubuntu machine whose loss is acceptable.
+The demonstration requires root, systemd, unified cgroup v2 with `cgroup.kill`,
+pidfds, Python 3.11+, Git, GnuPG, CMake, a native C/C++ build toolchain and
+network access. It changes root-owned system services, compiles the pinned
+llama.cpp runner, downloads signed release assets, and—only after the explicit
+flag—downloads the third-party Qwen model. Do not begin on a workstation,
+shared host, production server, or machine carrying private data.
+
+Clone public `main` and run:
 
 ```sh
 git clone https://github.com/noqt/Lumi-Eggcracker.git
@@ -40,7 +75,10 @@ release assets, installs the root-controlled supervisor, downloads the pinned
 demo model only after the explicit acceptance flag, launches the real model,
 prints the kill receipt, and offers clean removal. Use `--remove` for a
 non-interactive removal or `--keep` to inspect the installation after the
-demonstration.
+demonstration. If the supported path fails, open a
+[reproducible bug](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=bug_report.yml)
+with a redacted support bundle; route security-sensitive findings through
+[private vulnerability reporting](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new).
 
 ## What Eggcracker does
 
@@ -72,7 +110,7 @@ fallback.
 
 ## Support bundle
 
-If a design partner needs help, create a local JSON bundle containing host
+To make a report reproducible, create a local JSON bundle containing host
 compatibility, supervisor health, workload counts and redacted detection
 summaries:
 
@@ -100,15 +138,18 @@ Read [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md),
 and [QUALIFICATION.md](QUALIFICATION.md) before installing on a machine that
 matters.
 
-## Development
+## Develop and contribute
 
-The source is Apache-2.0. Run the unit suite with Python 3.11+ and use a
-native Ubuntu host for cgroup and real-model integration tests. The project
-keeps recognition separate from deterministic containment so a new detector
-cannot silently weaken the kill proof.
+The source is [Apache-2.0](LICENSE). Run the unit suite with Python 3.11+ and
+use a disposable native Ubuntu host for cgroup and real-model integration
+tests. The project keeps recognition separate from deterministic containment
+so a new detector cannot silently weaken the kill proof. Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change.
 
-Questions, reproductions and design-partner reports belong in
-[Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions). Report
-security vulnerabilities privately through the repository security channel;
-do not post credentials, private model files or exploit details in a public
-issue.
+Questions and design-partner reports belong in
+[Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions); reproducible
+non-security defects belong in [Issues](https://github.com/noqt/Lumi-Eggcracker/issues).
+Report security vulnerabilities privately through the
+[repository security channel](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new).
+Do not post credentials, private model files, raw process arguments or exploit
+details publicly.
