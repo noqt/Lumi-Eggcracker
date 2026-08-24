@@ -19,7 +19,6 @@ This code applies in repository Issues, Discussions, pull requests and other
 project spaces. Maintainers may edit, hide or remove material and restrict
 participation when needed to protect people or the project.
 
-Use GitHub's built-in reporting tools for abusive content. For a sensitive
-project-specific concern, use the
-[private repository channel](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
-and label it as a community-conduct report rather than a vulnerability.
+Use GitHub's built-in content-reporting, blocking and abuse-reporting tools for
+conduct concerns. The private vulnerability channel is reserved for product
+security reports and is not a general conduct-reporting inbox.

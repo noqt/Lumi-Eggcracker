@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a reproducible Eggcracker defect
+description: Report a reproducible Lumi Eggcracker defect
 title: "[Bug]: "
 labels: [bug]
 body:
@@ -24,7 +24,7 @@ body:
     id: description
     attributes:
       label: What happened?
-      description: Include the command, expected result and actual result.
+      description: Include a redacted command or action, expected result and actual result. Remove private paths, arguments and environments.
     validations:
       required: true
   - type: textarea
