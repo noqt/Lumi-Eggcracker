@@ -1,4 +1,4 @@
-# Eggcracker repository instructions
+# Lumi Eggcracker repository instructions
 
 These instructions apply to the whole repository. A deeper `AGENTS.md` may add
 narrower rules for its subtree, but it may not relax the safety, evidence,
@@ -35,7 +35,7 @@ systemd/cgroup-v2 capabilities, operator, commit, artifacts, and cleanup result.
 Never run destructive qualification on a workstation, server, shared host, or
 non-disposable environment.
 
-Exactly two profiles are active in version 0.4.0:
+Exactly two profiles are active in version 0.5.0:
 
 - `content.gguf-llama`: a bounded plausible GGUF v2/v3 header plus either the
   qualified llama.cpp/GGML ELF marker pair or the exact pinned launcher build
@@ -71,20 +71,20 @@ Do not generalise a fixture, internal Windows control run, one Linux host, CI
 run, or receipt into universal capability, native qualification on another
 host, independent installation, adoption, demand, or safety assurance.
 
-Current release snapshot, recorded 12 August 2026 and requiring revalidation
-before any external use:
+Current release snapshot, recorded 25 August 2026 and requiring exact-identity
+revalidation before a new external claim:
 
-- public annotated `v0.4.0` and its CI run are bound to
-  `418f877f0d450aeb26d4a1233257746808c490e5`; the recorded CI passed Ruff,
-  69 unit tests, build, and release verification;
-- no matching GitHub Release was observed; and
-- local commit `a3ad746682c89599ce582cd97acf5a99742dc3aa` is an unpushed
-  attribution-only descendant. Its exact candidate has **internal Windows
-  control evidence** accepted by a separate internal control reviewer for Ruff,
-  69 tests with three documented Windows skips, build/release verification,
-  hashes, archive identity, and preservation. This was an internal control
-  review, not an independent external audit or assessment. It is not public,
-  native-Linux qualification, independent use, or market evidence.
+- signed public tag `v0.5.0` points to
+  `eb342808f56cdc213c0861726d5309a146965bef` and has a matching GitHub Release
+  with the published Linux bundle, source archive, zipapp, manifest, checksums
+  and release public key;
+- public `main` at
+  `636050879bba56baea2d724b62f61544e48b48d1` incorporates the v0.5.0 line and
+  the bounded first-kill campaign surface; and
+- v0.5.0 has accepted commit- and host-bound internal qualification evidence,
+  including the release gates in `QUALIFICATION.md`. It remains a public alpha,
+  not an independent external audit, customer adoption, universal coverage or
+  safety assurance.
 
 ## Proportional verification
 
@@ -116,12 +116,14 @@ location, hash them, and stage only an explicit intended file list.
 
 Preserve established repository, package, command, socket, policy, receipt,
 manifest, artifact, and schema identifiers unless an authorised compatibility
-plan proves the transition. The project is Apache-2.0: retain `LICENSE` and all
-applicable notices and third-party terms. Do not change legal holders,
-copyright/attribution, licence posture, or add a materially licensed dependency
-without the corresponding reserved review and authority. Do not invent,
-introduce, or infer a current company brand; preserve existing product and
-technical identifiers where compatibility or provenance requires them.
+plan proves the transition. The definitive current public product name is
+**Lumi Eggcracker**; `Eggcracker` is shorthand only after the full name is
+introduced, and `Taipan` is a historical internal planning identifier rather
+than a current public brand. Do not use trade-mark symbols or claim clearance,
+registration, exclusivity or non-infringement. The project is Apache-2.0:
+retain `LICENSE` and all applicable notices and third-party terms. Do not change
+legal holders, copyright/attribution, licence posture, or add a materially
+licensed dependency without the corresponding reserved review and authority.
 
 Local branches, permanent worktrees, commits, test artifacts, and release
 preparation are not pushes, tags, GitHub Releases, deployments, publication, or

@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lumi-eggcracker"
 dynamic = ["version"]
-description = "A local Linux kill switch for unapproved supported AI and agent runtimes"
+description = "A native Linux cgroup-v2 kill switch for unapproved supported local-AI workloads"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = []
-keywords = ["ai", "ai-security", "agents", "cgroups", "kill-switch", "linux", "local-ai", "sandbox"]
+keywords = ["ai", "ai-security", "cgroups", "kill-switch", "linux", "local-ai", "process-containment", "runtime-security", "systemd"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
