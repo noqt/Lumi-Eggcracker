@@ -4,6 +4,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import tempfile
 import unittest
 import zipfile
@@ -72,6 +73,21 @@ class FirstKillTests(unittest.TestCase):
         ):
             first_kill.main(["--preflight-only", "--keep"])
         self.assertEqual(2, raised.exception.code)
+
+    def test_preflight_error_redacts_sudo_user_identity(self) -> None:
+        canary = "operator-identity-must-not-appear"
+        errors = io.StringIO()
+        passwd = mock.Mock()
+        passwd.getpwnam.side_effect = KeyError(canary)
+        with (
+            mock.patch.object(first_kill, "pwd", passwd),
+            mock.patch.dict(os.environ, {"SUDO_USER": canary}),
+            contextlib.redirect_stderr(errors),
+        ):
+            result = first_kill.main(["--preflight-only"])
+        self.assertEqual(2, result)
+        self.assertNotIn(canary, errors.getvalue())
+        self.assertIn("operator account does not exist", errors.getvalue())
 
     def test_local_release_identity_requires_annotated_pinned_tag(self) -> None:
         annotated = mock.Mock(returncode=0, stdout="tag\n")

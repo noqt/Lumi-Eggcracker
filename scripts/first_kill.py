@@ -168,7 +168,7 @@ def operator_name(explicit: str | None) -> str:
     try:
         account = pwd.getpwnam(value)
     except KeyError as error:
-        raise FirstKillError(f"operator account does not exist: {value}") from error
+        raise FirstKillError("operator account does not exist") from error
     if account.pw_uid == 0:
         raise FirstKillError("the operator must be a non-root login")
     return value
@@ -203,7 +203,7 @@ def compatibility(operator: str) -> None:
             raise FirstKillError("first-kill requires the POSIX passwd database")
         pwd.getpwnam(operator)
     except KeyError as error:
-        raise FirstKillError(f"operator account does not exist: {operator}") from error
+        raise FirstKillError("operator account does not exist") from error
 
 
 def repository_root() -> Path:
