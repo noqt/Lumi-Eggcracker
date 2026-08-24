@@ -116,6 +116,8 @@ def main() -> int:
             "scripts/uninstall.py",
             "scripts/verify_uninstalled.py",
             "scripts/verify_release.py",
+            "scripts/first_kill.py",
+            "scripts/support_bundle.py",
             "scripts/prepare_ai_smoke.py",
             "scripts/prepare_safetensors_smoke.py",
             "scripts/ai_smoke_worker.py",

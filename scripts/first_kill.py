@@ -1,0 +1,659 @@
+"""Run the public first-kill demonstration from a clean Linux host.
+
+This is deliberately a small campaign wrapper around the qualified release
+installer and real-AI smoke scripts. It does not weaken installer checks,
+overwrite an existing installation, or send telemetry anywhere.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import platform
+import secrets
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+import zipfile
+from pathlib import Path
+from typing import Any
+
+try:
+    import pwd
+except ImportError:  # pragma: no cover - first-kill is a native Linux command
+    pwd = None  # type: ignore[assignment]
+
+
+REPOSITORY = "noqt/Lumi-Eggcracker"
+DEFAULT_TAG = "v0.5.0"
+RELEASE_KEY_FINGERPRINT = "53786DEB001459956A2E1B86A3F29F7A27636DC7"
+WORKLOAD_USER = "lumi-eggcracker-workload"
+INSTALL_TARGETS = (
+    Path("/usr/local/lib/lumi-eggcracker"),
+    Path("/usr/local/bin/eggcracker"),
+    Path("/etc/lumi-eggcracker"),
+    Path("/var/lib/lumi-eggcracker"),
+    Path("/run/lumi-eggcracker"),
+    Path("/run/lumi-eggcracker-watchdog"),
+    Path("/etc/systemd/system/lumi-eggcracker.service"),
+    Path("/etc/systemd/system/lumi-eggcracker-watchdog.service"),
+)
+MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
+DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
+DEFAULT_AI_SMOKE_WORKSPACE = Path("/opt/lumi-eggcracker-ai-smoke")
+QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
+
+
+class FirstKillError(RuntimeError):
+    """A user-actionable campaign failure."""
+
+
+def say(message: str) -> None:
+    print(f"[eggcracker] {message}", flush=True)
+
+
+def run(
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    timeout: float = 120,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise FirstKillError(f"could not run {' '.join(argv)}: {error}") from error
+    if check and result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise FirstKillError(detail or f"command failed: {' '.join(argv)}")
+    return result
+
+
+def digest(path: Path) -> str:
+    value = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(64 * 1024), b""):
+                value.update(block)
+    except OSError as error:
+        raise FirstKillError(f"cannot read {path}") from error
+    return value.hexdigest()
+
+
+def parse_checksums(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="ascii").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        raise FirstKillError("release SHA256SUMS is unreadable") from error
+    for line in lines:
+        fields = line.split(maxsplit=1)
+        if len(fields) != 2 or len(fields[0]) != 64:
+            raise FirstKillError("release SHA256SUMS contains an invalid line")
+        values[fields[1].removeprefix("*")] = fields[0].lower()
+    if not values:
+        raise FirstKillError("release SHA256SUMS is empty")
+    return values
+
+
+def safe_extract(archive: Path, destination: Path) -> None:
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            members = bundle.infolist()
+            for member in members:
+                candidate = (destination / member.filename).resolve()
+                if not candidate.is_relative_to(destination.resolve()):
+                    raise FirstKillError("release bundle contains an unsafe path")
+            bundle.extractall(destination)
+    except (OSError, zipfile.BadZipFile) as error:
+        raise FirstKillError("release bundle is not a valid ZIP archive") from error
+
+
+def download(url: str, destination: Path, *, maximum: int = MAX_DOWNLOAD_BYTES) -> None:
+    if not url.startswith("https://"):
+        raise FirstKillError("refusing a non-HTTPS release URL")
+    request = urllib.request.Request(url, headers={"User-Agent": "Eggcracker-first-kill"})
+    temporary = destination.with_name(f".{destination.name}.download")
+    temporary.unlink(missing_ok=True)
+    total = 0
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, temporary.open("xb") as handle:
+            if not str(response.url).startswith("https://"):
+                raise FirstKillError("release download redirected away from HTTPS")
+            while block := response.read(64 * 1024):
+                total += len(block)
+                if total > maximum:
+                    raise FirstKillError(f"release asset exceeds {maximum} bytes")
+                handle.write(block)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    except (OSError, urllib.error.URLError) as error:
+        raise FirstKillError(f"could not download {url}: {error}") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def require_regular(path: Path, description: str) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise FirstKillError(f"{description} is missing: {path}") from error
+    if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise FirstKillError(f"{description} must be a regular file: {path}")
+
+
+def operator_name(explicit: str | None) -> str:
+    if pwd is None:
+        raise FirstKillError("first-kill requires the POSIX passwd database")
+    value = explicit or os.environ.get("SUDO_USER")
+    if not value or value == "root":
+        raise FirstKillError("run through sudo and pass --operator <your-login>")
+    try:
+        account = pwd.getpwnam(value)
+    except KeyError as error:
+        raise FirstKillError(f"operator account does not exist: {value}") from error
+    if account.pw_uid == 0:
+        raise FirstKillError("the operator must be a non-root login")
+    return value
+
+
+def compatibility(operator: str) -> None:
+    if os.geteuid() != 0:
+        raise FirstKillError("run as root, for example: sudo python3 scripts/first_kill.py ...")
+    if platform.system() != "Linux":
+        raise FirstKillError("first-kill requires native Linux; Windows and macOS are unsupported")
+    controllers = Path("/sys/fs/cgroup/cgroup.controllers")
+    if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split():
+        raise FirstKillError("unified cgroup v2 with the pids controller is required")
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise FirstKillError("this Python/Linux host lacks the required pidfd primitives")
+    for binary in ("/usr/bin/python3", "/usr/bin/systemctl", "/usr/bin/systemd-run", "/usr/sbin/runuser", "/usr/bin/gpg", "/usr/bin/git"):
+        if not Path(binary).is_file():
+            raise FirstKillError(f"required host command is missing: {binary}")
+    for target in INSTALL_TARGETS:
+        if target.exists() or target.is_symlink():
+            raise FirstKillError(f"refusing to overwrite an existing installation target: {target}")
+    try:
+        if pwd is None:
+            raise FirstKillError("first-kill requires the POSIX passwd database")
+        pwd.getpwnam(operator)
+    except KeyError as error:
+        raise FirstKillError(f"operator account does not exist: {operator}") from error
+
+
+def repository_root() -> Path:
+    root = Path(__file__).resolve().parents[1]
+    probe = run(["/usr/bin/git", "-C", str(root), "rev-parse", "--is-inside-work-tree"], check=False)
+    if probe.returncode or probe.stdout.strip() != "true":
+        raise FirstKillError("first-kill must be run from a Git checkout containing the signed tag")
+    return root
+
+
+def verify_tag(root: Path, tag: str, key: Path) -> str:
+    gpg_home = Path(tempfile.mkdtemp(prefix="eggcracker-gpg-"))
+    os.chmod(gpg_home, 0o700)
+    try:
+        imported = run(["/usr/bin/gpg", "--homedir", str(gpg_home), "--batch", "--import", str(key)])
+        if imported.returncode:
+            raise FirstKillError(imported.stderr.strip() or "release public key import failed")
+        shown = run(
+            ["/usr/bin/gpg", "--homedir", str(gpg_home), "--batch", "--with-colons", "--show-keys", str(key)]
+        )
+        fingerprints = [line.split(":")[9].upper() for line in shown.stdout.splitlines() if line.startswith("fpr:")]
+        if RELEASE_KEY_FINGERPRINT not in fingerprints:
+            raise FirstKillError("downloaded release key fingerprint does not match the published fingerprint")
+        env = os.environ.copy()
+        env["GNUPGHOME"] = str(gpg_home)
+        verified = run(["/usr/bin/git", "-C", str(root), "tag", "-v", tag], env=env, check=False)
+        if verified.returncode:
+            detail = (verified.stderr or verified.stdout).strip()
+            raise FirstKillError(f"signed tag verification failed: {detail}")
+        commit = run(["/usr/bin/git", "-C", str(root), "rev-parse", f"{tag}^{{}}"])
+        return commit.stdout.strip()
+    finally:
+        shutil.rmtree(gpg_home, ignore_errors=True)
+
+
+def release_files(tag: str, workspace: Path) -> tuple[Path, Path]:
+    version = tag.removeprefix("v")
+    if not version.replace(".", "").isdigit() or version.count(".") != 2:
+        raise FirstKillError("tag must look like v0.5.0")
+    base = f"https://github.com/{REPOSITORY}/releases/download/{tag}"
+    sums = workspace / "SHA256SUMS"
+    bundle = workspace / f"lumi-eggcracker-{version}-linux.zip"
+    key = workspace / "eggcracker-release-key.asc"
+    download(f"{base}/SHA256SUMS", sums, maximum=64 * 1024)
+    expected = parse_checksums(sums)
+    download(f"{base}/{bundle.name}", bundle, maximum=8 * 1024 * 1024)
+    download(f"{base}/{key.name}", key, maximum=64 * 1024)
+    if expected.get(bundle.name) != digest(bundle):
+        raise FirstKillError("downloaded Linux bundle does not match release SHA256SUMS")
+    require_regular(key, "release public key")
+    if b"BEGIN PGP PRIVATE KEY BLOCK" in key.read_bytes():
+        raise FirstKillError("release key asset unexpectedly contains private key material")
+    return bundle, key
+
+
+def extracted_release(bundle: Path, workspace: Path) -> Path:
+    extraction = workspace / "release"
+    extraction.mkdir(mode=0o700)
+    safe_extract(bundle, extraction)
+    roots = [item for item in extraction.iterdir() if item.is_dir()]
+    if len(roots) != 1:
+        raise FirstKillError("release bundle has an unexpected top-level layout")
+    root = roots[0]
+    require_regular(root / "release-manifest.json", "release manifest")
+    require_regular(root / "SHA256SUMS", "embedded SHA256SUMS")
+    require_regular(root / f"{root.name}.pyz", "release artifact")
+    return root
+
+
+def manifest(release_root: Path) -> dict[str, Any]:
+    try:
+        value = json.loads((release_root / "release-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise FirstKillError("release manifest is invalid") from error
+    if not isinstance(value, dict) or value.get("version") != release_root.name.removeprefix("lumi-eggcracker-"):
+        raise FirstKillError("release manifest version does not match the bundle")
+    return value
+
+
+def install_release(release_root: Path, operator: str, release: dict[str, Any]) -> None:
+    artifact = release_root / str(release["artifact"])
+    installer = release_root / "scripts" / "install.py"
+    require_regular(artifact, "release artifact")
+    require_regular(installer, "release installer")
+    run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            str(installer),
+            "--operator",
+            operator,
+            "--artifact",
+            str(artifact),
+            "--expected-sha256",
+            str(release["sha256"]),
+        ],
+        timeout=180,
+    )
+
+
+def installed_workload_user() -> str:
+    if pwd is None:
+        raise FirstKillError("first-kill requires the POSIX passwd database")
+    path = Path("/var/lib/lumi-eggcracker/install-manifest.json")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        result = value["workload_user"]
+        pwd.getpwnam(result)
+    except (OSError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise FirstKillError("installed workload identity cannot be verified") from error
+    if result != WORKLOAD_USER:
+        raise FirstKillError("installed workload identity is not the dedicated Eggcracker account")
+    return result
+
+
+def wait_for_receipt(before: set[Path], *, timeout: float = 240) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for path in sorted(DETECTIONS.glob("*.json"), key=lambda item: item.stat().st_mtime_ns):
+            if path in before:
+                continue
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict) and value.get("result") == "TERMINATED":
+                return value
+        time.sleep(0.02)
+    raise FirstKillError("the real AI workload produced no TERMINATED receipt within 240 seconds")
+
+
+def run_real_smoke(
+    release_root: Path,
+    workspace: Path,
+    workload_user: str,
+    assets_workspace: Path,
+    demo_delay_seconds: float = 0,
+) -> dict[str, Any]:
+    assets_script = release_root / "scripts" / "prepare_ai_smoke.py"
+    run(
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            str(assets_script),
+            "--workspace",
+            str(assets_workspace),
+            "--accept-third-party-downloads",
+        ],
+        timeout=1800,
+    )
+    manifest_path = assets_workspace / "ai-smoke-assets.json"
+    require_regular(manifest_path, "AI smoke asset manifest")
+    try:
+        asset_value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        runner = Path(asset_value["llama"]["path"])
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise FirstKillError("AI smoke asset manifest has no usable runner path") from error
+    if runner.is_symlink() or not runner.is_file():
+        raise FirstKillError("pinned AI smoke runner is not a regular file")
+    if digest(runner) != QUALIFIED_LLAMA_SHA256:
+        raise FirstKillError(
+            "the prepared llama.cpp runner is not the qualified release build; "
+            "use the default /opt/lumi-eggcracker-ai-smoke workspace"
+        )
+    fixture = Path(tempfile.mkdtemp(prefix="eggcracker-first-kill-fixture-", dir="/tmp"))
+    os.chmod(fixture, 0o711)
+    runner_copy = fixture / secrets.token_hex(12)
+    model_copy = fixture / secrets.token_hex(12)
+    wrapper = fixture / f"{secrets.token_hex(8)}.py"
+    output = fixture / "model-output"
+    shutil.copyfile(runner, runner_copy)
+    os.chmod(runner_copy, 0o755)
+    # The asset workspace is root-private by design. Copy the runner's shared
+    # libraries into the public fixture so the dedicated workload identity can
+    # execute the real binary without granting it access to the asset cache.
+    for library in runner.parent.glob("lib*.so*"):
+        if library.is_symlink() or library.is_file():
+            shutil.copyfile(library, fixture / library.name)
+    try:
+        os.link(Path(asset_value["model"]["path"]), model_copy)
+    except OSError:
+        shutil.copyfile(Path(asset_value["model"]["path"]), model_copy)
+    os.chmod(model_copy, 0o644)
+    wrapper.write_text(
+        "import os,sys,time\n"
+        "delay=float(os.environ.get('EGGCRACKER_FIRST_KILL_DELAY','0'))\n"
+        "if delay: time.sleep(delay)\n"
+        "os.execv(sys.argv[1], sys.argv[1:])\n",
+        encoding="utf-8",
+    )
+    command = [
+        str(runner_copy),
+        "-m",
+        str(model_copy),
+        "-p",
+        "Name one Linux cgroup property.",
+        "-n",
+        "4096",
+        "-t",
+        "12",
+        "-tb",
+        "12",
+        "-c",
+        "512",
+        "--simple-io",
+        "--single-turn",
+        "--no-warmup",
+        "--no-display-prompt",
+        "--ignore-eos",
+        "--seed",
+        "1234",
+    ]
+    before = set(DETECTIONS.glob("*.json"))
+    canary = subprocess.Popen(["/bin/sleep", "180"], start_new_session=True)
+    workload: subprocess.Popen[bytes] | None = None
+    handle = output.open("wb")
+    try:
+        workload = subprocess.Popen(
+            [
+                "/usr/sbin/runuser",
+                "-u",
+                workload_user,
+                "--",
+                "/usr/bin/env",
+                f"LD_LIBRARY_PATH={fixture}",
+                f"EGGCRACKER_FIRST_KILL_DELAY={demo_delay_seconds:.3f}",
+                "/usr/bin/python3",
+                str(wrapper),
+                *command,
+            ],
+            stdout=handle,
+            stderr=handle,
+            start_new_session=True,
+        )
+        say(f"real unapproved AI workload started (pid {workload.pid})")
+        time.sleep(0.5)
+        if workload.poll() is not None:
+            raise FirstKillError("the real AI workload exited before it could be observed")
+        say("workload state: RUNNING; waiting for Eggcracker detection")
+        receipt = wait_for_receipt(before)
+        detector = receipt.get("detector") if isinstance(receipt.get("detector"), dict) else {}
+        if detector.get("profile") != "content.gguf-llama":
+            raise FirstKillError("the real workload was not classified by the expected GGUF/llama profile")
+        if canary.poll() is not None:
+            raise FirstKillError("the unrelated canary did not survive the first-kill")
+        return receipt
+    finally:
+        handle.close()
+        if workload is not None and workload.poll() is None:
+            try:
+                os.killpg(workload.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            workload.wait(timeout=5)
+        if canary.poll() is None:
+            try:
+                os.killpg(canary.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            canary.wait(timeout=5)
+        shutil.rmtree(fixture, ignore_errors=True)
+
+
+def receipt_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+    detector = receipt.get("detector") if isinstance(receipt.get("detector"), dict) else {}
+    containment = receipt.get("containment") if isinstance(receipt.get("containment"), dict) else {}
+    capture = receipt.get("capture") if isinstance(receipt.get("capture"), dict) else {}
+    trigger_value = receipt.get("trigger")
+    trigger = trigger_value.get("kind") if isinstance(trigger_value, dict) else trigger_value
+    captured = capture.get("captured_processes")
+    if isinstance(captured, list):
+        captured = len(captured)
+    elif not isinstance(captured, int):
+        captured = None
+    survivors = containment.get("surviving_pids")
+    if isinstance(survivors, list):
+        survivors = [] if not survivors else len(survivors)
+    elif not isinstance(survivors, (int, type(None))):
+        survivors = None
+    return {
+        "result": receipt.get("result"),
+        "profile": detector.get("profile"),
+        "trigger": trigger,
+        "primitive": containment.get("primitive"),
+        "captured_processes": captured,
+        "root_populated": containment.get("root_populated"),
+        "surviving_pids": survivors,
+        "trigger_to_empty_ms": containment.get("trigger_to_empty_ms"),
+    }
+
+
+def remove_installation(release_root: Path, workspace: Path, assets_workspace: Path | None = None) -> None:
+    uninstaller = release_root / "scripts" / "uninstall.py"
+    verify = release_root / "scripts" / "verify_uninstalled.py"
+    if not uninstaller.is_file():
+        raise FirstKillError("release uninstaller is missing")
+    run(["/usr/bin/python3", "-I", "-S", str(uninstaller)], timeout=180)
+    if verify.is_file():
+        run(["/usr/bin/python3", "-I", "-S", str(verify)], timeout=60)
+    shutil.rmtree(workspace, ignore_errors=True)
+    if assets_workspace is not None and assets_workspace.exists() and not assets_workspace.is_symlink():
+        shutil.rmtree(assets_workspace, ignore_errors=True)
+
+
+def cleanup_choice() -> bool:
+    if not sys.stdin.isatty():
+        return False
+    answer = input("Remove Eggcracker and temporary smoke assets now? [Y/n] ").strip().lower()
+    return answer in {"", "y", "yes"}
+
+
+def prepare_workspace(path: Path) -> Path:
+    """Create or safely reuse a first-kill workspace for repeat demonstrations."""
+    if path.exists():
+        if path.is_symlink() or not path.is_dir():
+            raise FirstKillError("--workspace must be a non-symlink directory")
+        allowed = {"ai-smoke", "release", "SHA256SUMS", "eggcracker-release-key.asc"}
+        unexpected = [
+            item.name
+            for item in path.iterdir()
+            if item.name not in allowed
+            and not (
+                item.name.startswith("lumi-eggcracker-")
+                and item.name.endswith("-linux.zip")
+            )
+        ]
+        if unexpected:
+            raise FirstKillError("--workspace contains unexpected files: " + ", ".join(sorted(unexpected)))
+        old_release = path / "release"
+        if old_release.is_symlink():
+            raise FirstKillError("--workspace release directory must not be a symlink")
+        if old_release.exists():
+            shutil.rmtree(old_release)
+    else:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify, install and demonstrate the signed Eggcracker release on Linux."
+    )
+    parser.add_argument("--operator", help="non-root login that will operate Eggcracker")
+    parser.add_argument("--tag", default=DEFAULT_TAG, help=f"signed release tag (default: {DEFAULT_TAG})")
+    parser.add_argument("--workspace", type=Path, help="temporary workspace; default is a new /tmp directory")
+    parser.add_argument(
+        "--ai-workspace",
+        type=Path,
+        default=DEFAULT_AI_SMOKE_WORKSPACE,
+        help="root-owned workspace for the pinned real-AI demo (default: /opt/lumi-eggcracker-ai-smoke)",
+    )
+    parser.add_argument(
+        "--demo-delay-seconds",
+        type=float,
+        default=0,
+        help="keep the real workload visibly running before model execution (recording aid; max 60s)",
+    )
+    parser.add_argument(
+        "--accept-third-party-downloads",
+        action="store_true",
+        help="accept downloading the pinned llama.cpp source and Qwen model for the demonstration",
+    )
+    parser.add_argument("--keep", action="store_true", help="leave the installation and smoke assets in place")
+    parser.add_argument("--remove", action="store_true", help="remove the installation without prompting")
+    args = parser.parse_args(argv)
+    if args.keep and args.remove:
+        parser.error("--keep and --remove are mutually exclusive")
+    if not args.accept_third_party_downloads:
+        parser.error("--accept-third-party-downloads is required because the demo downloads a real model")
+    if not 0 <= args.demo_delay_seconds <= 60:
+        parser.error("--demo-delay-seconds must be between 0 and 60")
+
+    workspace: Path | None = None
+    ai_workspace: Path | None = None
+    ai_workspace_preexisting = False
+    installed = False
+    release_root: Path | None = None
+    try:
+        operator = operator_name(args.operator)
+        say("checking Linux, cgroup-v2, pidfd and clean-install compatibility")
+        compatibility(operator)
+        root = repository_root()
+        if args.workspace:
+            workspace = prepare_workspace(args.workspace.absolute())
+        else:
+            workspace = Path(tempfile.mkdtemp(prefix="eggcracker-first-kill-"))
+            os.chmod(workspace, 0o700)
+        ai_workspace = args.ai_workspace.absolute()
+        ai_workspace_preexisting = ai_workspace.exists()
+        if ai_workspace.is_symlink() or (ai_workspace.exists() and not ai_workspace.is_dir()):
+            raise FirstKillError("--ai-workspace must be a non-symlink directory")
+        say(f"downloading and checking signed {args.tag} release assets")
+        bundle, key = release_files(args.tag, workspace)
+        commit = verify_tag(root, args.tag, key)
+        release_root = extracted_release(bundle, workspace)
+        release = manifest(release_root)
+        if release.get("source_commit") != commit:
+            raise FirstKillError("signed tag commit and release source commit do not match")
+        verifier = release_root / "scripts" / "verify_release.py"
+        source_archive = release_root / str(release["source_archive"])
+        artifact = release_root / str(release["artifact"])
+        run(
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-S",
+                str(verifier),
+                "--artifact",
+                str(artifact),
+                "--source-archive",
+                str(source_archive),
+                "--release-bundle",
+                str(bundle),
+            ],
+            timeout=180,
+        )
+        say(f"signature and release identity verified: {args.tag} -> {commit}")
+        say("installing the root-controlled supervisor")
+        install_release(release_root, operator, release)
+        installed = True
+        workload_user = installed_workload_user()
+        say("preparing the pinned real local-AI smoke assets (explicit third-party download)")
+        say("launching an unapproved model and waiting for the complete-tree kill")
+        receipt = run_real_smoke(
+            release_root,
+            workspace,
+            workload_user,
+            ai_workspace,
+            args.demo_delay_seconds,
+        )
+        print(json.dumps(receipt_summary(receipt), indent=2, sort_keys=True))
+        say("first-kill demonstration passed: the real workload was terminated and its canary survived")
+        should_remove = args.remove or (not args.keep and cleanup_choice())
+        if should_remove:
+            say("removing Eggcracker and temporary smoke assets")
+            remove_installation(
+                release_root,
+                workspace,
+                None if ai_workspace_preexisting else ai_workspace,
+            )
+            installed = False
+            workspace = None
+            ai_workspace = None
+            say("clean removal passed")
+        else:
+            say(f"left installed by request; release workspace: {workspace}; AI assets: {ai_workspace}")
+        return 0
+    except (FirstKillError, KeyboardInterrupt) as error:
+        if isinstance(error, KeyboardInterrupt):
+            say("cancelled")
+        else:
+            print(f"eggcracker first-kill: {error}", file=sys.stderr)
+        if installed and release_root is not None and workspace is not None and not args.keep:
+            say("installation remains in place; rerun with --remove after reviewing the failure")
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
