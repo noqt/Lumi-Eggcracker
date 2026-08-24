@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - first-kill is a native Linux command
 
 REPOSITORY = "noqt/Lumi-Eggcracker"
 DEFAULT_TAG = "v0.5.0"
+DEFAULT_TAG_COMMIT = "eb342808f56cdc213c0861726d5309a146965bef"
 RELEASE_KEY_FINGERPRINT = "53786DEB001459956A2E1B86A3F29F7A27636DC7"
 WORKLOAD_USER = "lumi-eggcracker-workload"
 INSTALL_TARGETS = (
@@ -186,6 +187,14 @@ def compatibility(operator: str) -> None:
     for binary in ("/usr/bin/python3", "/usr/bin/systemctl", "/usr/bin/systemd-run", "/usr/sbin/runuser", "/usr/bin/gpg", "/usr/bin/git"):
         if not Path(binary).is_file():
             raise FirstKillError(f"required host command is missing: {binary}")
+    required_tool_groups = (
+        (("cmake",), "CMake"),
+        (("c++", "g++", "clang++"), "a C++ compiler (c++, g++ or clang++)"),
+        (("make", "ninja"), "a CMake build backend (Make or Ninja)"),
+    )
+    for commands, description in required_tool_groups:
+        if not any(shutil.which(command) for command in commands):
+            raise FirstKillError(f"required build tooling is missing: {description}")
     for target in INSTALL_TARGETS:
         if target.exists() or target.is_symlink():
             raise FirstKillError(f"refusing to overwrite an existing installation target: {target}")
@@ -199,10 +208,64 @@ def compatibility(operator: str) -> None:
 
 def repository_root() -> Path:
     root = Path(__file__).resolve().parents[1]
-    probe = run(["/usr/bin/git", "-C", str(root), "rev-parse", "--is-inside-work-tree"], check=False)
+    try:
+        probe = run(
+            ["/usr/bin/git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            check=False,
+        )
+    except FirstKillError as error:
+        raise FirstKillError("could not inspect the local Git checkout") from error
     if probe.returncode or probe.stdout.strip() != "true":
         raise FirstKillError("first-kill must be run from a Git checkout containing the signed tag")
     return root
+
+
+def local_release_identity(root: Path, tag: str) -> str:
+    """Verify the qualified local annotated tag without network or GPG state."""
+    if tag != DEFAULT_TAG:
+        raise FirstKillError(f"preflight supports only the qualified local tag {DEFAULT_TAG}")
+    reference = f"refs/tags/{tag}"
+    try:
+        kind = run(["/usr/bin/git", "-C", str(root), "cat-file", "-t", reference], check=False)
+        resolved = run(
+            ["/usr/bin/git", "-C", str(root), "rev-parse", f"{reference}^{{}}"],
+            check=False,
+        )
+    except FirstKillError as error:
+        raise FirstKillError("could not inspect the qualified local release tag") from error
+    if kind.returncode or kind.stdout.strip() != "tag":
+        raise FirstKillError(f"the local {tag} reference is missing or is not an annotated tag")
+    if resolved.returncode or resolved.stdout.strip() != DEFAULT_TAG_COMMIT:
+        raise FirstKillError(f"the local {tag} tag does not resolve to the qualified commit")
+    return DEFAULT_TAG_COMMIT
+
+
+def run_preflight(operator_value: str | None, tag: str) -> int:
+    """Run read-only host and local-release availability checks."""
+    operator = operator_name(operator_value)
+    compatibility(operator)
+    commit = local_release_identity(repository_root(), tag)
+    print(
+        json.dumps(
+            {
+                "changes_made": False,
+                "checks": [
+                    "host",
+                    "operator",
+                    "tool_availability",
+                    "clean_install_targets",
+                    "local_annotated_tag_identity",
+                ],
+                "mode": "preflight-only",
+                "qualified_commit": commit,
+                "result": "PREFLIGHT_PASSED",
+                "tag": tag,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def verify_tag(root: Path, tag: str, key: Path) -> str:
@@ -546,7 +609,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ai-workspace",
         type=Path,
-        default=DEFAULT_AI_SMOKE_WORKSPACE,
         help="root-owned workspace for the pinned real-AI demo (default: /opt/lumi-eggcracker-ai-smoke)",
     )
     parser.add_argument(
@@ -560,15 +622,41 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="accept downloading the pinned llama.cpp source and Qwen model for the demonstration",
     )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="check host, tools and local release identity without downloads or system changes",
+    )
     parser.add_argument("--keep", action="store_true", help="leave the installation and smoke assets in place")
     parser.add_argument("--remove", action="store_true", help="remove the installation without prompting")
     args = parser.parse_args(argv)
     if args.keep and args.remove:
         parser.error("--keep and --remove are mutually exclusive")
-    if not args.accept_third_party_downloads:
-        parser.error("--accept-third-party-downloads is required because the demo downloads a real model")
     if not 0 <= args.demo_delay_seconds <= 60:
         parser.error("--demo-delay-seconds must be between 0 and 60")
+    if args.preflight_only:
+        incompatible = []
+        if args.workspace is not None:
+            incompatible.append("--workspace")
+        if args.ai_workspace is not None:
+            incompatible.append("--ai-workspace")
+        if args.keep:
+            incompatible.append("--keep")
+        if args.remove:
+            incompatible.append("--remove")
+        if args.demo_delay_seconds:
+            incompatible.append("--demo-delay-seconds")
+        if args.accept_third_party_downloads:
+            incompatible.append("--accept-third-party-downloads")
+        if incompatible:
+            parser.error("--preflight-only cannot be combined with " + ", ".join(incompatible))
+        try:
+            return run_preflight(args.operator, args.tag)
+        except FirstKillError as error:
+            print(f"eggcracker preflight: {error}", file=sys.stderr)
+            return 2
+    if not args.accept_third_party_downloads:
+        parser.error("--accept-third-party-downloads is required because the demo downloads a real model")
 
     workspace: Path | None = None
     ai_workspace: Path | None = None
@@ -585,7 +673,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             workspace = Path(tempfile.mkdtemp(prefix="eggcracker-first-kill-"))
             os.chmod(workspace, 0o700)
-        ai_workspace = args.ai_workspace.absolute()
+        ai_workspace = (args.ai_workspace or DEFAULT_AI_SMOKE_WORKSPACE).absolute()
         ai_workspace_preexisting = ai_workspace.exists()
         if ai_workspace.is_symlink() or (ai_workspace.exists() and not ai_workspace.is_dir()):
             raise FirstKillError("--ai-workspace must be a non-symlink directory")

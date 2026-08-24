@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("first_kill", ROOT / "scripts" / "first_kill.py")
@@ -15,6 +19,76 @@ SPEC.loader.exec_module(first_kill)
 
 
 class FirstKillTests(unittest.TestCase):
+    def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(first_kill, "operator_name", return_value="tester") as operator,
+            mock.patch.object(first_kill, "compatibility") as compatibility,
+            mock.patch.object(first_kill, "repository_root", return_value=Path("/checkout")),
+            mock.patch.object(
+                first_kill,
+                "local_release_identity",
+                return_value=first_kill.DEFAULT_TAG_COMMIT,
+            ),
+            mock.patch.object(first_kill, "prepare_workspace") as prepare_workspace,
+            mock.patch.object(first_kill, "release_files") as release_files,
+            mock.patch.object(first_kill, "verify_tag") as verify_tag,
+            mock.patch.object(first_kill, "install_release") as install_release,
+            mock.patch.object(first_kill, "run_real_smoke") as run_real_smoke,
+            mock.patch.object(first_kill.tempfile, "mkdtemp") as make_temporary,
+            contextlib.redirect_stdout(output),
+        ):
+            result = first_kill.main(["--operator", "tester", "--preflight-only"])
+
+        self.assertEqual(0, result)
+        operator.assert_called_once_with("tester")
+        compatibility.assert_called_once_with("tester")
+        for forbidden in (
+            prepare_workspace,
+            release_files,
+            verify_tag,
+            install_release,
+            run_real_smoke,
+            make_temporary,
+        ):
+            forbidden.assert_not_called()
+        summary = json.loads(output.getvalue())
+        self.assertEqual("PREFLIGHT_PASSED", summary["result"])
+        self.assertFalse(summary["changes_made"])
+        self.assertNotIn("/checkout", output.getvalue())
+
+    def test_normal_run_still_requires_download_acceptance(self) -> None:
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            first_kill.main(["--operator", "tester"])
+        self.assertEqual(2, raised.exception.code)
+
+    def test_preflight_rejects_mutation_only_flags(self) -> None:
+        with (
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            first_kill.main(["--preflight-only", "--keep"])
+        self.assertEqual(2, raised.exception.code)
+
+    def test_local_release_identity_requires_annotated_pinned_tag(self) -> None:
+        annotated = mock.Mock(returncode=0, stdout="tag\n")
+        resolved = mock.Mock(returncode=0, stdout=f"{first_kill.DEFAULT_TAG_COMMIT}\n")
+        with mock.patch.object(first_kill, "run", side_effect=[annotated, resolved]):
+            result = first_kill.local_release_identity(Path("/checkout"), first_kill.DEFAULT_TAG)
+        self.assertEqual(first_kill.DEFAULT_TAG_COMMIT, result)
+
+    def test_local_release_identity_rejects_lightweight_tag(self) -> None:
+        lightweight = mock.Mock(returncode=0, stdout="commit\n")
+        resolved = mock.Mock(returncode=0, stdout=f"{first_kill.DEFAULT_TAG_COMMIT}\n")
+        with (
+            mock.patch.object(first_kill, "run", side_effect=[lightweight, resolved]),
+            self.assertRaisesRegex(first_kill.FirstKillError, "not an annotated tag"),
+        ):
+            first_kill.local_release_identity(Path("/checkout"), first_kill.DEFAULT_TAG)
+
     def test_receipt_summary_is_bounded_and_redacts_paths(self) -> None:
         value = first_kill.receipt_summary(
             {

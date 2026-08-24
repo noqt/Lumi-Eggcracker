@@ -67,6 +67,21 @@ git clone https://github.com/noqt/Lumi-Eggcracker.git
 cd Lumi-Eggcracker
 sudo /usr/bin/python3 -I -S scripts/first_kill.py \
   --operator "$USER" \
+  --preflight-only
+```
+
+The preflight is read-only: it checks the operator, supported host features,
+empty installation targets, required tool availability, and that the local
+annotated `v0.5.0` tag resolves to the qualified commit. It makes no network
+request and creates no workspace, GPG home, build, installation or service.
+It does not verify the release signature, downloaded assets, functional build,
+installation or containment; those checks happen only in the full run.
+
+After a passing preflight, run the demonstration:
+
+```sh
+sudo /usr/bin/python3 -I -S scripts/first_kill.py \
+  --operator "$USER" \
   --accept-third-party-downloads
 ```
 
