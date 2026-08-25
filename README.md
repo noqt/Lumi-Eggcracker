@@ -4,7 +4,7 @@
 
 [v0.5.0 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v0.5.0)
 · [Check host compatibility](#check-host-compatibility)
-· [Probe containment](#probe-the-containment-primitive)
+· [Run the hosted containment probe](#run-it-in-a-disposable-github-hosted-fork)
 · [Run the first kill](#run-the-first-kill)
 · [Design-partner Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
@@ -28,6 +28,16 @@ process tree, and leaves a bounded receipt proving the tree is empty.
 no workspace, build, installation or service. [Check compatibility
 now](#check-host-compatibility), then continue to the full demonstration only
 on a disposable supported host. A passing preflight is not a containment result.
+
+**Try the core kill primitive without installing Eggcracker or supplying a
+host.** [Fork this public repository](https://github.com/noqt/Lumi-Eggcracker/fork),
+then follow the [GitHub-hosted containment-probe
+steps](#run-it-in-a-disposable-github-hosted-fork). The manually acknowledged
+workflow uses a disposable `ubuntu-24.04` runner, kills only a bounded synthetic
+two-process tree, uploads no artifact, and reports a redacted pass or safe
+refusal. [NOQT's reviewed hosted run](https://github.com/noqt/Lumi-Eggcracker/actions/runs/32892727768)
+passed; that is implementation evidence, not independent use, workload
+recognition, adoption, or product-wide effectiveness.
 
 ## Run the first kill
 
