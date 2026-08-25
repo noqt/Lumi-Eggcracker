@@ -23,16 +23,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      CANDIDATE_COMMIT: 4bbd788606ca5f8114ff16ddf64d7ccc7afa4602
-      CANDIDATE_TREE: b24b32dbc6771b0fa5a372c4979e0a3d0f5215bc
-      CANDIDATE_SOURCE_SHA256: 6780d71bc836d663d9b9810b8fcdfd6a5ed313ef0c815c978b360c5be3dd94a6
+      CANDIDATE_COMMIT: a2b283c1658aa952dc2aaf6e29e15a9e6b48cb97
+      CANDIDATE_TREE: 096a37751e0901d3e34528a720fec3c988d15361
+      CANDIDATE_SOURCE_SHA256: 22d175cae00b639b11cd4ab95bdcb7e0bfcde133d58b294ce3ae297b653fae4b
     steps:
       - name: Check out the exact reviewed candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: 4bbd788606ca5f8114ff16ddf64d7ccc7afa4602
+          ref: a2b283c1658aa952dc2aaf6e29e15a9e6b48cb97
 
       - name: Bind the disposable native host
         shell: bash
