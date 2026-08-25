@@ -14,6 +14,32 @@ Python 3.11, 3.12 and 3.13. The exact candidate must then pass the complete
 regression, selected-workload, autonomous-discovery, both real content-profile,
 self-protection and overhead matrices.
 
+The no-network containment-primitive probe is separately gated on the exact
+public candidate. Before publication, Ruff and the complete unit suite must
+pass on Python 3.11, 3.12 and 3.13, an independent code review must accept the
+exact candidate, and a disposable ordinary native Ubuntu 24.04 host must
+complete all of these gates:
+
+- 100/100 exact two-process target-tree terminations through the production
+  pidfd-stop plus direct `cgroup.kill` path;
+- 100/100 unrelated-canary survivals, zero non-target kills, zero target
+  survivors and zero residual probe units or cgroups;
+- concurrent and forced unit-name-collision cases with no identity ambiguity;
+- interrupt and deterministic fault injection before and after owner capture,
+  pidfd binding, stop, kill, empty proof and cleanup, with no false success;
+- strict proof of `populated 0` and an empty recursive process set while the
+  captured cgroup identity still exists; disappearance before proof is failure;
+- a bounded public receipt containing no PID, path, account, environment,
+  command line, host identifier or other private field, while binding the
+  regular clone's exact Git HEAD and the SHA-256 of the executed source set;
+- forced orchestrator termination at every stage, followed by proof that the
+  45-second worker ceilings leave no target, canary, transient unit or cgroup.
+
+Run an independent post-qualification review before pushing the probe or
+describing it as publicly available. This gate proves only deterministic
+containment of the synthetic tree. It does not qualify recognition,
+installation, model handling, product-wide effectiveness or a new release.
+
 Mandatory autonomous gates are: 100/100 unapproved fixture discoveries and complete tree kills, 100/100 unrelated-canary survivals, zero surviving bounded replacement attempts, zero reused-PID signals, 50/50 exact root-approved survivals launched through the protected pre-exec operator gate, zero direct-launch approval bypasses, zero mutable-script approval bypasses, fail-closed rejection of unsupported interpreter forms, zero complete related submatches surviving a successful receipt, zero kills in the benign and partial-match matrices, zero kills from arbitrary open runtime-looking descriptors, read-only runtime-looking mappings or non-loadable ELF metadata, zero workload policy/socket accesses, restart recovery, bounded high-FD pressure recovery without scan-window reset, p95 qualifying-snapshot-to-stop below 100 ms, and p95 trigger-to-empty below 500 ms. Full process-start-to-stop time is retained as diagnostic evidence because real model startup can occur before the runtime identity becomes observable; it is not a containment-latency gate.
 
 The self-protection gates additionally require zero workload connections to each query, operator and administrative socket; zero workload replacement launches; root-only approval administration; restart recovery; a watchdog lost-heartbeat containment; a watchdog installed-file-digest containment; bounded supervisor/watchdog resources; and clean removal of both units and runtime directories.

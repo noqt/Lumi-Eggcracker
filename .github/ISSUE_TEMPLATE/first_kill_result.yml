@@ -11,6 +11,7 @@ body:
       label: Path attempted
       options:
         - Read-only preflight only
+        - No-network containment-primitive probe
         - Full first-kill demonstration
     validations:
       required: true
@@ -37,6 +38,8 @@ body:
       options:
         - Preflight passed
         - Preflight refused before making changes
+        - Containment probe passed, the target tree was empty, and the canary survived
+        - Containment probe stopped with a redacted reason code
         - Full demonstration passed and the unrelated canary survived
         - Full demonstration stopped with a non-security error
         - Result was confusing or did not match the documentation
@@ -46,7 +49,7 @@ body:
     id: redacted_result
     attributes:
       label: Redacted result
-      description: For a full pass, include only result, profile, trigger, primitive, captured_processes, root_populated, surviving_pids count, trigger_to_empty_ms, canary outcome, and cleanup outcome. For a refusal or error, include only the final redacted status and the smallest safe reproduction; never paste raw commands, arguments, paths, or environment values.
+      description: For a containment-probe pass, paste only its complete JSON receipt. For a full pass, include only result, profile, trigger, primitive, captured_processes, root_populated, surviving_pids count, trigger_to_empty_ms, canary outcome, and cleanup outcome. For a refusal or error, include only the redacted reason code and the smallest safe reproduction; never paste raw commands, arguments, paths, process IDs, or environment values.
     validations:
       required: true
   - type: textarea

@@ -4,6 +4,7 @@
 
 [v0.5.0 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v0.5.0)
 · [Check host compatibility](#check-host-compatibility)
+· [Probe containment](#probe-the-containment-primitive)
 · [Run the first kill](#run-the-first-kill)
 · [Design-partner Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
@@ -83,7 +84,34 @@ request and creates no workspace, GPG home, build, installation or service.
 It does not verify the release signature, downloaded assets, functional build,
 installation or containment; those checks happen only in the full run.
 
-After a passing preflight, run the demonstration:
+### Probe the containment primitive
+
+To test the kill mechanism without downloading a model, installing Eggcracker,
+or exercising workload recognition, use a regular Git clone at a public source
+commit on a disposable native Ubuntu 24.04 host. The probe requires its `.git`
+identity, root, systemd, unified cgroup v2, `cgroup.kill`, pidfds and the
+released system Python:
+
+```sh
+sudo /usr/bin/python3 -I -S scripts/containment_probe.py \
+  --i-understand-this-kills-a-test-tree
+```
+
+The command makes no network request and installs nothing. It creates one
+random transient systemd service, places exactly two harmless sleeping test
+processes in a dedicated child cgroup, holds their pidfds, applies Eggcracker's
+production pidfd-stop plus `cgroup.kill` path, proves that cgroup hierarchy is
+empty, verifies an outside canary survived, and removes the transient objects.
+Every worker also has a 45-second runtime ceiling if the orchestrator is killed.
+The probe prints only a bounded redacted receipt, including the Git commit and
+an executed-source digest. Systemd journal metadata may persist until normal
+log rotation.
+
+This is a proof of the deterministic containment primitive, not a test of AI
+workload recognition, the two supported profiles, installation, or universal
+product effectiveness. A pass does not replace the full first-kill path.
+
+After a passing preflight, run the full demonstration:
 
 ```sh
 sudo /usr/bin/python3 -I -S scripts/first_kill.py \
