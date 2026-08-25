@@ -90,7 +90,9 @@ release assets, installs the root-controlled supervisor, downloads the pinned
 demo model only after the explicit acceptance flag, launches the real model,
 prints the kill receipt, and offers clean removal. Use `--remove` for a
 non-interactive removal or `--keep` to inspect the installation after the
-demonstration. If the supported path fails, open a
+demonstration. Share a passing, refused, or confusing supported-path run through
+the [redacted result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=first_kill_result.yml).
+If the supported path exposes a reproducible non-security defect, open a
 [reproducible bug](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=bug_report.yml)
 with a redacted support bundle; route security-sensitive findings through
 [private vulnerability reporting](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new).
