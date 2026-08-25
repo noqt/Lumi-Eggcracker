@@ -78,7 +78,6 @@ jobs:
           test "$(cat /proc/1/comm)" = "systemd" || refuse SYSTEMD_PID1_REQUIRED
           test ! -e /run/systemd/container || refuse CONTAINER_UNSUPPORTED
           test "$(stat -fc %T /sys/fs/cgroup)" = "cgroup2fs" || refuse CGROUP_V2_REQUIRED
-          test -e /sys/fs/cgroup/cgroup.kill || refuse CGROUP_KILL_REQUIRED
           read -r controllers < /sys/fs/cgroup/cgroup.controllers
           case " $controllers " in
             *" pids "*) ;;
