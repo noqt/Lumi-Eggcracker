@@ -277,12 +277,12 @@ jobs:
           from lumi_eggcracker import containment_probe as probe
 
           STAGES = {
-              "owner-capture": "_capture_owner",
-              "pidfd-binding": "open_pidfd",
-              "stop": "stop_pidfd",
-              "kill": "kill_path",
-              "empty-proof": "_strict_empty",
-              "cleanup": "_cleanup",
+              "owner-capture": ("_capture_owner", 1),
+              "pidfd-binding": ("open_pidfd", 2),
+              "stop": ("stop_pidfd", 1),
+              "kill": ("kill_path", 1),
+              "empty-proof": ("_strict_empty", 1),
+              "cleanup": ("_cleanup", 1),
           }
 
 
@@ -291,11 +291,36 @@ jobs:
               return hashlib.sha256(material).hexdigest()[:32]
 
 
-          def write_state(path: Path | None, unit: str, canary: int | None, targets: list[int]) -> None:
+          def serialized_identity(value: object | None) -> dict[str, int] | None:
+              if value is None:
+                  return None
+              return {"pid": value.pid, "start_time": value.start_time}
+
+
+          def write_state(
+              path: Path | None,
+              mode: str,
+              stage: str,
+              position: str,
+              unit: str,
+              canary: object | None,
+              targets: list[object],
+          ) -> None:
               if path is None:
                   return
               path.write_text(
-                  json.dumps({"canary": canary, "targets": targets, "unit": unit}, sort_keys=True),
+                  json.dumps(
+                      {
+                          "canary": serialized_identity(canary),
+                          "mode": mode,
+                          "position": position,
+                          "schema": "lumi-eggcracker.forced-orchestrator.v1",
+                          "stage": stage,
+                          "targets": [serialized_identity(value) for value in targets],
+                          "unit": unit,
+                      },
+                      sort_keys=True,
+                  ),
                   encoding="ascii",
               )
               path.chmod(0o600)
@@ -335,30 +360,46 @@ jobs:
               state_path: Path | None,
               marker_path: Path | None,
           ) -> None:
-              attribute = STAGES[stage]
+              attribute, injection_ordinal = STAGES[stage]
               original_stage = getattr(probe, attribute)
               original_canary = probe._spawn_canary
               original_wait_target = probe._wait_target
               token = exact_token(mode, stage, position)
               unit = f"lumi-eggcracker-probe-{token}.service"
               tracked_processes: list[subprocess.Popen[bytes]] = []
-              canary_pid: int | None = None
-              target_pids: list[int] = []
+              canary_identity: object | None = None
+              target_identities: list[object] = []
               invocation_count = 0
 
               def tracked_canary() -> tuple[subprocess.Popen[bytes], object, int]:
-                  nonlocal canary_pid
+                  nonlocal canary_identity
                   result = original_canary()
                   tracked_processes.append(result[0])
-                  canary_pid = result[1].pid
-                  write_state(state_path, unit, canary_pid, target_pids)
+                  canary_identity = result[1]
+                  write_state(
+                      state_path,
+                      mode,
+                      stage,
+                      position,
+                      unit,
+                      canary_identity,
+                      target_identities,
+                  )
                   return result
 
               def tracked_wait_target(*args: object, **kwargs: object) -> tuple[object, object]:
-                  nonlocal target_pids
+                  nonlocal target_identities
                   result = original_wait_target(*args, **kwargs)
-                  target_pids = [item.pid for item in result]
-                  write_state(state_path, unit, canary_pid, target_pids)
+                  target_identities = list(result)
+                  write_state(
+                      state_path,
+                      mode,
+                      stage,
+                      position,
+                      unit,
+                      canary_identity,
+                      target_identities,
+                  )
                   return result
 
               def inject() -> None:
@@ -379,15 +420,23 @@ jobs:
               def staged(*args: object, **kwargs: object) -> object:
                   nonlocal invocation_count
                   invocation_count += 1
-                  first = invocation_count == 1
-                  if first and position == "before":
+                  inject_now = invocation_count == injection_ordinal
+                  if inject_now and position == "before":
                       inject()
                   result = original_stage(*args, **kwargs)
-                  if first and position == "after":
+                  if inject_now and position == "after":
                       inject()
                   return result
 
-              write_state(state_path, unit, canary_pid, target_pids)
+              write_state(
+                  state_path,
+                  mode,
+                  stage,
+                  position,
+                  unit,
+                  canary_identity,
+                  target_identities,
+              )
               with ExitStack() as stack:
                   stack.enter_context(patch.object(probe.secrets, "token_hex", return_value=token))
                   stack.enter_context(patch.object(probe, "_spawn_canary", side_effect=tracked_canary))
@@ -407,6 +456,11 @@ jobs:
                   finally:
                       if mode == "fault" and stage == "cleanup" and position == "before":
                           emergency_cleanup(unit, tracked_processes)
+                  if mode in {"fault", "interrupt"}:
+                      identities = [canary_identity, *target_identities]
+                      for value in identities:
+                          if value is not None and probe.identity(value.pid) == value:
+                              raise AssertionError("original bounded process survived cleanup")
 
 
           parser = argparse.ArgumentParser()
@@ -419,6 +473,115 @@ jobs:
           run_case(arguments.mode, arguments.stage, arguments.position, arguments.state, arguments.marker)
           PY
           /usr/bin/python3 -I -S -m py_compile "$harness"
+
+          supervisor="$RUNNER_TEMP/forced-orchestrator-supervisor.py"
+          cat > "$supervisor" <<'PY'
+          import os
+          import select
+          import signal
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path.cwd() / "src"))
+          from lumi_eggcracker import containment_probe as probe
+
+
+          def run() -> None:
+              if len(sys.argv) != 7:
+                  raise RuntimeError("invalid supervisor arguments")
+              harness, stage, position, state_raw, marker_raw, result_raw = sys.argv[1:]
+              state = Path(state_raw)
+              marker = Path(marker_raw)
+              result = Path(result_raw)
+              process: subprocess.Popen[bytes] | None = None
+              bound_identity = None
+              descriptor: int | None = None
+              try:
+                  process = subprocess.Popen(
+                      [
+                          "/usr/bin/python3",
+                          "-I",
+                          "-S",
+                          harness,
+                          "orchestrator",
+                          stage,
+                          position,
+                          "--state",
+                          str(state),
+                          "--marker",
+                          str(marker),
+                      ],
+                      stdin=subprocess.DEVNULL,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                      close_fds=True,
+                      env={"LANG": "C.UTF-8", "PATH": "/usr/bin:/bin"},
+                  )
+                  identity_deadline = time.monotonic() + 3.0
+                  while time.monotonic() < identity_deadline:
+                      if process.poll() is not None:
+                          raise RuntimeError("orchestrator exited before identity binding")
+                      bound_identity = probe.identity(process.pid)
+                      if bound_identity is not None:
+                          break
+                      time.sleep(0.01)
+                  if bound_identity is None:
+                      raise RuntimeError("orchestrator identity unavailable")
+                  descriptor = probe.open_pidfd(bound_identity)
+                  if process.poll() is not None or probe.identity(bound_identity.pid) != bound_identity:
+                      raise RuntimeError("orchestrator identity drifted before readiness")
+
+                  marker_deadline = time.monotonic() + 25.0
+                  while time.monotonic() < marker_deadline:
+                      if process.poll() is not None:
+                          raise RuntimeError("orchestrator exited before kill point")
+                      if marker.stat().st_size > 0:
+                          break
+                      time.sleep(0.05)
+                  else:
+                      raise RuntimeError("orchestrator kill point timeout")
+
+                  if process.poll() is not None or probe.identity(bound_identity.pid) != bound_identity:
+                      raise RuntimeError("orchestrator identity drifted before signal")
+                  signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                  poller = select.poll()
+                  poller.register(descriptor, select.POLLIN)
+                  if not poller.poll(5000):
+                      raise RuntimeError("orchestrator pidfd exit timeout")
+                  return_code = process.wait(timeout=2.0)
+                  if return_code != -signal.SIGKILL:
+                      raise RuntimeError("orchestrator did not exit by SIGKILL")
+                  result.write_text("SIGKILL_CONFIRMED\n", encoding="ascii")
+                  result.chmod(0o600)
+              finally:
+                  if process is not None and process.poll() is None:
+                      if descriptor is None and bound_identity is not None:
+                          try:
+                              if probe.identity(bound_identity.pid) == bound_identity:
+                                  descriptor = probe.open_pidfd(bound_identity)
+                          except BaseException:
+                              descriptor = None
+                      if descriptor is not None:
+                          try:
+                              signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                          except ProcessLookupError:
+                              pass
+                          try:
+                              process.wait(timeout=2.0)
+                          except subprocess.TimeoutExpired:
+                              pass
+                  if descriptor is not None:
+                      os.close(descriptor)
+
+
+          try:
+              run()
+          except BaseException:
+              raise SystemExit(1)
+          PY
+          /usr/bin/python3 -I -S -m py_compile "$supervisor"
 
       - name: Run interrupt and deterministic-fault matrices
         shell: bash
@@ -450,9 +613,11 @@ jobs:
             done
           done
           echo "NATIVE_INTERRUPT_FAIL_CLOSED=12/12"
+          echo "NATIVE_INTERRUPT_ORIGINAL_WORKER_SURVIVORS=0"
           echo "NATIVE_INTERRUPT_RESIDUAL_UNITS=0"
           echo "NATIVE_INTERRUPT_RESIDUAL_CGROUPS=0"
           echo "NATIVE_DETERMINISTIC_FAULT_FAIL_CLOSED=12/12"
+          echo "NATIVE_DETERMINISTIC_FAULT_ORIGINAL_WORKER_SURVIVORS=0"
           echo "NATIVE_DETERMINISTIC_FAULT_RESIDUAL_UNITS=0"
           echo "NATIVE_DETERMINISTIC_FAULT_RESIDUAL_CGROUPS=0"
 
@@ -462,75 +627,116 @@ jobs:
           set -euo pipefail
           umask 077
           harness="$RUNNER_TEMP/containment-probe-native-matrix.py"
+          supervisor="$RUNNER_TEMP/forced-orchestrator-supervisor.py"
           case_dir="$RUNNER_TEMP/lumi-eggcracker-orchestrator-cases"
           mkdir -p "$case_dir"
           stages=(owner-capture pidfd-binding stop kill empty-proof cleanup)
           positions=(before after)
           outer_pids=()
-          root_pid_files=()
           state_files=()
           marker_files=()
+          result_files=()
 
           for stage in "${stages[@]}"
           do
             for position in "${positions[@]}"
             do
               name="$stage-$position"
-              root_pid_file="$case_dir/$name.root-pid"
               state_file="$case_dir/$name.state.json"
               marker_file="$case_dir/$name.marker"
-              : > "$root_pid_file"
+              result_file="$case_dir/$name.result"
               : > "$state_file"
               : > "$marker_file"
-              chmod 0600 "$root_pid_file" "$state_file" "$marker_file"
-              sudo -n /bin/bash -c \
-                'umask 077; echo $$ > "$1"; exec /usr/bin/python3 -I -S "$2" orchestrator "$3" "$4" --state "$5" --marker "$6"' \
-                bash "$root_pid_file" "$harness" "$stage" "$position" "$state_file" "$marker_file" &
+              : > "$result_file"
+              chmod 0600 "$state_file" "$marker_file" "$result_file"
+              sudo -n /usr/bin/python3 -I -S "$supervisor" \
+                "$harness" "$stage" "$position" "$state_file" "$marker_file" "$result_file" \
+                > /dev/null 2>&1 &
               outer_pids+=("$!")
-              root_pid_files+=("$root_pid_file")
               state_files+=("$state_file")
               marker_files+=("$marker_file")
+              result_files+=("$result_file")
             done
           done
 
-          deadline=$((SECONDS + 25))
-          for marker in "${marker_files[@]}"
-          do
-            while test ! -s "$marker"
-            do
-              if (( SECONDS >= deadline )); then
-                echo "Forced-orchestrator stage did not reach its kill point" >&2
-                exit 1
-              fi
-              sleep 0.1
-            done
-          done
-
-          for root_pid_file in "${root_pid_files[@]}"
-          do
-            test -s "$root_pid_file"
-            root_pid="$(<"$root_pid_file")"
-            [[ "$root_pid" =~ ^[0-9]+$ ]]
-            sudo -n kill -KILL "$root_pid"
-          done
+          wait_failure=0
           for outer_pid in "${outer_pids[@]}"
           do
-            wait "$outer_pid" || true
+            if ! wait "$outer_pid"; then
+              wait_failure=1
+            fi
+          done
+          if (( wait_failure != 0 )); then
+            echo "Forced-orchestrator supervisor failed" >&2
+            exit 1
+          fi
+          for result_file in "${result_files[@]}"; do
+            test "$(<"$result_file")" = "SIGKILL_CONFIRMED"
           done
 
           sleep 50
-          /usr/bin/python3 -I -S - "${state_files[@]}" <<'PY'
+          if ! /usr/bin/python3 -I -S - "${state_files[@]}" > /dev/null 2>&1 <<'PY'
+          import hashlib
           import json
           import sys
           from pathlib import Path
 
+          sys.path.insert(0, str(Path.cwd() / "src"))
+          from lumi_eggcracker.discovery import ProcessIdentity, identity
+
+          expected_keys = {"canary", "mode", "position", "schema", "stage", "targets", "unit"}
+          expected_stages = {"owner-capture", "pidfd-binding", "stop", "kill", "empty-proof", "cleanup"}
+          seen = set()
+
+          def exact_identity(raw: object) -> ProcessIdentity:
+              if not isinstance(raw, dict) or set(raw) != {"pid", "start_time"}:
+                  raise RuntimeError("invalid identity schema")
+              pid = raw["pid"]
+              start_time = raw["start_time"]
+              if type(pid) is not int or type(start_time) is not int or pid < 1 or start_time < 1:
+                  raise RuntimeError("invalid identity value")
+              return ProcessIdentity(pid, start_time)
+
           for raw in sys.argv[1:]:
               state = json.loads(Path(raw).read_text(encoding="ascii"))
-              values = [state.get("canary"), *state.get("targets", [])]
-              for value in values:
-                  if value is not None and (Path("/proc") / str(value)).exists():
-                      raise SystemExit("bounded worker survived its deadline")
+              if not isinstance(state, dict) or set(state) != expected_keys:
+                  raise RuntimeError("invalid forced-state schema")
+              if state["schema"] != "lumi-eggcracker.forced-orchestrator.v1":
+                  raise RuntimeError("invalid forced-state version")
+              if state["mode"] != "orchestrator":
+                  raise RuntimeError("invalid forced-state mode")
+              stage = state["stage"]
+              position = state["position"]
+              if stage not in expected_stages or position not in {"before", "after"}:
+                  raise RuntimeError("invalid forced-state case")
+              case = (stage, position)
+              if case in seen:
+                  raise RuntimeError("duplicate forced-state case")
+              seen.add(case)
+              token = hashlib.sha256(f"orchestrator:{stage}:{position}".encode("ascii")).hexdigest()[:32]
+              if state["unit"] != f"lumi-eggcracker-probe-{token}.service":
+                  raise RuntimeError("invalid forced-state unit")
+              targets_raw = state["targets"]
+              if not isinstance(targets_raw, list):
+                  raise RuntimeError("invalid target identity list")
+              if stage == "owner-capture":
+                  if state["canary"] is not None or targets_raw:
+                      raise RuntimeError("invalid owner-capture state")
+                  identities = []
+              else:
+                  if state["canary"] is None or len(targets_raw) != 2:
+                      raise RuntimeError("incomplete bounded-worker state")
+                  identities = [exact_identity(state["canary"]), *map(exact_identity, targets_raw)]
+              for value in identities:
+                  if identity(value.pid) == value:
+                      raise RuntimeError("original bounded worker survived")
+          if len(seen) != 12:
+              raise RuntimeError("incomplete forced-state matrix")
           PY
+          then
+            echo "Forced-orchestrator private-state verification failed" >&2
+            exit 1
+          fi
           units="$(sudo -n systemctl list-units --all --plain --no-legend \
             'lumi-eggcracker-probe-*.service')" || {
             echo "Unable to enumerate forced-termination units" >&2
@@ -544,6 +750,7 @@ jobs:
           }
           test -z "$cgroups"
           echo "NATIVE_FORCED_ORCHESTRATOR_TERMINATIONS=12/12"
-          echo "NATIVE_FORCED_ORCHESTRATOR_WORKER_SURVIVORS=0"
+          echo "NATIVE_FORCED_ORCHESTRATOR_SIGKILL_CONFIRMATIONS=12/12"
+          echo "NATIVE_FORCED_ORCHESTRATOR_ORIGINAL_WORKER_SURVIVORS=0"
           echo "NATIVE_FORCED_ORCHESTRATOR_RESIDUAL_UNITS=0"
           echo "NATIVE_FORCED_ORCHESTRATOR_RESIDUAL_CGROUPS=0"
