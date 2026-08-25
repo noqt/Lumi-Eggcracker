@@ -20,8 +20,9 @@ pass on Python 3.11, 3.12 and 3.13, an independent code review must accept the
 exact candidate, and a disposable ordinary native Ubuntu 24.04 host must
 complete all of these gates:
 
-- 100/100 exact two-process target-tree terminations through the production
-  pidfd-stop plus direct `cgroup.kill` path;
+- 100/100 exact two-process target-tree terminations under the verified
+  three-task transient-service ceiling through the production pidfd-stop plus
+  direct `cgroup.kill` path;
 - 100/100 unrelated-canary survivals, zero non-target kills, zero target
   survivors and zero residual probe units or cgroups;
 - concurrent and forced unit-name-collision cases with no identity ambiguity;

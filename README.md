@@ -102,6 +102,8 @@ random transient systemd service, places exactly two harmless sleeping test
 processes in a dedicated child cgroup, holds their pidfds, applies Eggcracker's
 production pidfd-stop plus `cgroup.kill` path, proves that cgroup hierarchy is
 empty, verifies an outside canary survived, and removes the transient objects.
+The transient service is capped at exactly three tasks: one fixed owner and the
+two-process target tree.
 Every worker also has a 45-second runtime ceiling if the orchestrator is killed.
 The probe prints only a bounded redacted receipt, including the Git commit and
 an executed-source digest. Systemd journal metadata may persist until normal

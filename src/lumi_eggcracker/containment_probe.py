@@ -28,6 +28,7 @@ SYSTEMCTL = Path("/usr/bin/systemctl")
 SYSTEMD_RUN = Path("/usr/bin/systemd-run")
 PYTHON = Path("/usr/bin/python3")
 WORKER_LIFETIME_SECONDS = 45
+OWNER_TASK_LIMIT = 3
 WORKER_SLEEP_CODE = (
     "import time\n"
     f"deadline = time.monotonic() + {WORKER_LIFETIME_SECONDS}\n"
@@ -321,6 +322,7 @@ def _start_owner(unit: str) -> None:
             f"--unit={unit}",
             "--service-type=exec",
             "--property=Delegate=pids",
+            f"--property=TasksMax={OWNER_TASK_LIMIT}",
             "--property=PrivateNetwork=yes",
             "--property=RestrictAddressFamilies=AF_UNIX",
             "--property=NoNewPrivileges=yes",
@@ -358,21 +360,25 @@ def _capture_owner(unit: str) -> ProbeCgroupIdentity:
         raise ProbeError("CONTROL_GROUP_INVALID")
     parent = CGROUP_ROOT.joinpath(*cgroup.lstrip("/").split("/"))
     metadata = _exact_directory(parent)
+    parent_required = ("pids.events", "pids.max")
+    if not all((parent / item).is_file() for item in parent_required):
+        raise ProbeError("OWNER_TASK_CONTROLS_MISSING")
+    try:
+        task_limit = (parent / "pids.max").read_text(encoding="ascii").strip()
+        task_events = _read_events(parent / "pids.events")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ProbeError("OWNER_TASK_LIMIT_UNAVAILABLE") from error
+    if task_limit != str(OWNER_TASK_LIMIT) or "max" not in task_events:
+        raise ProbeError("OWNER_TASK_LIMIT_INVALID")
     target = parent / "target"
     try:
         target.mkdir(mode=0o755)
     except OSError as error:
         raise ProbeError("TARGET_CGROUP_CREATE_FAILED") from error
     target_meta = _exact_directory(target)
-    required = ("cgroup.events", "cgroup.kill", "cgroup.procs", "pids.events", "pids.max")
+    required = ("cgroup.events", "cgroup.kill", "cgroup.procs")
     if not all((target / item).is_file() for item in required):
         raise ProbeError("TARGET_CGROUP_CONTROLS_MISSING")
-    try:
-        _write_control(target / "pids.max", b"2\n")
-        if (target / "pids.max").read_text(encoding="ascii").strip() != "2":
-            raise ProbeError("TARGET_PROCESS_LIMIT_INVALID")
-    except (OSError, UnicodeDecodeError) as error:
-        raise ProbeError("TARGET_PROCESS_LIMIT_UNAVAILABLE") from error
     if "populated" not in _read_events(target / "cgroup.events"):
         raise ProbeError("TARGET_CGROUP_EVENTS_INVALID")
     return ProbeCgroupIdentity(

@@ -78,6 +78,29 @@ class ContainmentProbeTests(unittest.TestCase):
         with patch.object(probe, "_safe_run", return_value=absent):
             self.assertEqual("not-found", probe._load_state("unit.service"))
 
+    def test_owner_uses_an_exact_three_task_ceiling(self) -> None:
+        result = MagicMock(returncode=0)
+        with patch.object(probe, "_safe_run", return_value=result) as run:
+            probe._start_owner("lumi-eggcracker-probe-" + "a" * 32 + ".service")
+        argv = run.call_args.args[0]
+        self.assertIn("--property=Delegate=pids", argv)
+        self.assertIn("--property=TasksMax=3", argv)
+
+    def test_owner_capture_rejects_a_drifted_task_ceiling(self) -> None:
+        cgroup = probe_identity()
+        parent = cgroup.parent_path
+        with (
+            patch.object(probe, "_property", side_effect=[cgroup.invocation_id, cgroup.control_group]),
+            patch.object(probe, "_exact_directory", return_value=MagicMock(st_dev=1, st_ino=2)),
+            patch.object(probe.Path, "is_file", autospec=True, return_value=True),
+            patch.object(probe.Path, "read_text", autospec=True, return_value="4\n"),
+            patch.object(probe, "_read_events", return_value={"max": 0}),
+            self.assertRaisesRegex(probe.ProbeError, "OWNER_TASK_LIMIT_INVALID"),
+        ):
+            probe._capture_owner(cgroup.unit)
+        self.assertEqual("/system.slice/" + cgroup.unit, cgroup.control_group)
+        self.assertEqual(probe.CGROUP_ROOT / "system.slice" / cgroup.unit, parent)
+
     def test_preflight_requires_explicit_ack_before_any_host_check(self) -> None:
         with (
             patch.object(probe.os, "geteuid", side_effect=AssertionError("must not run"), create=True),
