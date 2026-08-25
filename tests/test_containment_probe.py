@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
@@ -278,7 +279,7 @@ class ContainmentProbeTests(unittest.TestCase):
                         handler(15, None)
                     return value
 
-                with (
+                contexts = (
                     patch.object(probe, "_host_preflight"),
                     patch.object(probe, "_source_identity", return_value=("d" * 40, "e" * 64)),
                     patch.object(probe.secrets, "token_hex", return_value="a" * 32),
@@ -321,7 +322,10 @@ class ContainmentProbeTests(unittest.TestCase):
                     ),
                     patch.object(probe.signal, "signal", side_effect=register),
                     self.assertRaisesRegex(probe.ProbeError, "INTERRUPTED"),
-                ):
+                )
+                with ExitStack() as stack:
+                    for context in contexts:
+                        stack.enter_context(context)
                     probe.run_probe(acknowledged=True)
 
     def test_public_module_has_no_network_or_install_dependency(self) -> None:
