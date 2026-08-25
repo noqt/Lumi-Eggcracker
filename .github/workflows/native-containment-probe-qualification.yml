@@ -363,6 +363,7 @@ jobs:
               attribute, injection_ordinal = STAGES[stage]
               original_stage = getattr(probe, attribute)
               original_canary = probe._spawn_canary
+              original_spawn_target = probe._spawn_target
               original_wait_target = probe._wait_target
               token = exact_token(mode, stage, position)
               unit = f"lumi-eggcracker-probe-{token}.service"
@@ -385,6 +386,11 @@ jobs:
                       canary_identity,
                       target_identities,
                   )
+                  return result
+
+              def tracked_spawn_target(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+                  result = original_spawn_target(*args, **kwargs)
+                  tracked_processes.append(result)
                   return result
 
               def tracked_wait_target(*args: object, **kwargs: object) -> tuple[object, object]:
@@ -440,6 +446,9 @@ jobs:
               with ExitStack() as stack:
                   stack.enter_context(patch.object(probe.secrets, "token_hex", return_value=token))
                   stack.enter_context(patch.object(probe, "_spawn_canary", side_effect=tracked_canary))
+                  stack.enter_context(
+                      patch.object(probe, "_spawn_target", side_effect=tracked_spawn_target)
+                  )
                   stack.enter_context(patch.object(probe, "_wait_target", side_effect=tracked_wait_target))
                   stack.enter_context(patch.object(probe, attribute, side_effect=staged))
                   try:
@@ -459,7 +468,15 @@ jobs:
                   if mode in {"fault", "interrupt"}:
                       identities = [canary_identity, *target_identities]
                       for value in identities:
-                          if value is not None and probe.identity(value.pid) == value:
+                          if value is None:
+                              continue
+                          absence_deadline = time.monotonic() + 2.0
+                          while (
+                              probe.identity(value.pid) == value
+                              and time.monotonic() < absence_deadline
+                          ):
+                              time.sleep(0.01)
+                          if probe.identity(value.pid) == value:
                               raise AssertionError("original bounded process survived cleanup")
 
 
