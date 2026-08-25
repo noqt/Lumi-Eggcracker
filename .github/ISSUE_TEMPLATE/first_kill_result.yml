@@ -1,0 +1,69 @@
+name: First-kill or preflight result
+description: Share a redacted result from the supported Lumi Eggcracker path
+title: "[Result]: "
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for running the supported path. A pass, refusal, or confusing result is useful. Share only redacted output from a disposable native Ubuntu host you own or are authorised to administer. Never post credentials, private model files, raw process arguments, account names, private paths, environment values, process IDs, or security-sensitive exploit details.
+  - type: dropdown
+    id: path
+    attributes:
+      label: Path attempted
+      options:
+        - Read-only preflight only
+        - Full first-kill demonstration
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Use the exact public release tag or a public commit from noqt/Lumi-Eggcracker. Do not post private-fork or unpushed commit identifiers.
+      placeholder: v0.5.0 or public noqt/Lumi-Eggcracker commit
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Supported host
+      description: Include Ubuntu, kernel, and systemd versions without a hostname, username, or private path.
+      placeholder: Ubuntu 24.04, kernel 6.x, systemd 255
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Observed outcome
+      options:
+        - Preflight passed
+        - Preflight refused before making changes
+        - Full demonstration passed and the unrelated canary survived
+        - Full demonstration stopped with a non-security error
+        - Result was confusing or did not match the documentation
+    validations:
+      required: true
+  - type: textarea
+    id: redacted_result
+    attributes:
+      label: Redacted result
+      description: For a full pass, include only result, profile, trigger, primitive, captured_processes, root_populated, surviving_pids count, trigger_to_empty_ms, canary outcome, and cleanup outcome. For a refusal or error, include only the final redacted status and the smallest safe reproduction; never paste raw commands, arguments, paths, or environment values.
+    validations:
+      required: true
+  - type: textarea
+    id: friction
+    attributes:
+      label: Setup friction or documentation gap
+      description: What nearly stopped the run, took unexpected effort, or should be clearer?
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety and evidence checks
+      options:
+        - label: I ran this on a disposable native Ubuntu machine I own or am authorised to administer.
+          required: true
+        - label: I reviewed and redacted this report; it contains no credentials, private model files, raw process arguments, account names, private paths, environment values, process IDs, or private data.
+          required: true
+        - label: This is not a security-sensitive report; I will report an approval bypass, supported-profile containment escape, false successful empty receipt, control-plane privilege gain, self-protection defeat, unsafe installer or uninstall behaviour, destructive false positive, or exploit details through private vulnerability reporting.
+          required: true
+        - label: I understand this self-reported result is not an audit or universal safety evidence.
+          required: true
