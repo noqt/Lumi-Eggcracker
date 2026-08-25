@@ -253,3 +253,297 @@ jobs:
           echo "NATIVE_COLLISION_INCUMBENT_SURVIVALS=1/1"
           echo "NATIVE_FINAL_RESIDUAL_UNITS=0"
           echo "NATIVE_FINAL_RESIDUAL_CGROUPS=0"
+
+      - name: Prepare reviewed interruption and fault harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          harness="$RUNNER_TEMP/containment-probe-native-matrix.py"
+          cat > "$harness" <<'PY'
+          import argparse
+          import hashlib
+          import json
+          import os
+          import signal
+          import subprocess
+          import sys
+          import time
+          from contextlib import ExitStack
+          from pathlib import Path
+          from unittest.mock import patch
+
+          sys.path.insert(0, str(Path.cwd() / "src"))
+          from lumi_eggcracker import containment_probe as probe
+
+          STAGES = {
+              "owner-capture": "_capture_owner",
+              "pidfd-binding": "open_pidfd",
+              "stop": "stop_pidfd",
+              "kill": "kill_path",
+              "empty-proof": "_strict_empty",
+              "cleanup": "_cleanup",
+          }
+
+
+          def exact_token(mode: str, stage: str, position: str) -> str:
+              material = f"{mode}:{stage}:{position}".encode("ascii")
+              return hashlib.sha256(material).hexdigest()[:32]
+
+
+          def write_state(path: Path | None, unit: str, canary: int | None, targets: list[int]) -> None:
+              if path is None:
+                  return
+              path.write_text(
+                  json.dumps({"canary": canary, "targets": targets, "unit": unit}, sort_keys=True),
+                  encoding="ascii",
+              )
+              path.chmod(0o600)
+
+
+          def emergency_cleanup(unit: str, processes: list[subprocess.Popen[bytes]]) -> None:
+              subprocess.run(
+                  [str(probe.SYSTEMCTL), "stop", unit],
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  timeout=4.0,
+                  check=False,
+              )
+              subprocess.run(
+                  [str(probe.SYSTEMCTL), "reset-failed", unit],
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  timeout=4.0,
+                  check=False,
+              )
+              for process in processes:
+                  if process.poll() is None:
+                      process.kill()
+                  try:
+                      process.wait(timeout=2.0)
+                  except subprocess.TimeoutExpired:
+                      process.kill()
+                      process.wait(timeout=2.0)
+
+
+          def run_case(
+              mode: str,
+              stage: str,
+              position: str,
+              state_path: Path | None,
+              marker_path: Path | None,
+          ) -> None:
+              attribute = STAGES[stage]
+              original_stage = getattr(probe, attribute)
+              original_canary = probe._spawn_canary
+              original_wait_target = probe._wait_target
+              token = exact_token(mode, stage, position)
+              unit = f"lumi-eggcracker-probe-{token}.service"
+              tracked_processes: list[subprocess.Popen[bytes]] = []
+              canary_pid: int | None = None
+              target_pids: list[int] = []
+              invocation_count = 0
+
+              def tracked_canary() -> tuple[subprocess.Popen[bytes], object, int]:
+                  nonlocal canary_pid
+                  result = original_canary()
+                  tracked_processes.append(result[0])
+                  canary_pid = result[1].pid
+                  write_state(state_path, unit, canary_pid, target_pids)
+                  return result
+
+              def tracked_wait_target(*args: object, **kwargs: object) -> tuple[object, object]:
+                  nonlocal target_pids
+                  result = original_wait_target(*args, **kwargs)
+                  target_pids = [item.pid for item in result]
+                  write_state(state_path, unit, canary_pid, target_pids)
+                  return result
+
+              def inject() -> None:
+                  if mode == "interrupt":
+                      os.kill(os.getpid(), signal.SIGTERM)
+                      return
+                  if mode == "fault":
+                      raise probe.ProbeError("INJECTED_FAULT")
+                  if mode == "orchestrator":
+                      if marker_path is None:
+                          raise AssertionError("marker required")
+                      marker_path.write_text("ready\n", encoding="ascii")
+                      marker_path.chmod(0o600)
+                      time.sleep(120)
+                      raise AssertionError("orchestrator was not terminated")
+                  raise AssertionError("unknown mode")
+
+              def staged(*args: object, **kwargs: object) -> object:
+                  nonlocal invocation_count
+                  invocation_count += 1
+                  first = invocation_count == 1
+                  if first and position == "before":
+                      inject()
+                  result = original_stage(*args, **kwargs)
+                  if first and position == "after":
+                      inject()
+                  return result
+
+              write_state(state_path, unit, canary_pid, target_pids)
+              with ExitStack() as stack:
+                  stack.enter_context(patch.object(probe.secrets, "token_hex", return_value=token))
+                  stack.enter_context(patch.object(probe, "_spawn_canary", side_effect=tracked_canary))
+                  stack.enter_context(patch.object(probe, "_wait_target", side_effect=tracked_wait_target))
+                  stack.enter_context(patch.object(probe, attribute, side_effect=staged))
+                  try:
+                      receipt = probe.run_probe(acknowledged=True)
+                  except probe.ProbeError as error:
+                      if mode == "interrupt" and error.code != "INTERRUPTED":
+                          raise
+                      if mode == "fault":
+                          expected = "CLEANUP_INCOMPLETE" if stage == "cleanup" else "INJECTED_FAULT"
+                          if error.code != expected:
+                              raise
+                  else:
+                      raise AssertionError(f"{mode}:{stage}:{position} returned success: {receipt}")
+                  finally:
+                      if mode == "fault" and stage == "cleanup" and position == "before":
+                          emergency_cleanup(unit, tracked_processes)
+
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument("mode", choices=("fault", "interrupt", "orchestrator"))
+          parser.add_argument("stage", choices=tuple(STAGES))
+          parser.add_argument("position", choices=("before", "after"))
+          parser.add_argument("--state", type=Path)
+          parser.add_argument("--marker", type=Path)
+          arguments = parser.parse_args()
+          run_case(arguments.mode, arguments.stage, arguments.position, arguments.state, arguments.marker)
+          PY
+          /usr/bin/python3 -I -S -m py_compile "$harness"
+
+      - name: Run interrupt and deterministic-fault matrices
+        shell: bash
+        run: |
+          set -euo pipefail
+          harness="$RUNNER_TEMP/containment-probe-native-matrix.py"
+          stages=(owner-capture pidfd-binding stop kill empty-proof cleanup)
+          positions=(before after)
+
+          assert_no_residuals() {
+            local units cgroups
+            units="$(sudo -n systemctl list-units --all --plain --no-legend \
+              'lumi-eggcracker-probe-*.service')" || return 1
+            test -z "$units"
+            cgroups="$(sudo -n find /sys/fs/cgroup/system.slice -mindepth 1 -maxdepth 1 \
+              -type d -name 'lumi-eggcracker-probe-*.service' -print)" || return 1
+            test -z "$cgroups"
+          }
+
+          for mode in interrupt fault
+          do
+            for stage in "${stages[@]}"
+            do
+              for position in "${positions[@]}"
+              do
+                sudo -n /usr/bin/python3 -I -S "$harness" "$mode" "$stage" "$position"
+                assert_no_residuals
+              done
+            done
+          done
+          echo "NATIVE_INTERRUPT_FAIL_CLOSED=12/12"
+          echo "NATIVE_INTERRUPT_RESIDUAL_UNITS=0"
+          echo "NATIVE_INTERRUPT_RESIDUAL_CGROUPS=0"
+          echo "NATIVE_DETERMINISTIC_FAULT_FAIL_CLOSED=12/12"
+          echo "NATIVE_DETERMINISTIC_FAULT_RESIDUAL_UNITS=0"
+          echo "NATIVE_DETERMINISTIC_FAULT_RESIDUAL_CGROUPS=0"
+
+      - name: Run forced-orchestrator termination matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          harness="$RUNNER_TEMP/containment-probe-native-matrix.py"
+          case_dir="$RUNNER_TEMP/lumi-eggcracker-orchestrator-cases"
+          mkdir -p "$case_dir"
+          stages=(owner-capture pidfd-binding stop kill empty-proof cleanup)
+          positions=(before after)
+          outer_pids=()
+          root_pid_files=()
+          state_files=()
+          marker_files=()
+
+          for stage in "${stages[@]}"
+          do
+            for position in "${positions[@]}"
+            do
+              name="$stage-$position"
+              root_pid_file="$case_dir/$name.root-pid"
+              state_file="$case_dir/$name.state.json"
+              marker_file="$case_dir/$name.marker"
+              : > "$root_pid_file"
+              : > "$state_file"
+              : > "$marker_file"
+              chmod 0600 "$root_pid_file" "$state_file" "$marker_file"
+              sudo -n /bin/bash -c \
+                'umask 077; echo $$ > "$1"; exec /usr/bin/python3 -I -S "$2" orchestrator "$3" "$4" --state "$5" --marker "$6"' \
+                bash "$root_pid_file" "$harness" "$stage" "$position" "$state_file" "$marker_file" &
+              outer_pids+=("$!")
+              root_pid_files+=("$root_pid_file")
+              state_files+=("$state_file")
+              marker_files+=("$marker_file")
+            done
+          done
+
+          deadline=$((SECONDS + 25))
+          for marker in "${marker_files[@]}"
+          do
+            while test ! -s "$marker"
+            do
+              if (( SECONDS >= deadline )); then
+                echo "Forced-orchestrator stage did not reach its kill point" >&2
+                exit 1
+              fi
+              sleep 0.1
+            done
+          done
+
+          for root_pid_file in "${root_pid_files[@]}"
+          do
+            test -s "$root_pid_file"
+            root_pid="$(<"$root_pid_file")"
+            [[ "$root_pid" =~ ^[0-9]+$ ]]
+            sudo -n kill -KILL "$root_pid"
+          done
+          for outer_pid in "${outer_pids[@]}"
+          do
+            wait "$outer_pid" || true
+          done
+
+          sleep 50
+          /usr/bin/python3 -I -S - "${state_files[@]}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          for raw in sys.argv[1:]:
+              state = json.loads(Path(raw).read_text(encoding="ascii"))
+              values = [state.get("canary"), *state.get("targets", [])]
+              for value in values:
+                  if value is not None and (Path("/proc") / str(value)).exists():
+                      raise SystemExit("bounded worker survived its deadline")
+          PY
+          units="$(sudo -n systemctl list-units --all --plain --no-legend \
+            'lumi-eggcracker-probe-*.service')" || {
+            echo "Unable to enumerate forced-termination units" >&2
+            exit 1
+          }
+          test -z "$units"
+          cgroups="$(sudo -n find /sys/fs/cgroup/system.slice -mindepth 1 -maxdepth 1 \
+            -type d -name 'lumi-eggcracker-probe-*.service' -print)" || {
+            echo "Unable to enumerate forced-termination cgroups" >&2
+            exit 1
+          }
+          test -z "$cgroups"
+          echo "NATIVE_FORCED_ORCHESTRATOR_TERMINATIONS=12/12"
+          echo "NATIVE_FORCED_ORCHESTRATOR_WORKER_SURVIVORS=0"
+          echo "NATIVE_FORCED_ORCHESTRATOR_RESIDUAL_UNITS=0"
+          echo "NATIVE_FORCED_ORCHESTRATOR_RESIDUAL_CGROUPS=0"
