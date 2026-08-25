@@ -24,9 +24,11 @@ jobs:
     timeout-minutes: 20
     env:
       CANDIDATE_COMMIT: 4bbd788606ca5f8114ff16ddf64d7ccc7afa4602
+      CANDIDATE_TREE: b24b32dbc6771b0fa5a372c4979e0a3d0f5215bc
+      CANDIDATE_SOURCE_SHA256: 6780d71bc836d663d9b9810b8fcdfd6a5ed313ef0c815c978b360c5be3dd94a6
     steps:
       - name: Check out the exact reviewed candidate
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -37,6 +39,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$CANDIDATE_TREE"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
           test "$(cat /proc/1/comm)" = systemd
           test ! -e /run/systemd/container
           . /etc/os-release
@@ -44,10 +48,12 @@ jobs:
           test "$VERSION_ID" = 24.04
           test -f /sys/fs/cgroup/cgroup.controllers
           grep -qw pids /sys/fs/cgroup/cgroup.controllers
-          test -f /sys/fs/cgroup/cgroup.kill
+          test -d /sys/fs/cgroup/system.slice
+          test -f /sys/fs/cgroup/system.slice/cgroup.kill
           sudo -n true
           for path in \
-            /opt/lumi-eggcracker \
+            /usr/local/lib/lumi-eggcracker \
+            /usr/local/bin/eggcracker \
             /etc/lumi-eggcracker \
             /var/lib/lumi-eggcracker \
             /run/lumi-eggcracker \
@@ -57,6 +63,16 @@ jobs:
           do
             test ! -e "$path"
           done
+          printf 'NATIVE_HOST_OS=%s-%s\n' "$ID" "$VERSION_ID"
+          printf 'NATIVE_KERNEL=%s\n' "$(uname -r)"
+          printf 'NATIVE_SYSTEMD=%s\n' "$(systemd --version | head -n 1)"
+          printf 'NATIVE_PYTHON=%s\n' "$(/usr/bin/python3 --version 2>&1)"
+          printf 'NATIVE_IMAGE_OS=%s\n' "${ImageOS:-unavailable}"
+          printf 'NATIVE_IMAGE_VERSION=%s\n' "${ImageVersion:-unavailable}"
+          echo 'NATIVE_CGROUP=v2-system.slice-cgroup.kill'
+          printf 'NATIVE_CANDIDATE_COMMIT=%s\n' "$CANDIDATE_COMMIT"
+          printf 'NATIVE_CANDIDATE_TREE=%s\n' "$CANDIDATE_TREE"
+          printf 'NATIVE_CANDIDATE_SOURCE_SHA256=%s\n' "$CANDIDATE_SOURCE_SHA256"
 
       - name: Run 100 exact containment probes
         shell: bash
@@ -68,7 +84,6 @@ jobs:
           verifier="$RUNNER_TEMP/verify-containment-probe-receipt.py"
           cat > "$verifier" <<'PY'
           import json
-          import string
           import sys
 
           expected_keys = {
@@ -105,8 +120,7 @@ jobs:
           assert receipt["result"] == "TERMINATED"
           assert receipt["root_populated"] == 0
           assert receipt["source_commit"] == sys.argv[2]
-          digest = receipt["source_tree_sha256"]
-          assert len(digest) == 64 and all(character in string.hexdigits for character in digest)
+          assert receipt["source_tree_sha256"] == sys.argv[3]
           assert receipt["target_processes"] == 2
           assert receipt["target_survivors"] == 0
           assert receipt["trigger_to_empty_ms"] >= 0
@@ -118,21 +132,34 @@ jobs:
             receipt="$receipt_dir/sequential-$iteration.json"
             sudo -n /usr/bin/python3 -I -S scripts/containment_probe.py \
               --i-understand-this-kills-a-test-tree > "$receipt"
-            /usr/bin/python3 -I -S "$verifier" "$receipt" "$CANDIDATE_COMMIT"
+            /usr/bin/python3 -I -S "$verifier" \
+              "$receipt" "$CANDIDATE_COMMIT" "$CANDIDATE_SOURCE_SHA256"
           done
 
-          if sudo systemctl list-units --all --plain --no-legend \
-            'lumi-eggcracker-probe-*.service' | grep -q .
-          then
+          units="$(sudo -n systemctl list-units --all --plain --no-legend \
+            'lumi-eggcracker-probe-*.service')" || {
+            echo "Unable to enumerate residual probe units" >&2
+            exit 1
+          }
+          if test -n "$units"; then
             echo "Residual probe unit found after sequential qualification" >&2
             exit 1
           fi
-          if sudo bash -c "compgen -G '/sys/fs/cgroup/system.slice/lumi-eggcracker-probe-*.service' >/dev/null"
-          then
+          cgroups="$(sudo -n find /sys/fs/cgroup/system.slice -mindepth 1 -maxdepth 1 \
+            -type d -name 'lumi-eggcracker-probe-*.service' -print)" || {
+            echo "Unable to enumerate residual probe cgroups" >&2
+            exit 1
+          }
+          if test -n "$cgroups"; then
             echo "Residual probe cgroup found after sequential qualification" >&2
             exit 1
           fi
           echo "NATIVE_SEQUENTIAL_RESULT=100/100"
+          echo "NATIVE_SEQUENTIAL_CANARY_SURVIVALS=100/100"
+          echo "NATIVE_SEQUENTIAL_CLEANUPS=100/100"
+          echo "NATIVE_SEQUENTIAL_TARGET_SURVIVORS=0/200"
+          echo "NATIVE_SEQUENTIAL_RESIDUAL_UNITS=0"
+          echo "NATIVE_SEQUENTIAL_RESIDUAL_CGROUPS=0"
 
       - name: Run concurrent and forced-collision cases
         shell: bash
@@ -157,7 +184,8 @@ jobs:
           for instance in 1 2
           do
             /usr/bin/python3 -I -S "$verifier" \
-              "$receipt_dir/concurrent-$instance.json" "$CANDIDATE_COMMIT"
+              "$receipt_dir/concurrent-$instance.json" \
+              "$CANDIDATE_COMMIT" "$CANDIDATE_SOURCE_SHA256"
           done
 
           token=ffffffffffffffffffffffffffffffff
@@ -199,16 +227,29 @@ jobs:
           cleanup_collision
           trap - EXIT
 
-          if sudo systemctl list-units --all --plain --no-legend \
-            'lumi-eggcracker-probe-*.service' | grep -q .
-          then
+          units="$(sudo -n systemctl list-units --all --plain --no-legend \
+            'lumi-eggcracker-probe-*.service')" || {
+            echo "Unable to enumerate residual probe units" >&2
+            exit 1
+          }
+          if test -n "$units"; then
             echo "Residual probe unit found after concurrency qualification" >&2
             exit 1
           fi
-          if sudo bash -c "compgen -G '/sys/fs/cgroup/system.slice/lumi-eggcracker-probe-*.service' >/dev/null"
-          then
+          cgroups="$(sudo -n find /sys/fs/cgroup/system.slice -mindepth 1 -maxdepth 1 \
+            -type d -name 'lumi-eggcracker-probe-*.service' -print)" || {
+            echo "Unable to enumerate residual probe cgroups" >&2
+            exit 1
+          }
+          if test -n "$cgroups"; then
             echo "Residual probe cgroup found after concurrency qualification" >&2
             exit 1
           fi
           echo "NATIVE_CONCURRENCY_RESULT=2/2"
-          echo "NATIVE_COLLISION_RESULT=EXPECTED_FAIL_CLOSED"
+          echo "NATIVE_CONCURRENT_CANARY_SURVIVALS=2/2"
+          echo "NATIVE_CONCURRENT_CLEANUPS=2/2"
+          echo "NATIVE_CONCURRENT_TARGET_SURVIVORS=0/4"
+          echo "NATIVE_COLLISION_RESULT=1/1_EXPECTED_FAIL_CLOSED"
+          echo "NATIVE_COLLISION_INCUMBENT_SURVIVALS=1/1"
+          echo "NATIVE_FINAL_RESIDUAL_UNITS=0"
+          echo "NATIVE_FINAL_RESIDUAL_CGROUPS=0"
