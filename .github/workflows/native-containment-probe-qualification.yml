@@ -1,0 +1,214 @@
+name: Native containment-probe qualification (draft only)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/native-containment-probe-qualification.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-containment-probe-qualification-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  native-probe:
+    if: >-
+      github.repository == 'noqt/Lumi-Eggcracker' &&
+      github.event.pull_request.draft == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'qualification/containment-probe-native'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CANDIDATE_COMMIT: 4bbd788606ca5f8114ff16ddf64d7ccc7afa4602
+    steps:
+      - name: Check out the exact reviewed candidate
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: 4bbd788606ca5f8114ff16ddf64d7ccc7afa4602
+
+      - name: Bind the disposable native host
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_COMMIT"
+          test "$(cat /proc/1/comm)" = systemd
+          test ! -e /run/systemd/container
+          . /etc/os-release
+          test "$ID" = ubuntu
+          test "$VERSION_ID" = 24.04
+          test -f /sys/fs/cgroup/cgroup.controllers
+          grep -qw pids /sys/fs/cgroup/cgroup.controllers
+          test -f /sys/fs/cgroup/cgroup.kill
+          sudo -n true
+          for path in \
+            /opt/lumi-eggcracker \
+            /etc/lumi-eggcracker \
+            /var/lib/lumi-eggcracker \
+            /run/lumi-eggcracker \
+            /run/lumi-eggcracker-watchdog \
+            /etc/systemd/system/lumi-eggcracker.service \
+            /etc/systemd/system/lumi-eggcracker-watchdog.service
+          do
+            test ! -e "$path"
+          done
+
+      - name: Run 100 exact containment probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt_dir="$RUNNER_TEMP/lumi-eggcracker-native-receipts"
+          mkdir -p "$receipt_dir"
+          verifier="$RUNNER_TEMP/verify-containment-probe-receipt.py"
+          cat > "$verifier" <<'PY'
+          import json
+          import string
+          import sys
+
+          expected_keys = {
+              "canary_survived",
+              "changes_made",
+              "cleanup_complete",
+              "descendant_cgroups_checked",
+              "installation_performed",
+              "journal_history_may_persist",
+              "mode",
+              "network_requests_made",
+              "primitive",
+              "result",
+              "root_populated",
+              "source_commit",
+              "source_tree_sha256",
+              "target_processes",
+              "target_survivors",
+              "trigger_to_empty_ms",
+              "workload_detection_performed",
+          }
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              receipt = json.load(handle)
+          assert set(receipt) == expected_keys
+          assert receipt["canary_survived"] is True
+          assert receipt["changes_made"] is True
+          assert receipt["cleanup_complete"] is True
+          assert receipt["descendant_cgroups_checked"] >= 1
+          assert receipt["installation_performed"] is False
+          assert receipt["journal_history_may_persist"] is True
+          assert receipt["mode"] == "containment-primitive-probe"
+          assert receipt["network_requests_made"] is False
+          assert receipt["primitive"] == "pidfd-stop+cgroup.kill"
+          assert receipt["result"] == "TERMINATED"
+          assert receipt["root_populated"] == 0
+          assert receipt["source_commit"] == sys.argv[2]
+          digest = receipt["source_tree_sha256"]
+          assert len(digest) == 64 and all(character in string.hexdigits for character in digest)
+          assert receipt["target_processes"] == 2
+          assert receipt["target_survivors"] == 0
+          assert receipt["trigger_to_empty_ms"] >= 0
+          assert receipt["workload_detection_performed"] is False
+          PY
+
+          for iteration in $(seq 1 100)
+          do
+            receipt="$receipt_dir/sequential-$iteration.json"
+            sudo -n /usr/bin/python3 -I -S scripts/containment_probe.py \
+              --i-understand-this-kills-a-test-tree > "$receipt"
+            /usr/bin/python3 -I -S "$verifier" "$receipt" "$CANDIDATE_COMMIT"
+          done
+
+          if sudo systemctl list-units --all --plain --no-legend \
+            'lumi-eggcracker-probe-*.service' | grep -q .
+          then
+            echo "Residual probe unit found after sequential qualification" >&2
+            exit 1
+          fi
+          if sudo bash -c "compgen -G '/sys/fs/cgroup/system.slice/lumi-eggcracker-probe-*.service' >/dev/null"
+          then
+            echo "Residual probe cgroup found after sequential qualification" >&2
+            exit 1
+          fi
+          echo "NATIVE_SEQUENTIAL_RESULT=100/100"
+
+      - name: Run concurrent and forced-collision cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          receipt_dir="$RUNNER_TEMP/lumi-eggcracker-native-concurrency"
+          mkdir -p "$receipt_dir"
+          verifier="$RUNNER_TEMP/verify-containment-probe-receipt.py"
+
+          pids=()
+          for instance in 1 2
+          do
+            sudo -n /usr/bin/python3 -I -S scripts/containment_probe.py \
+              --i-understand-this-kills-a-test-tree > "$receipt_dir/concurrent-$instance.json" &
+            pids+=("$!")
+          done
+          for pid in "${pids[@]}"
+          do
+            wait "$pid"
+          done
+          for instance in 1 2
+          do
+            /usr/bin/python3 -I -S "$verifier" \
+              "$receipt_dir/concurrent-$instance.json" "$CANDIDATE_COMMIT"
+          done
+
+          token=ffffffffffffffffffffffffffffffff
+          unit="lumi-eggcracker-probe-$token.service"
+          cleanup_collision() {
+            sudo systemctl stop "$unit" >/dev/null 2>&1 || true
+            sudo systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+          }
+          trap cleanup_collision EXIT
+          sudo systemd-run --quiet \
+            --unit="$unit" \
+            --service-type=exec \
+            --property=PrivateNetwork=yes \
+            --property=RestrictAddressFamilies=AF_UNIX \
+            --property=NoNewPrivileges=yes \
+            --property=KillMode=control-group \
+            --property=TimeoutStopSec=3s \
+            /usr/bin/python3 -I -S -c 'import time; time.sleep(45)'
+          sudo systemctl is-active --quiet "$unit"
+
+          sudo -n /usr/bin/python3 -I -S - "$token" <<'PY'
+          import sys
+          from pathlib import Path
+          from unittest.mock import patch
+
+          sys.path.insert(0, str(Path.cwd() / "src"))
+          from lumi_eggcracker import containment_probe as probe
+
+          with patch.object(probe.secrets, "token_hex", return_value=sys.argv[1]):
+              try:
+                  probe.run_probe(acknowledged=True)
+              except probe.ProbeError as error:
+                  if error.code != "UNIT_COLLISION":
+                      raise
+              else:
+                  raise AssertionError("forced unit collision returned success")
+          PY
+          sudo systemctl is-active --quiet "$unit"
+          cleanup_collision
+          trap - EXIT
+
+          if sudo systemctl list-units --all --plain --no-legend \
+            'lumi-eggcracker-probe-*.service' | grep -q .
+          then
+            echo "Residual probe unit found after concurrency qualification" >&2
+            exit 1
+          fi
+          if sudo bash -c "compgen -G '/sys/fs/cgroup/system.slice/lumi-eggcracker-probe-*.service' >/dev/null"
+          then
+            echo "Residual probe cgroup found after concurrency qualification" >&2
+            exit 1
+          fi
+          echo "NATIVE_CONCURRENCY_RESULT=2/2"
+          echo "NATIVE_COLLISION_RESULT=EXPECTED_FAIL_CLOSED"
