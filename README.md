@@ -3,6 +3,7 @@
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
 [v0.5.0 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v0.5.0)
+· [Check host compatibility](#check-host-compatibility)
 · [Run the first kill](#run-the-first-kill)
 · [Design-partner Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
@@ -21,6 +22,11 @@ process tree, and leaves a bounded receipt proving the tree is empty.
 > survives. We are opening three design-partner places for people who will run
 > it, challenge the two supported profiles, and report friction or a
 > reproducible miss. There is no telemetry, paid plan or sales call.
+
+**Start with the read-only host check.** It makes no network request and creates
+no workspace, build, installation or service. [Check compatibility
+now](#check-host-compatibility), then continue to the full demonstration only
+on a disposable supported host. A passing preflight is not a containment result.
 
 ## Run the first kill
 
@@ -50,7 +56,7 @@ The complete terminal capture is in
 [`campaign/first-kill.timing`](campaign/first-kill.timing). Replay it on Linux
 with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.typescript`.
 
-### Prerequisites and safety
+### Check host compatibility
 
 Use a disposable, supported native Ubuntu machine whose loss is acceptable.
 The demonstration requires root, systemd, unified cgroup v2 with `cgroup.kill`,
@@ -60,7 +66,7 @@ llama.cpp runner, downloads signed release assets, and—only after the explicit
 flag—downloads the third-party Qwen model. Do not begin on a workstation,
 shared host, production server, or machine carrying private data.
 
-Clone public `main` and run:
+Clone public `main` and run the read-only preflight:
 
 ```sh
 git clone https://github.com/noqt/Lumi-Eggcracker.git
