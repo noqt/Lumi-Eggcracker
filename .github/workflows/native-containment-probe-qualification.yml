@@ -556,24 +556,51 @@ jobs:
                   result.write_text("SIGKILL_CONFIRMED\n", encoding="ascii")
                   result.chmod(0o600)
               finally:
-                  if process is not None and process.poll() is None:
-                      if descriptor is None and bound_identity is not None:
-                          try:
-                              if probe.identity(bound_identity.pid) == bound_identity:
-                                  descriptor = probe.open_pidfd(bound_identity)
-                          except BaseException:
-                              descriptor = None
-                      if descriptor is not None:
-                          try:
-                              signal.pidfd_send_signal(descriptor, signal.SIGKILL)
-                          except ProcessLookupError:
-                              pass
+                  cleanup_failed = False
+                  try:
+                      if process is not None and process.poll() is None:
+                          if descriptor is None and bound_identity is not None:
+                              try:
+                                  if probe.identity(bound_identity.pid) == bound_identity:
+                                      descriptor = probe.open_pidfd(bound_identity)
+                              except BaseException:
+                                  descriptor = None
+                          signalled_by_pidfd = False
+                          if descriptor is not None:
+                              try:
+                                  signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                                  signalled_by_pidfd = True
+                              except ProcessLookupError:
+                                  pass
+                              except OSError:
+                                  pass
+                          if process.poll() is None and not signalled_by_pidfd:
+                              try:
+                                  process.kill()
+                              except ProcessLookupError:
+                                  pass
+                              except OSError:
+                                  cleanup_failed = True
                           try:
                               process.wait(timeout=2.0)
                           except subprocess.TimeoutExpired:
-                              pass
-                  if descriptor is not None:
-                      os.close(descriptor)
+                              try:
+                                  process.kill()
+                              except ProcessLookupError:
+                                  pass
+                              except OSError:
+                                  cleanup_failed = True
+                              try:
+                                  process.wait(timeout=2.0)
+                              except subprocess.TimeoutExpired:
+                                  cleanup_failed = True
+                          if process.poll() is None:
+                              cleanup_failed = True
+                  finally:
+                      if descriptor is not None:
+                          os.close(descriptor)
+                  if cleanup_failed:
+                      raise RuntimeError("direct child exit was not confirmed")
 
 
           try:
@@ -675,7 +702,7 @@ jobs:
           done
 
           sleep 50
-          if ! /usr/bin/python3 -I -S - "${state_files[@]}" > /dev/null 2>&1 <<'PY'
+          if ! sudo -n /usr/bin/python3 -I -S - "${state_files[@]}" > /dev/null 2>&1 <<'PY'
           import hashlib
           import json
           import sys
