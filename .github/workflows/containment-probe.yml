@@ -1,0 +1,301 @@
+name: Containment probe (manual disposable runner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      i_understand_this_kills_a_test_tree:
+        description: I understand this kills a bounded synthetic process tree on a disposable runner
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  containment-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      ACKNOWLEDGED: ${{ inputs.i_understand_this_kills_a_test_tree }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+      QUALIFIED_SOURCE_SHA256: 22d175cae00b639b11cd4ab95bdcb7e0bfcde133d58b294ce3ae297b653fae4b
+      QUALIFIED_SRC_TREE: 53ff50e09e9ec152546c25cb3c99d55c965b05e4
+      QUALIFIED_SCRIPTS_TREE: b35c22c332c6579c395a5e953e229581e80c3b59
+    steps:
+      - name: Check out the dispatched default branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Bind the disposable public host and exact source
+        shell: bash
+        run: |
+          set -uo pipefail
+          umask 077
+          exec 3>&1
+          exec 1>"$RUNNER_TEMP/lumi-eggcracker-preflight.stdout"
+          exec 2>"$RUNNER_TEMP/lumi-eggcracker-preflight.stderr"
+
+          refuse() {
+            printf 'FORK_PROBE_PREFLIGHT=%s\n' "$1" >&3
+            exit 1
+          }
+
+          test "$ACKNOWLEDGED" = "true" || refuse ACKNOWLEDGEMENT_REQUIRED
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted" || refuse GITHUB_HOSTED_REQUIRED
+          test "$REPOSITORY_VISIBILITY" = "public" || refuse PUBLIC_REPOSITORY_REQUIRED
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch" || refuse WORKFLOW_DISPATCH_REQUIRED
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" || refuse DEFAULT_BRANCH_REQUIRED
+
+          head_commit="$(git rev-parse HEAD)" || refuse SOURCE_COMMIT_UNAVAILABLE
+          test "$head_commit" = "$GITHUB_SHA" || refuse SOURCE_COMMIT_DRIFT
+          git diff --no-ext-diff --quiet HEAD -- src scripts \
+            || refuse SOURCE_TRACKED_FILES_DIRTY
+          executable_status="$(git status --porcelain=v1 --untracked-files=all --ignored -- src scripts)" \
+            || refuse SOURCE_STATUS_UNAVAILABLE
+          test -z "$executable_status" || refuse SOURCE_EXECUTABLE_PATH_DIRTY
+
+          src_tree="$(git rev-parse "$GITHUB_SHA:src")" || refuse SOURCE_TREE_UNAVAILABLE
+          scripts_tree="$(git rev-parse "$GITHUB_SHA:scripts")" || refuse SOURCE_TREE_UNAVAILABLE
+          test "$src_tree" = "$QUALIFIED_SRC_TREE" || refuse SOURCE_TREE_UNQUALIFIED
+          test "$scripts_tree" = "$QUALIFIED_SCRIPTS_TREE" || refuse SOURCE_TREE_UNQUALIFIED
+
+          committed_workflow_blob="$(git rev-parse "$GITHUB_SHA:.github/workflows/containment-probe.yml")" \
+            || refuse WORKFLOW_IDENTITY_UNAVAILABLE
+          working_workflow_blob="$(git hash-object .github/workflows/containment-probe.yml)" \
+            || refuse WORKFLOW_IDENTITY_UNAVAILABLE
+          test "$committed_workflow_blob" = "$working_workflow_blob" \
+            || refuse WORKFLOW_IDENTITY_DRIFT
+          [[ "$committed_workflow_blob" =~ ^[0-9a-f]{40}$ ]] \
+            || refuse WORKFLOW_IDENTITY_UNAVAILABLE
+
+          . /etc/os-release || refuse HOST_IDENTITY_UNAVAILABLE
+          test "${ID:-}" = "ubuntu" && test "${VERSION_ID:-}" = "24.04" \
+            || refuse UBUNTU_2404_REQUIRED
+          test "$(cat /proc/1/comm)" = "systemd" || refuse SYSTEMD_PID1_REQUIRED
+          test ! -e /run/systemd/container || refuse CONTAINER_UNSUPPORTED
+          test "$(stat -fc %T /sys/fs/cgroup)" = "cgroup2fs" || refuse CGROUP_V2_REQUIRED
+          test -e /sys/fs/cgroup/cgroup.kill || refuse CGROUP_KILL_REQUIRED
+          read -r controllers < /sys/fs/cgroup/cgroup.controllers
+          case " $controllers " in
+            *" pids "*) ;;
+            *) refuse PIDS_CONTROLLER_REQUIRED ;;
+          esac
+
+          for target in \
+            /usr/local/lib/lumi-eggcracker \
+            /usr/local/bin/eggcracker \
+            /etc/lumi-eggcracker \
+            /var/lib/lumi-eggcracker \
+            /run/lumi-eggcracker \
+            /run/lumi-eggcracker-watchdog \
+            /etc/systemd/system/lumi-eggcracker.service \
+            /etc/systemd/system/lumi-eggcracker-watchdog.service
+          do
+            test ! -e "$target" && test ! -L "$target" || refuse ACTIVE_INSTALLATION_REFUSED
+          done
+
+          source_identity="$(/usr/bin/python3 -I -S - <<'PY'
+          import sys
+          from pathlib import Path
+
+          sys.path.insert(0, str(Path.cwd() / "src"))
+          from lumi_eggcracker.containment_probe import _source_identity
+
+          commit, digest = _source_identity()
+          print(f"{commit} {digest}")
+          PY
+          )" || refuse SOURCE_IDENTITY_UNAVAILABLE
+          read -r source_commit source_digest <<< "$source_identity"
+          test "$source_commit" = "$GITHUB_SHA" || refuse SOURCE_IDENTITY_DRIFT
+          test "$source_digest" = "$QUALIFIED_SOURCE_SHA256" || refuse SOURCE_DIGEST_UNQUALIFIED
+          printf 'FORK_PROBE_WORKFLOW_BLOB=%s\n' "$committed_workflow_blob" >&3
+          echo "FORK_PROBE_PREFLIGHT=PASS" >&3
+
+      - name: Run and validate the bounded synthetic probe
+        shell: bash
+        run: |
+          set -uo pipefail
+          umask 077
+          stdout_path="$RUNNER_TEMP/lumi-eggcracker-probe.stdout"
+          stderr_path="$RUNNER_TEMP/lumi-eggcracker-probe.stderr"
+          : > "$stdout_path"
+          : > "$stderr_path"
+          chmod 0600 "$stdout_path" "$stderr_path"
+
+          set +e
+          sudo -n /usr/bin/python3 -I -S scripts/containment_probe.py \
+            --i-understand-this-kills-a-test-tree \
+            > "$stdout_path" 2> "$stderr_path"
+          probe_status=$?
+          set -e
+
+          /usr/bin/python3 -I -S - \
+            "$probe_status" "$stdout_path" "$stderr_path" "$GITHUB_SHA" \
+            "$QUALIFIED_SOURCE_SHA256" <<'PY'
+          import json
+          import math
+          import sys
+          from pathlib import Path
+
+          status = int(sys.argv[1])
+          stdout_path = Path(sys.argv[2])
+          stderr_path = Path(sys.argv[3])
+          expected_commit = sys.argv[4]
+          expected_digest = sys.argv[5]
+          success_keys = {
+              "canary_survived",
+              "changes_made",
+              "cleanup_complete",
+              "descendant_cgroups_checked",
+              "installation_performed",
+              "journal_history_may_persist",
+              "mode",
+              "network_requests_made",
+              "primitive",
+              "result",
+              "root_populated",
+              "source_commit",
+              "source_tree_sha256",
+              "target_processes",
+              "target_survivors",
+              "trigger_to_empty_ms",
+              "workload_detection_performed",
+          }
+          allowed_failures = {
+              "ACTIVE_INSTALLATION_REFUSED",
+              "BOOT_IDENTITY_DRIFT",
+              "CANARY_DIED",
+              "CANARY_IDENTITY_UNAVAILABLE",
+              "CANARY_INSIDE_TARGET_OWNER",
+              "CGROUP_CONTROL_SHORT_WRITE",
+              "CGROUP_IDENTITY_INVALID",
+              "CGROUP_IDENTITY_UNAVAILABLE",
+              "CGROUP_PROCESS_LIST_INVALID",
+              "CGROUP_PROCESS_READ_FAILED",
+              "CGROUP_V2_UNAVAILABLE",
+              "CLEANUP_INCOMPLETE",
+              "CONTAINER_UNSUPPORTED",
+              "CONTROL_GROUP_DRIFT",
+              "CONTROL_GROUP_INVALID",
+              "DISPOSABLE_HOST_ACK_REQUIRED",
+              "EMPTY_PROOF_UNAVAILABLE",
+              "EMPTY_PROOF_TIMEOUT",
+              "HELD_PIDFD_CLEANUP_FAILED",
+              "HOST_COMMAND_FAILED",
+              "HOST_IDENTITY_UNAVAILABLE",
+              "INTERRUPTED",
+              "INVOCATION_ID_DRIFT",
+              "INVOCATION_ID_INVALID",
+              "NATIVE_LINUX_REQUIRED",
+              "OWNER_CGROUP_IDENTITY_DRIFT",
+              "OWNER_TASK_CONTROLS_MISSING",
+              "OWNER_TASK_LIMIT_INVALID",
+              "OWNER_TASK_LIMIT_UNAVAILABLE",
+              "PIDFD_LIVENESS_FAILED",
+              "PIDFD_UNAVAILABLE",
+              "PIDS_CONTROLLER_UNAVAILABLE",
+              "PROBE_INCOMPLETE",
+              "PROBE_STAGE_FAILED",
+              "PROCESS_CGROUP_INVALID",
+              "PROCESS_CGROUP_UNAVAILABLE",
+              "PROCESS_IDENTITY_DRIFT",
+              "RECEIPT_SCHEMA_INVALID",
+              "REQUIRED_COMMAND_MISSING",
+              "ROOT_REQUIRED",
+              "SOURCE_COMMIT_INVALID",
+              "SOURCE_COMMIT_UNAVAILABLE",
+              "SOURCE_GIT_IDENTITY_REQUIRED",
+              "SOURCE_IDENTITY_DRIFT",
+              "SOURCE_IDENTITY_INVALID",
+              "SOURCE_REFERENCE_INVALID",
+              "SOURCE_TREE_UNAVAILABLE",
+              "SYSTEMD_PID1_REQUIRED",
+              "TARGET_CGROUP_CONTROLS_MISSING",
+              "TARGET_CGROUP_CREATE_FAILED",
+              "TARGET_CGROUP_EVENTS_INVALID",
+              "TARGET_CGROUP_IDENTITY_DRIFT",
+              "TARGET_OUTSIDE_CAPTURED_CGROUP",
+              "TARGET_READINESS_TIMEOUT",
+              "UBUNTU_2404_REQUIRED",
+              "UNIT_COLLISION",
+              "UNIT_IDENTITY_UNAVAILABLE",
+              "UNIT_NAME_INVALID",
+              "UNIT_START_FAILED",
+              "UNIT_STATE_UNAVAILABLE",
+              "WSL_UNSUPPORTED",
+          }
+
+          def bounded_read(path: Path, limit: int) -> str:
+              raw = path.read_bytes()
+              if len(raw) > limit:
+                  raise ValueError("output exceeded bound")
+              return raw.decode("utf-8")
+
+          def unexpected() -> None:
+              print("FORK_PROBE_RESULT=UNEXPECTED_FAILURE")
+              raise SystemExit(1)
+
+          try:
+              stdout = bounded_read(stdout_path, 8192)
+              stderr = bounded_read(stderr_path, 2048)
+              if status == 0:
+                  if stderr:
+                      unexpected()
+                  receipt = json.loads(stdout)
+                  if not isinstance(receipt, dict) or set(receipt) != success_keys:
+                      unexpected()
+                  exact = {
+                      "canary_survived": True,
+                      "changes_made": True,
+                      "cleanup_complete": True,
+                      "installation_performed": False,
+                      "journal_history_may_persist": True,
+                      "mode": "containment-primitive-probe",
+                      "network_requests_made": False,
+                      "primitive": "pidfd-stop+cgroup.kill",
+                      "result": "TERMINATED",
+                      "root_populated": 0,
+                      "source_commit": expected_commit,
+                      "source_tree_sha256": expected_digest,
+                      "target_processes": 2,
+                      "target_survivors": 0,
+                      "workload_detection_performed": False,
+                  }
+                  if any(receipt.get(key) != value for key, value in exact.items()):
+                      unexpected()
+                  descendants = receipt.get("descendant_cgroups_checked")
+                  latency = receipt.get("trigger_to_empty_ms")
+                  if type(descendants) is not int or descendants < 1:
+                      unexpected()
+                  if (
+                      type(latency) not in {int, float}
+                      or not math.isfinite(latency)
+                      or latency < 0
+                      or latency > 120_000
+                  ):
+                      unexpected()
+                  print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+                  print("FORK_PROBE_RESULT=PASS")
+                  raise SystemExit(0)
+
+              if status != 2 or stdout:
+                  unexpected()
+              receipt = json.loads(stderr)
+              if (
+                  not isinstance(receipt, dict)
+                  or set(receipt) != {"mode", "reason_code", "result"}
+                  or receipt.get("mode") != "containment-primitive-probe"
+                  or receipt.get("result") != "FAILED"
+                  or receipt.get("reason_code") not in allowed_failures
+              ):
+                  unexpected()
+              print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+              print("FORK_PROBE_RESULT=FAIL")
+              raise SystemExit(1)
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+              unexpected()
+          PY

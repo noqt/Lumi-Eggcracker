@@ -113,6 +113,33 @@ This is a proof of the deterministic containment primitive, not a test of AI
 workload recognition, the two supported profiles, installation, or universal
 product effectiveness. A pass does not replace the full first-kill path.
 
+#### Run it in a disposable GitHub-hosted fork
+
+If you do not already have a disposable Ubuntu 24.04 host, fork this public
+repository, enable Actions in the fork, and ensure the fork's default branch
+contains `.github/workflows/containment-probe.yml`. Open **Actions →
+Containment probe (manual disposable runner) → Run workflow**, select the
+default branch, and explicitly tick the acknowledgement that the workflow
+kills a bounded synthetic test tree.
+
+The workflow refuses self-hosted runners, private repositories, non-default
+branches, unsupported or containerised hosts, and machines with Eggcracker
+install targets already present. It has read-only repository permission,
+references no configured repository or user secrets, persists no checkout
+credential, uploads no artifact, and prints only a validated bounded receipt,
+result code, and workflow blob identity. GitHub still creates an ephemeral
+read-only repository token for checkout. Checkout and public Actions metadata
+use GitHub's network; the containment probe itself makes no network request.
+
+GitHub-hosted runners are disposable, but the same narrow evidence boundary
+still applies: this exercises only the synthetic pidfd-stop plus cgroup-v2 kill
+primitive. It does not install Eggcracker, download a model, recognise a
+workload, qualify another host, or establish product-wide effectiveness or
+safety. A public non-NOQT run is evidence only after its source digest and
+workflow blob match the reviewed upstream versions. Share a pass, safe refusal,
+or reproducible friction report through the
+[redacted result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=first_kill_result.yml).
+
 After a passing preflight, run the full demonstration:
 
 ```sh
