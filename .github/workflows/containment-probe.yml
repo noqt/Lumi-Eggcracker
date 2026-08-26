@@ -298,3 +298,18 @@ jobs:
           except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
               unexpected()
           PY
+
+      - name: Share the public run
+        if: ${{ always() }}
+        shell: bash
+        env:
+          RESULT_FORM_URL: https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            printf '## Share what happened\n\n'
+            printf 'Passed, refused safely, or hit friction? '
+            printf '[Send the result to Lumi Eggcracker](%s).\n\n' "$RESULT_FORM_URL"
+            printf 'The short form asks for this public run and the outcome:\n\n'
+            printf '`%s`\n' "$WORKFLOW_RUN_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
