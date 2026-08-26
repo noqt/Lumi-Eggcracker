@@ -11,9 +11,24 @@
 
 ## The kill switch outside the sandbox
 
-Lumi Eggcracker is a Linux guard for local AI. It watches for a complete,
-unapproved AI workload, stops it automatically, kills its whole cgroup-v2
-process tree, and leaves a bounded receipt proving the tree is empty.
+Lumi Eggcracker is an AI kill tool.
+
+If a local AI workload is running when it shouldn't be, Eggcracker is built to
+kill it and everything it started, then leave a receipt showing what happened.
+
+Eggcracker started after [OpenAI disclosed](https://openai.com/index/hugging-face-model-evaluation-security-incident/)
+that AI agents in a cybersecurity test broke out of their intended environment
+and breached Hugging Face. That incident made the point: the kill switch can't
+live inside the thing it's meant to stop.
+
+Eggcracker works on native Linux today and supports two qualified workload
+profiles. It's early and intentionally limited; the exact boundary is in
+[Current boundary](#current-boundary).
+
+**Want to see the core idea work?** [Fork the repository](https://github.com/noqt/Lumi-Eggcracker/fork)
+and run the [hosted proof](#run-it-in-a-disposable-github-hosted-fork). You don't
+need to install Eggcracker, own a GPU or download a model. The test kills a
+harmless synthetic process tree and shows whether the kill mechanism worked.
 
 > **Run the kill. Find the miss.**
 >
@@ -29,15 +44,10 @@ no workspace, build, installation or service. [Check compatibility
 now](#check-host-compatibility), then continue to the full demonstration only
 on a disposable supported host. A passing preflight is not a containment result.
 
-**Try the core kill primitive without installing Eggcracker or supplying a
-host.** [Fork this public repository](https://github.com/noqt/Lumi-Eggcracker/fork),
-then follow the [GitHub-hosted containment-probe
-steps](#run-it-in-a-disposable-github-hosted-fork). The manually acknowledged
-workflow uses a disposable `ubuntu-24.04` runner, kills only a bounded synthetic
-two-process tree, uploads no artifact, and reports a redacted pass or safe
-refusal. [NOQT's reviewed hosted run](https://github.com/noqt/Lumi-Eggcracker/actions/runs/32892727768)
-passed; that is implementation evidence, not independent use, workload
-recognition, adoption, or product-wide effectiveness.
+The hosted proof tests only the kill mechanism. It does not install Eggcracker,
+download a model, recognise an AI workload or prove product-wide effectiveness.
+[NOQT's reviewed hosted run](https://github.com/noqt/Lumi-Eggcracker/actions/runs/32892727768)
+passed, but that is not independent use or adoption.
 
 ## Run the first kill
 
