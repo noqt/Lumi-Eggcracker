@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1050" viewBox="0 0 720 1050" role="img" aria-labelledby="title desc">
+  <title id="title">Try the Lumi Eggcracker hosted proof in four steps</title>
+  <desc id="desc">Make a public fork, run the disposable GitHub proof, see a bounded pass or safe stop, and share what happened.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#171d27"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 z" fill="#718096"/>
+    </marker>
+    <style>
+      .title { fill: #ffffff; font: 700 34px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .subtitle { fill: #b6f36b; font: 600 21px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .step { fill: #0d1117; font: 800 22px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+      .card-title { fill: #ffffff; font: 700 28px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .card-copy { fill: #c8d1dc; font: 400 24px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .footer { fill: #9aa7b7; font: 500 20px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-anchor: middle; }
+    </style>
+  </defs>
+
+  <rect width="720" height="1050" rx="24" fill="url(#background)"/>
+  <text class="title" x="40" y="54">Try the kill switch without installing it</text>
+  <text class="subtitle" x="40" y="90">No local Linux machine. No GPU. No model download.</text>
+
+  <line x1="360" y1="300" x2="360" y2="335" stroke="#718096" stroke-width="4" marker-end="url(#arrow)"/>
+  <line x1="360" y1="520" x2="360" y2="555" stroke="#718096" stroke-width="4" marker-end="url(#arrow)"/>
+  <line x1="360" y1="740" x2="360" y2="775" stroke="#718096" stroke-width="4" marker-end="url(#arrow)"/>
+
+  <g transform="translate(40 125)">
+    <rect width="640" height="175" rx="18" fill="#202938" stroke="#3a4658" stroke-width="2"/>
+    <circle cx="48" cy="48" r="24" fill="#b6f36b"/>
+    <text class="step" x="48" y="56">1</text>
+    <text class="card-title" x="88" y="57">Make a public test copy</text>
+    <text class="card-copy" x="88" y="100">
+      <tspan x="88" dy="0">Fork the repo. The fork is your</tspan>
+      <tspan x="88" dy="32">disposable copy of the test.</tspan>
+    </text>
+  </g>
+
+  <g transform="translate(40 345)">
+    <rect width="640" height="175" rx="18" fill="#202938" stroke="#3a4658" stroke-width="2"/>
+    <circle cx="48" cy="48" r="24" fill="#b6f36b"/>
+    <text class="step" x="48" y="56">2</text>
+    <text class="card-title" x="88" y="57">Press Run</text>
+    <text class="card-copy" x="88" y="100">
+      <tspan x="88" dy="0">GitHub starts a clean Ubuntu 24.04</tspan>
+      <tspan x="88" dy="32">machine for the test.</tspan>
+    </text>
+  </g>
+
+  <g transform="translate(40 565)">
+    <rect width="640" height="175" rx="18" fill="#202938" stroke="#3a4658" stroke-width="2"/>
+    <circle cx="48" cy="48" r="24" fill="#ff6b6b"/>
+    <text class="step" x="48" y="56">3</text>
+    <text class="card-title" x="88" y="57">See what survives</text>
+    <text class="card-copy" x="88" y="100">
+      <tspan x="88" dy="0">The test tries a bounded kill.</tspan>
+      <tspan x="88" dy="32">The harmless canary must stay alive.</tspan>
+    </text>
+  </g>
+
+  <g transform="translate(40 785)">
+    <rect width="640" height="175" rx="18" fill="#202938" stroke="#3a4658" stroke-width="2"/>
+    <circle cx="48" cy="48" r="24" fill="#78b7ff"/>
+    <text class="step" x="48" y="56">4</text>
+    <text class="card-title" x="88" y="57">Share what happened</text>
+    <text class="card-copy" x="88" y="100">
+      <tspan x="88" dy="0">A pass, a safe stop, or a snag helps.</tspan>
+      <tspan x="88" dy="32">Use the short public result form.</tspan>
+    </text>
+  </g>
+
+  <text class="footer" x="360" y="1000">This tests the bounded containment mechanism.</text>
+  <text class="footer" x="360" y="1030">It does not test AI recognition or the whole product.</text>
+</svg>

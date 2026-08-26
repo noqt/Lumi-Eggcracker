@@ -3,6 +3,8 @@
 You can test Eggcracker's kill mechanism on a disposable GitHub machine. You
 don't need Linux, a GPU, a model download or a local installation.
 
+![Four-step hosted-proof path: fork, run, see what survives, and share the public run](docs/hosted-proof-flow.svg)
+
 1. [Fork Lumi Eggcracker](https://github.com/noqt/Lumi-Eggcracker/fork).
 2. In your fork, open **Actions** and enable workflows if GitHub asks.
 3. Open **Containment probe (manual disposable runner)**, choose **Run
