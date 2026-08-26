@@ -10,8 +10,9 @@ don't need Linux, a GPU, a model download or a local installation.
 
 The proof creates a harmless two-process test tree, kills it with Eggcracker's
 containment mechanism and checks that an unrelated canary survives. A passing
-run ends with `result: PASS`, `target_survivors: 0` and `outside_canary_alive:
-true`.
+run prints a JSON receipt with `"result":"TERMINATED"`,
+`"target_survivors":0` and `"canary_survived":true`, followed by
+`FORK_PROBE_RESULT=PASS`.
 
 If it passes, refuses safely or gives you confusing friction, [send the redacted
 result](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=first_kill_result.yml).
