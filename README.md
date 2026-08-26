@@ -3,8 +3,8 @@
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
 [v0.5.0 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v0.5.0)
+· [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
-· [Run the hosted containment probe](#run-it-in-a-disposable-github-hosted-fork)
 · [Run the first kill](#run-the-first-kill)
 · [Design-partner Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
@@ -25,8 +25,7 @@ Eggcracker works on native Linux today and supports two qualified workload
 profiles. It's early and intentionally limited; the exact boundary is in
 [Current boundary](#current-boundary).
 
-**Want to see the core idea work?** [Fork the repository](https://github.com/noqt/Lumi-Eggcracker/fork)
-and run the [hosted proof](#run-it-in-a-disposable-github-hosted-fork). You don't
+**Want to see the core idea work?** [Try the hosted proof](TRY_IT.md). You don't
 need to install Eggcracker, own a GPU or download a model. The test kills a
 harmless synthetic process tree and shows whether the kill mechanism worked.
 
