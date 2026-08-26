@@ -29,6 +29,8 @@ profiles. It's early and intentionally limited; the exact boundary is in
 need to install Eggcracker, own a GPU or download a model. The test kills a
 harmless synthetic process tree and shows whether the kill mechanism worked.
 
+[![Four-step hosted-proof path: fork, run, see what survives, and share the public run](docs/hosted-proof-flow.svg)](TRY_IT.md)
+
 > **Run the kill. Find the miss.**
 >
 > On a disposable native Ubuntu host, the first-kill path verifies the signed
