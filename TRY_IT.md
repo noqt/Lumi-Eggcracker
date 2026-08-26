@@ -14,9 +14,10 @@ run prints a JSON receipt with `"result":"TERMINATED"`,
 `"target_survivors":0` and `"canary_survived":true`, followed by
 `FORK_PROBE_RESULT=PASS`.
 
-If it passes, refuses safely or gives you confusing friction, [send the redacted
-result](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=first_kill_result.yml).
-That is useful evidence either way.
+If it passes, refuses safely or gives you confusing friction, [send the public
+run](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
+The short form asks for the workflow URL and what happened. That is useful
+evidence either way.
 
 This hosted proof tests only the bounded kill mechanism. It does not install
 Eggcracker, recognise an AI workload or prove the whole product. The workflow

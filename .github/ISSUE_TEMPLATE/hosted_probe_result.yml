@@ -1,0 +1,41 @@
+name: Hosted proof result
+description: Share a pass, safe refusal, or friction report from the disposable GitHub-hosted proof
+title: "[Hosted proof]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying Lumi Eggcracker. Share the public GitHub Actions run and tell us what happened. Do not post credentials, private data, raw process arguments, environment values, private paths, or security-sensitive exploit details. Report a security issue privately through https://github.com/noqt/Lumi-Eggcracker/security/advisories/new.
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: What happened?
+      options:
+        - The proof passed and the outside canary survived
+        - The workflow refused safely with a reason code
+        - The setup or result was confusing
+        - The workflow failed in another non-security-sensitive way
+    validations:
+      required: true
+  - type: input
+    id: workflow_run
+    attributes:
+      label: Public workflow run
+      description: Paste the GitHub Actions run URL from your public fork. The public log lets us verify the source, workflow, host, result, and cleanup without asking you to copy technical output.
+      placeholder: https://github.com/your-name/Lumi-Eggcracker/actions/runs/...
+    validations:
+      required: true
+  - type: textarea
+    id: friction
+    attributes:
+      label: What should be easier or clearer?
+      description: One sentence is enough. Leave this blank if the path was clear.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I ran the unchanged upstream workflow on GitHub's disposable Ubuntu 24.04 runner from a public fork, not on a self-hosted machine.
+          required: true
+        - label: I reviewed the public run and this report; neither contains credentials, private data, private paths, raw process arguments, environment values, or security-sensitive details.
+          required: true
