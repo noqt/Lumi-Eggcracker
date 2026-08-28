@@ -108,6 +108,8 @@ def main() -> int:
     canaries = 0
     fixture_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
+        # Keep qualification assets in the shared runtime mount; workload
+        # units deliberately receive an isolated private temporary directory.
         fixture_workspace = tempfile.TemporaryDirectory(
             prefix="lumi-native-fixtures-", dir="/run/lumi-eggcracker"
         )
