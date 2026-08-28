@@ -276,6 +276,11 @@ def one(
             if any(Path("/run/lumi-eggcracker/staged").iterdir()):
                 raise RuntimeError("approved script stage survived workload termination")
             control(["revoke", "--name", name])
+            before_second_incidents = {
+                item["incident_id"]
+                for item in control(["incidents"]).get("incidents", [])
+                if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+            }
             before = set(DETECTIONS.glob("*.json"))
             first_process = launch(python, user, wrapper, weights, config_copy, output)
             second = receipt_after(before)
@@ -283,6 +288,9 @@ def one(
             first_process = None
             if second.get("detector", {}).get("profile") != "content.safetensors-pytorch" or canary.poll() is not None:
                 raise RuntimeError("revoked Safetensors/PyTorch model was not terminated")
+            # Keep the next self-validation job independent while retaining
+            # the receipt and relaunch-lockdown proof in this result.
+            clear_new_incident(before_second_incidents)
             return {"approved_generated_bytes": generated, "first_receipt": first, "mutable_script_rejection": mutation_rejection, "result": "PASS", "second_receipt": second}
         finally:
             stop(first_process)

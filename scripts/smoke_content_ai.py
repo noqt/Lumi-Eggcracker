@@ -328,6 +328,11 @@ def one(
             stop_selected(operator, run_name)
             allowed_started = False
             control(operator, ["revoke", "--name", name])
+            before_second_incidents = {
+                item["incident_id"]
+                for item in root_control(["incidents"]).get("incidents", [])
+                if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+            }
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, wrapper, final_argv, output, runner.parent)
             second = receipt_after(before)
@@ -338,6 +343,9 @@ def one(
                 or canary.poll() is not None
             ):
                 raise RuntimeError("revoked disguised AI was not terminated")
+            # Leave the chained self-validation jobs independent while
+            # retaining the receipt and its lockdown proof in this result.
+            clear_new_incident(before_second_incidents)
             return {
                 "approved_generated_bytes": generated,
                 "first_receipt": first,
