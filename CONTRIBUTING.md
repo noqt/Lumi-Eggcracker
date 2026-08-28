@@ -24,7 +24,7 @@ Use Python 3.11 or newer. The ordinary unit suite does not grant permission to
 run native root or containment tests on your workstation.
 
 ```sh
-python -m pip install ruff==0.16.1
+python -m pip install ruff==0.16.1 PyYAML==6.0.3
 ruff check src tests scripts
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```

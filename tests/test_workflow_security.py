@@ -32,6 +32,24 @@ def uses_references(node: Node) -> list[tuple[int, str]]:
     return references
 
 
+def step_action_references(node: Node, active_nodes: set[int] | None = None) -> list[tuple[int, str]]:
+    if not isinstance(node, MappingNode):
+        return []
+    active = set() if active_nodes is None else active_nodes
+    identity = id(node)
+    if identity in active:
+        return []
+
+    active.add(identity)
+    references = uses_references(node)
+    for parallel in mapping_values(node, "parallel"):
+        if isinstance(parallel, SequenceNode):
+            for child in parallel.value:
+                references.extend(step_action_references(child, active))
+    active.remove(identity)
+    return references
+
+
 def action_references(document: Node) -> list[tuple[int, str]]:
     references: list[tuple[int, str]] = []
     for jobs in mapping_values(document, "jobs"):
@@ -42,7 +60,7 @@ def action_references(document: Node) -> list[tuple[int, str]]:
             for steps in mapping_values(job, "steps"):
                 if isinstance(steps, SequenceNode):
                     for step in steps.value:
-                        references.extend(uses_references(step))
+                        references.extend(step_action_references(step))
     return references
 
 
@@ -52,7 +70,7 @@ def mutable_external_action_references(workflow: str) -> list[tuple[int, str]]:
         if document is None:
             continue
         for line_number, reference in action_references(document):
-            if reference.startswith(("./", "docker://")):
+            if reference.startswith(("./", "$/", "docker://")):
                 continue
 
             action, separator, revision = reference.rpartition("@")
@@ -99,15 +117,32 @@ class WorkflowSecurityTests(unittest.TestCase):
             mutable_external_action_references(workflow),
         )
 
+    def test_mutable_action_in_parallel_step_group_is_rejected(self) -> None:
+        workflow = (
+            "jobs:\n"
+            "  test:\n"
+            "    steps:\n"
+            "      - parallel:\n"
+            "          - uses: actions/checkout@v6\n"
+            "          - uses: example/action@0123456789abcdef0123456789abcdef01234567\n"
+        )
+        self.assertEqual(
+            [(5, "actions/checkout@v6")],
+            mutable_external_action_references(workflow),
+        )
+
     def test_full_commit_sha_local_action_and_script_text_are_allowed(self) -> None:
         workflow = (
             "jobs:\n"
             "  reusable:\n"
             "    uses: noqt/reusable/.github/workflows/check.yml@0123456789abcdef0123456789abcdef01234567\n"
+            "  same-repository:\n"
+            "    uses: $/.github/workflows/check.yml\n"
             "  test:\n"
             "    steps:\n"
             "      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6\n"
             "      - uses: ./.github/actions/local-check\n"
+            "      - uses: $/.github/actions/local-check\n"
             "      - run: |\n"
             "          printf 'uses: actions/checkout@v6'\n"
             "      - env: {uses: actions/checkout@v6}\n"
