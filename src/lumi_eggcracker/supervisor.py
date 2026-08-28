@@ -1804,11 +1804,19 @@ class Supervisor:
                     pidfd,
                 )
                 if not self.enforcement_slots.acquire(blocking=False):
-                    # Admission is bounded.  If the queue is saturated, keep
-                    # containment decisive by running this task inline rather
-                    # than allowing the detector to create unbounded threads.
-                    self.enforcement_saturation_until_ns = time.monotonic_ns() + 1_000_000_000
-                    self._enforce_discovery(*task_args, **kwargs)
+                    # Admission is bounded.  Defer overflow to the next
+                    # bounded scan instead of running containment inline in
+                    # the detector thread.  Inline work can hold the scan
+                    # long enough to starve the watchdog heartbeat when many
+                    # independent workloads arrive together.  The target is
+                    # deliberately removed from ``discovery_active`` without
+                    # entering ``discovery_done`` so it is retried promptly.
+                    self.enforcement_saturation_until_ns = (
+                        time.monotonic_ns() + 250_000_000
+                    )
+                    os.close(pidfd)
+                    with self.discovery_lock:
+                        self.discovery_active.difference_update(target_set)
                     continue
 
                 def enforce_bounded(
