@@ -134,10 +134,11 @@ def validate_run(value: dict[str, Any]) -> dict[str, Any]:
         raise JsonInputError("run record executable is invalid")
     if not isinstance(value["argv_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["argv_sha256"]):
         raise JsonInputError("run record command hash is invalid")
-    if not isinstance(value["exec_policy_id"], str) or not value["exec_policy_id"]:
-        raise JsonInputError("run record execution policy identity is invalid")
-    if not isinstance(value["exec_policy_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["exec_policy_digest"]):
-        raise JsonInputError("run record execution policy digest is invalid")
+    if set(value) == expected:
+        if not isinstance(value["exec_policy_id"], str) or not value["exec_policy_id"]:
+            raise JsonInputError("run record execution policy identity is invalid")
+        if not isinstance(value["exec_policy_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["exec_policy_digest"]):
+            raise JsonInputError("run record execution policy digest is invalid")
     keys = ("cgroup_device", "cgroup_inode", "created_monotonic_ns", "cpu_quota_percent", "max_memory_mib", "operator_uid", "workload_gid", "workload_uid", "max_pids", "argv_count")
     if any(isinstance(value[key], bool) or not isinstance(value[key], int) or value[key] < 0 for key in keys):
         raise JsonInputError("run record integer field is invalid")
