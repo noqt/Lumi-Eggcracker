@@ -136,6 +136,59 @@ class SupervisorTests(unittest.TestCase):
             )
         )
 
+    def test_incident_sweep_runs_after_response_lock_release(self) -> None:
+        supervisor = self._instance()
+        supervisor.incidents = Path(".")
+        supervisor.incident_response_lock = threading.Lock()
+        supervisor.catalogue = load_bundled()
+        receipt = {
+            "event_id": "e" * 24,
+            "result": "TERMINATED",
+            "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+        }
+        incident = {"incident_id": "i" * 24, "response": {}}
+
+        def sweep(_incident_id: str) -> None:
+            acquired = supervisor.incident_response_lock.acquire(timeout=0.1)
+            self.assertTrue(acquired)
+            if acquired:
+                supervisor.incident_response_lock.release()
+
+        with (
+            patch.object(
+                supervisor,
+                "_incident_match",
+                return_value={
+                    "argv_sha256": "a" * 64,
+                    "uid": 2001,
+                    "executable_sha256": "b" * 64,
+                    "profile": "content.gguf-llama",
+                },
+            ),
+            patch.object(supervisor, "_incident_values", return_value=[]),
+            patch.object(supervisor, "_incident_workload", return_value={}),
+            patch.object(supervisor, "_revoke_exact_approval", return_value=True),
+            patch.object(supervisor, "_incident_sweep", side_effect=sweep),
+            patch("lumi_eggcracker.supervisor.incident_store.find_match", return_value=None),
+            patch(
+                "lumi_eggcracker.supervisor.incident_store.create",
+                return_value=incident,
+            ),
+            patch(
+                "lumi_eggcracker.supervisor.incident_store.update",
+                return_value=incident,
+            ),
+        ):
+            supervisor._post_containment_response(receipt)
+
+    def test_incident_sweep_reentry_returns_without_lock_deadlock(self) -> None:
+        supervisor = self._instance()
+        supervisor.incident_sweep_lock = threading.Lock()
+        supervisor.incident_sweep_active = True
+        started = time.monotonic()
+        supervisor._incident_sweep("i" * 24)
+        self.assertLess(time.monotonic() - started, 0.1)
+
     def test_group_refresh_replaces_preexec_gate_snapshot_without_losing_evidence(self) -> None:
         identity = ProcessIdentity(10, 100)
         stale = ProcessSnapshot(

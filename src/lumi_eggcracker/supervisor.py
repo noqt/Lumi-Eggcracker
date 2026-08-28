@@ -498,7 +498,7 @@ class Supervisor:
         # service available for root diagnosis, but fail health and all new
         # starts closed until the store is repaired or cleared by root.
         try:
-            incident_store.load_all(self.incidents)
+            incident_store.compact(self.incidents)
         except (JsonInputError, OSError):
             self.incident_health_healthy = False
         self._recover()
@@ -1035,8 +1035,12 @@ class Supervisor:
             return []
         if not getattr(self, "incident_health_healthy", True):
             raise JsonInputError("incident store is unavailable; root recovery is required")
+        lock = getattr(self, "incident_response_lock", None)
         try:
-            return incident_store.load_all(root)
+            if lock is None:
+                return incident_store.compact(root)
+            with lock:
+                return incident_store.compact(root)
         except (JsonInputError, OSError):
             self.incident_health_healthy = False
             raise
@@ -1187,16 +1191,23 @@ class Supervisor:
         lock = getattr(self, "incident_sweep_lock", None)
         if lock is None:
             return
+        # A synchronous sweep can discover another exact match.  Its
+        # containment response re-enters this method on the same worker while
+        # the outer sweep owns the non-reentrant lock; return before attempting
+        # to acquire it rather than self-deadlocking the enforcement worker.
+        if getattr(self, "incident_sweep_active", False):
+            return
         with lock:
             if getattr(self, "incident_sweep_active", False):
                 return
             self.incident_sweep_active = True
             try:
-                values = self._incident_values()
-                current = next(item for item in values if item["incident_id"] == incident_id)
-                recurrence = dict(current["recurrence"])
-                recurrence["sweep_count"] += 1
-                incident_store.update(self.incidents, current, recurrence=recurrence)
+                with self.incident_response_lock:
+                    values = self._incident_values()
+                    current = next(item for item in values if item["incident_id"] == incident_id)
+                    recurrence = dict(current["recurrence"])
+                    recurrence["sweep_count"] += 1
+                    incident_store.update(self.incidents, current, recurrence=recurrence)
                 self.operations.append("incident-sweep")
                 # Reuse the existing bounded discovery and containment path.
                 # Nested response calls link receipts to this incident but do
@@ -1227,6 +1238,7 @@ class Supervisor:
         if receipt.get("result") != "TERMINATED":
             return
         try:
+            sweep_id: str | None = None
             with self.incident_response_lock:
                 match = self._incident_match(receipt, record, approval)
                 values = self._incident_values()
@@ -1266,7 +1278,14 @@ class Supervisor:
                 response["completed"] = revoked
                 response["response_completed_monotonic_ns"] = time.monotonic_ns()
                 incident = incident_store.update(root, incident, response=response)
-                self._incident_sweep(incident["incident_id"])
+                # The sweep performs a synchronous discovery pass.  Run it
+                # after releasing incident_response_lock: a nested match can
+                # itself complete containment and call this method, and a
+                # non-reentrant lock here would deadlock the enforcement
+                # worker while other detections wait for their receipts.
+                sweep_id = incident["incident_id"]
+            if sweep_id is not None:
+                self._incident_sweep(sweep_id)
         except (JsonInputError, OSError, RuntimeError):
             # The kill and original receipt already succeeded.  A response
             # persistence fault fails health closed and stops future starts;
@@ -2858,47 +2877,50 @@ class Supervisor:
             with self.approval_lock:
                 return revoke_execution_policy(self.exec_policies, args["policy_id"])
         if action == "incidents" and not args:
-            return {"incidents": [incident_store.summary(item) for item in self._incident_values()]}
+            with self.incident_response_lock:
+                return {"incidents": [incident_store.summary(item) for item in self._incident_values()]}
         if action == "incident_show" and set(args) == {"incident_id"}:
-            values = self._incident_values()
-            value = next(
-                (item for item in values if item["incident_id"] == args["incident_id"]),
-                None,
-            )
-            if value is None:
-                raise JsonInputError("incident is unavailable")
-            return incident_store.public_detail(value)
+            with self.incident_response_lock:
+                values = self._incident_values()
+                value = next(
+                    (item for item in values if item["incident_id"] == args["incident_id"]),
+                    None,
+                )
+                if value is None:
+                    raise JsonInputError("incident is unavailable")
+                return incident_store.public_detail(value)
         if action in {"incident_acknowledge", "incident_clear"} and set(args) == {"incident_id"}:
-            values = self._incident_values()
-            value = next(
-                (item for item in values if item["incident_id"] == args["incident_id"]),
-                None,
-            )
-            if value is None:
-                raise JsonInputError("incident is unavailable")
-            if action == "incident_acknowledge":
-                if value["state"] == "CLEARED":
-                    raise JsonInputError("cleared incident cannot be acknowledged")
-                updated = incident_store.update(
-                    self.incidents,
-                    value,
-                    acknowledgement={"monotonic_ns": time.monotonic_ns(), "uid": 0},
-                    state="ACKNOWLEDGED",
+            with self.incident_response_lock:
+                values = self._incident_values()
+                value = next(
+                    (item for item in values if item["incident_id"] == args["incident_id"]),
+                    None,
                 )
-            else:
-                if value["state"] == "CLEARED":
-                    return incident_store.public_detail(value)
-                response = dict(value["response"])
-                response["relaunch_suppressed"] = False
-                updated = incident_store.update(
-                    self.incidents,
-                    value,
-                    clearance={"monotonic_ns": time.monotonic_ns(), "uid": 0},
-                    response=response,
-                    state="CLEARED",
-                )
-            self.operations.append("incident-state")
-            return incident_store.public_detail(updated)
+                if value is None:
+                    raise JsonInputError("incident is unavailable")
+                if action == "incident_acknowledge":
+                    if value["state"] == "CLEARED":
+                        raise JsonInputError("cleared incident cannot be acknowledged")
+                    updated = incident_store.update(
+                        self.incidents,
+                        value,
+                        acknowledgement={"monotonic_ns": time.monotonic_ns(), "uid": 0},
+                        state="ACKNOWLEDGED",
+                    )
+                else:
+                    if value["state"] == "CLEARED":
+                        return incident_store.public_detail(value)
+                    response = dict(value["response"])
+                    response["relaunch_suppressed"] = False
+                    updated = incident_store.update(
+                        self.incidents,
+                        value,
+                        clearance={"monotonic_ns": time.monotonic_ns(), "uid": 0},
+                        response=response,
+                        state="CLEARED",
+                    )
+                self.operations.append("incident-state")
+                return incident_store.public_detail(updated)
         if action == "detections" and not args:
             values: list[dict[str, Any]] = []
             paths = [*self.detections.glob("*.json"), *self.receipts.glob("*.json")]

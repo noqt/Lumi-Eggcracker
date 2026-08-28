@@ -23,6 +23,11 @@ SOURCE = re.compile(r"[0-9a-f]{40}\Z")
 SAFE_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,96}\Z")
 STATES = {"ACTIVE", "ACKNOWLEDGED", "CLEARED"}
 MAX_INCIDENTS = 128
+# Permit one bounded compaction window when an older package or interrupted
+# campaign left a small number of cleared records above the live cap.  Active
+# records are never discarded; a store with too many active records remains
+# fail-closed.
+MAX_COMPACTION_OVERFLOW = MAX_INCIDENTS
 MAX_LINKED_RECEIPTS = 64
 MAX_EVIDENCE = 16
 
@@ -240,14 +245,15 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def load_all(root: Path) -> list[dict[str, Any]]:
+def _paths(root: Path) -> list[Path]:
     if not root.exists():
         return []
     if root.is_symlink() or not root.is_dir():
         raise JsonInputError("incident root is invalid")
-    paths = sorted(root.glob("*.json"))
-    if len(paths) > MAX_INCIDENTS:
-        raise JsonInputError("incident store exceeds bounded capacity")
+    return sorted(root.glob("*.json"))
+
+
+def _load_paths(root: Path, paths: list[Path]) -> list[dict[str, Any]]:
     values: list[dict[str, Any]] = []
     for path in paths:
         if path.is_symlink() or path.name != f"{path.stem}.json":
@@ -257,6 +263,44 @@ def load_all(root: Path) -> list[dict[str, Any]]:
             raise JsonInputError("incident name/path mismatch")
         values.append(value)
     return values
+
+
+def load_all(root: Path) -> list[dict[str, Any]]:
+    paths = _paths(root)
+    if len(paths) > MAX_INCIDENTS:
+        raise JsonInputError("incident store exceeds bounded capacity")
+    return _load_paths(root, paths)
+
+
+def compact(root: Path) -> list[dict[str, Any]]:
+    """Keep the live incident store bounded without dropping active lockdowns.
+
+    Cleared incidents remain useful evidence while they are within the cap,
+    but they are no longer required for relaunch suppression.  If an older
+    package or a long local campaign leaves a small, bounded overflow, remove
+    the oldest cleared records and retain every active/acknowledged record.
+    Excess beyond the compaction window, malformed records, and an overflow
+    made entirely of active incidents remain hard failures.
+    """
+    paths = _paths(root)
+    if len(paths) <= MAX_INCIDENTS:
+        return _load_paths(root, paths)
+    if len(paths) > MAX_INCIDENTS + MAX_COMPACTION_OVERFLOW:
+        raise JsonInputError("incident store exceeds bounded capacity")
+    values = _load_paths(root, paths)
+    excess = len(values) - MAX_INCIDENTS
+    cleared = sorted(
+        (item for item in values if item["state"] == "CLEARED"),
+        key=lambda item: (item["created_monotonic_ns"], item["incident_id"]),
+    )
+    if len(cleared) < excess:
+        raise JsonInputError("incident store exceeds active bounded capacity")
+    for item in cleared[:excess]:
+        path = _path(root, item["incident_id"])
+        if path.is_symlink() or not path.is_file():
+            raise JsonInputError("incident filename is invalid")
+        path.unlink()
+    return load_all(root)
 
 
 def _write(root: Path, value: dict[str, Any]) -> dict[str, Any]:

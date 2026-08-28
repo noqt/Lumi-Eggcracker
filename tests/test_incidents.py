@@ -121,6 +121,47 @@ class IncidentTests(unittest.TestCase):
             )
             self.assertEqual(incidents.load_all(root)[0], value)
 
+    def test_compact_prunes_only_oldest_cleared_records(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            values = []
+            for index in range(incidents.MAX_INCIDENTS + 1):
+                receipt = dict(_receipt())
+                receipt["event_id"] = f"{index:024x}"
+                value = incidents.create(
+                    root,
+                    receipt=receipt,
+                    policy={"version": "1.0.0"},
+                    catalogue_sha256="e" * 64,
+                    source_commit="f" * 40,
+                    version="1.0.0",
+                    trigger="UNAPPROVED_AI_MATCH",
+                    profile="content.gguf-llama",
+                    evidence=["gguf-v3"],
+                    match={
+                        "argv_sha256": "b" * 64,
+                        "executable_sha256": "c" * 64,
+                        "profile": "content.gguf-llama",
+                        "uid": 2001,
+                    },
+                    workload=_receipt()["workload"],
+                    approval=None,
+                )
+                value = incidents.update(
+                    root,
+                    value,
+                    clearance={"monotonic_ns": index + 1, "uid": 0},
+                    state="CLEARED",
+                )
+                values.append(value)
+            compacted = incidents.compact(root)
+            self.assertEqual(len(compacted), incidents.MAX_INCIDENTS)
+            self.assertNotIn("0" * 24, {item["incident_id"] for item in compacted})
+            self.assertEqual(
+                len([item for item in compacted if item["state"] == "CLEARED"]),
+                incidents.MAX_INCIDENTS,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
