@@ -33,6 +33,14 @@ def call(operator: str, args: list[str], *, check: bool = True) -> dict[str, Any
     return json.loads(result.stdout)
 
 
+def root_call(args: list[str], *, check: bool = True) -> dict[str, Any]:
+    """Call the administrative CLI directly from this root-only qualification."""
+    result = run([CLI, *args], check=check)
+    if not result.stdout.strip():
+        return {}
+    return json.loads(result.stdout)
+
+
 def alive(process: subprocess.Popen[bytes]) -> bool:
     return process.poll() is None
 
@@ -106,6 +114,7 @@ def main() -> int:
     results: dict[str, Any] = {"fork_race": [], "benign": [], "pid_tripwire": [], "restart": [], "socket": {}, "result": "FAIL"}
     latencies: list[float] = []
     canaries = 0
+    hostile_policy_id: str | None = None
     fixture_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
         # Keep qualification assets in the shared runtime mount; workload
@@ -175,7 +184,40 @@ def main() -> int:
             results["benign"].append(state["state"])
         hostile_path = result_root / f"lumi-eggcracker-hostile-{token}.json"
         hostile = f"hostile-{token}"
-        start_workload(operator, ["start", "--name", hostile, "--max-pids", "8", "--", "/usr/bin/python3", str(fixtures["hostile_client.py"]), str(hostile_path), str(args.socket_attempts)])
+        # The hostile fixture must be able to invoke the public client in
+        # order to test the three control sockets.  That client executable is
+        # explicitly included in this test-only root policy; the attempted
+        # replacement still has to pass supervisor authentication and is
+        # expected to fail.
+        hostile_policy = root_call(
+            [
+                "exec-policy",
+                "create",
+                "--name",
+                f"native-hostile-{token}",
+                "--",
+                "/usr/bin/python3",
+                CLI,
+            ]
+        )
+        hostile_policy_id = str(hostile_policy["policy_id"])
+        start_workload(
+            operator,
+            [
+                "start",
+                "--name",
+                hostile,
+                "--exec-policy",
+                hostile_policy_id,
+                "--max-pids",
+                "8",
+                "--",
+                "/usr/bin/python3",
+                str(fixtures["hostile_client.py"]),
+                str(hostile_path),
+                str(args.socket_attempts),
+            ],
+        )
         wait_state(operator, hostile, "COMPLETED_ALLOWED", timeout=30)
         hostile_result = json.loads(hostile_path.read_text(encoding="utf-8"))
         hostile_path.unlink(missing_ok=True)
@@ -228,6 +270,8 @@ def main() -> int:
                 run(["/usr/bin/systemctl", "stop", line.split()[0]], check=False)
         if fixture_workspace is not None:
             fixture_workspace.cleanup()
+        if hostile_policy_id is not None:
+            root_call(["exec-policy", "revoke", "--policy-id", hostile_policy_id], check=False)
 
 
 if __name__ == "__main__":
