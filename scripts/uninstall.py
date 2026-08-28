@@ -165,7 +165,7 @@ def main() -> int:
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise SystemExit("installed manifest is missing")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema_version") != "lumi-eggcracker.install.v4":
+    if manifest.get("schema_version") != "lumi-eggcracker.install.v5":
         raise SystemExit("installed manifest schema is invalid")
     for name, expected in manifest.get("files", {}).items():
         path = Path(name)

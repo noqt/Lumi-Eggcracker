@@ -56,6 +56,11 @@ from .launches import create as create_launch_provenance
 from .launches import load_all as load_launch_provenance
 from .launches import provenance_path
 from .observation import ObservationStore
+from .offline_boundary import (
+    BoundaryObserver,
+    OfflineBoundary,
+    primitives_available,
+)
 from .records import (
     ACTIVE_STATES,
     RUN_ID,
@@ -73,7 +78,7 @@ from .watchdog import HEARTBEAT, HEARTBEAT_MAGIC, HEARTBEAT_SOCKET
 
 MAX_FRAME = 32 * 1024
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
-POLICY_SCHEMA = "lumi-eggcracker.policy.v4"
+POLICY_SCHEMA = "lumi-eggcracker.policy.v5"
 QUERY_SOCKET = Path("/run/lumi-eggcracker/query.sock")
 OPERATOR_SOCKET = Path("/run/lumi-eggcracker/operator.sock")
 ADMIN_SOCKET = Path("/run/lumi-eggcracker/admin.sock")
@@ -97,6 +102,11 @@ MAX_CORRELATED_PROCESSES = 64
 SCAN_HEALTH_TIMEOUT_NS = 1_000_000_000
 MAX_DISCOVERY_FAILURES = 3
 MAX_ENFORCEMENT_TASKS = 16
+
+
+def policy_network_mode(policy: dict[str, Any]) -> str:
+    value = policy.get("network_mode")
+    return value if value == "offline" else "unsupported"
 
 
 @dataclass(frozen=True)
@@ -175,6 +185,7 @@ class Supervisor:
             "admin_socket_path",
             "catalogue_path",
             "catalogue_sha256",
+            "network_mode",
             "operator_gid",
             "operator_socket_path",
             "operator_uid",
@@ -204,7 +215,7 @@ class Supervisor:
             or policy["unit_prefix"] != UNIT_PREFIX
         ):
             raise JsonInputError("supervisor policy path is invalid")
-        if policy["version"] != __version__ or not isinstance(policy["source_commit"], str):
+        if policy["version"] != __version__ or policy["network_mode"] != "offline" or not isinstance(policy["source_commit"], str):
             raise JsonInputError("supervisor build identity is invalid")
         catalogue_path = Path(policy["catalogue_path"])
         if (
@@ -260,6 +271,8 @@ class Supervisor:
         self.last_scan_duration_ns = 0
         self.discovery_failures = 0
         self.receipt_persistence_healthy = True
+        self.boundary_cleanup_healthy = True
+        self.boundaries: dict[str, OfflineBoundary] = {}
         self.enforcement_saturation_until_ns = 0
         self.heartbeat_sequence = 0
         self.last_heartbeat_sent = 0.0
@@ -379,6 +392,42 @@ class Supervisor:
 
     def _receipt_path(self, event_id: str) -> Path:
         return self.receipts / f"{event_id}.json"
+
+    def _boundary_for_record(self, record: dict[str, Any]) -> OfflineBoundary | None:
+        """Resolve one exact boundary without broadening a run's ownership."""
+        value = record.get("boundary")
+        if value is None:
+            return None
+        run_id = record.get("run_id")
+        if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
+            raise JsonInputError("offline boundary run identity is invalid")
+        boundaries = getattr(self, "boundaries", None)
+        if boundaries is None:
+            boundaries = self.boundaries = {}
+        current = boundaries.get(run_id)
+        if current is not None:
+            return current
+        boundary = OfflineBoundary.from_record(value)
+        self.boundaries[run_id] = boundary
+        return boundary
+
+    def _teardown_boundary(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        boundaries = getattr(self, "boundaries", None)
+        if boundaries is None:
+            boundaries = self.boundaries = {}
+        boundary = boundaries.get(record.get("run_id"))
+        if boundary is None and record.get("boundary") is not None:
+            boundary = self._boundary_for_record(record)
+        if boundary is None:
+            return None
+        try:
+            self.operations.append("boundary-teardown")
+            return boundary.teardown()
+        except (JsonInputError, OSError):
+            self.boundary_cleanup_healthy = False
+            raise
+        finally:
+            boundaries.pop(record.get("run_id"), None)
 
     def _prepare(self) -> None:
         # Workloads need traversal only to their group-readable gate.  The
@@ -1451,7 +1500,12 @@ class Supervisor:
         write_atomic(self._receipt_path(event_id), receipt)
 
     def _contain(
-        self, record: dict[str, Any], trigger: str, trigger_ns: int | None = None
+        self,
+        record: dict[str, Any],
+        trigger: str,
+        trigger_ns: int | None = None,
+        *,
+        boundary: OfflineBoundary | None = None,
     ) -> dict[str, Any]:
         """Direct cgroup.kill is the first trigger-side effect; cleanup is post-proof only."""
         lock = self._new_lock(record["run_id"])
@@ -1460,6 +1514,16 @@ class Supervisor:
                 return self.completed[record["run_id"]]
             identity = identity_from_run(record)
             observed = trigger_ns if trigger_ns is not None else time.monotonic_ns()
+            boundary_error: str | None = None
+            if boundary is None:
+                try:
+                    boundary = self._boundary_for_record(record)
+                except (JsonInputError, OSError) as error:
+                    boundary_error = str(error)[:160]
+            if trigger == "NETWORK_BOUNDARY" and boundary is None:
+                # A malformed or missing boundary must still be contained, but
+                # must not produce a false network-boundary receipt.
+                trigger = "SUPERVISOR_FAILURE"
             try:
                 path = validate_identity(identity)
                 self.operations.append("cgroup.kill")
@@ -1483,6 +1547,7 @@ class Supervisor:
                 version=__version__,
                 source_commit=self.policy["source_commit"],
                 event_id=event_id,
+                boundary=(boundary.receipt_metadata() if trigger == "NETWORK_BOUNDARY" and boundary is not None else None),
             )
             try:
                 self._write_receipt(receipt, event_id)
@@ -1496,6 +1561,14 @@ class Supervisor:
                 ) from error
             # Cleanup is deliberately not in the enforcement or proof path.
             cleanup = self._cleanup(record["unit"])
+            if boundary is not None:
+                try:
+                    cleanup["offline_boundary"] = self._teardown_boundary(record)
+                except (JsonInputError, OSError) as error:
+                    self.boundary_cleanup_healthy = False
+                    cleanup["offline_boundary"] = {"error": str(error)[:160]}
+            if boundary_error is not None:
+                cleanup["offline_boundary_error"] = boundary_error
             receipt["cleanup"] = cleanup
             try:
                 write_atomic(self._receipt_path(event_id), receipt)
@@ -1524,11 +1597,20 @@ class Supervisor:
             current["state"] = "COMPLETED_ALLOWED"
             record.update(current)
             self._store(current)
+            try:
+                self._teardown_boundary(current)
+            except (JsonInputError, OSError):
+                # The workload is already empty and the terminal state is
+                # durable.  Keep the boundary failure visible to doctor and
+                # restart recovery rather than claiming a clean teardown.
+                self.boundary_cleanup_healthy = False
             return True
 
     def _watch_once(self, record: dict[str, Any], ready: threading.Event | None = None) -> None:
         identity = identity_from_run(record)
         path = validate_identity(identity)
+        boundary = self._boundary_for_record(record)
+        observer = BoundaryObserver(boundary) if boundary is not None else None
         pids_fd = os.open(path / "pids.events", os.O_RDONLY | os.O_CLOEXEC)
         cgroup_fd = os.open(path / "cgroup.events", os.O_RDONLY | os.O_CLOEXEC)
         try:
@@ -1538,10 +1620,12 @@ class Supervisor:
             poller = select.poll()
             poller.register(pids_fd, select.POLLPRI)
             poller.register(cgroup_fd, select.POLLPRI)
+            if observer is not None:
+                observer.arm()
             if ready is not None:
                 ready.set()
             while not self.stop_event.is_set():
-                poller.poll(250)
+                poller.poll(50 if observer is not None else 250)
                 current = events_from_fd(pids_fd).get("max")
                 if current is None:
                     raise JsonInputError("pids.events lacks max counter")
@@ -1549,6 +1633,14 @@ class Supervisor:
                     self._contain(record, "PID_LIMIT", time.monotonic_ns())
                     return
                 if self._complete_allowed(record, cgroup_fd):
+                    return
+                if observer is not None and observer.poll():
+                    self._contain(
+                        record,
+                        "NETWORK_BOUNDARY",
+                        time.monotonic_ns(),
+                        boundary=boundary,
+                    )
                     return
         finally:
             os.close(pids_fd)
@@ -1659,7 +1751,12 @@ class Supervisor:
                 approval = None
             run_id = os.urandom(12).hex()
             unit = f"{UNIT_PREFIX}{run_id}.service"
+            boundary: OfflineBoundary | None = None
+            gate: Path | None = None
+            props: dict[str, str] = {}
             try:
+                boundary = OfflineBoundary.create(run_id)
+                self.boundaries[run_id] = boundary
                 effective_argv = (
                     stage_launch(approval, argv, STAGED_DIR / run_id)
                     if approval is not None
@@ -1667,7 +1764,16 @@ class Supervisor:
                 )
                 gate = self._make_gate(run_id)
             except Exception:
+                if gate is not None:
+                    gate.unlink(missing_ok=True)
                 self._clear_stage(run_id)
+                if boundary is not None:
+                    try:
+                        self._teardown_boundary(
+                            {"run_id": run_id, "boundary": boundary.identity.as_record()}
+                        )
+                    except (JsonInputError, OSError):
+                        self.boundary_cleanup_healthy = False
                 raise
             result = self._run(
                 [
@@ -1682,6 +1788,12 @@ class Supervisor:
                     "--property=KillMode=control-group",
                     "--property=NoNewPrivileges=yes",
                     "--property=UMask=0077",
+                    f"--property=NetworkNamespacePath={boundary.workload_namespace_path}",
+                    "--property=PrivateTmp=yes",
+                    "--property=RestrictNamespaces=yes",
+                    "--property=CapabilityBoundingSet=",
+                    "--property=AmbientCapabilities=",
+                    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
                     f"--property=TasksMax={maximum}",
                     f"--property=MemoryMax={memory_mib}M",
                     f"--property=CPUQuota={cpu_quota}%",
@@ -1719,10 +1831,15 @@ class Supervisor:
             if result.returncode:
                 gate.unlink(missing_ok=True)
                 self._clear_stage(run_id)
+                try:
+                    self._teardown_boundary(
+                        {"run_id": run_id, "boundary": boundary.identity.as_record()}
+                    )
+                except (JsonInputError, OSError):
+                    self.boundary_cleanup_healthy = False
                 raise JsonInputError(result.stderr.strip() or "system workload launch failed")
             try:
                 deadline = time.monotonic() + 2.0
-                props: dict[str, str] = {}
                 while time.monotonic() < deadline:
                     props = self._show(unit)
                     if props["ActiveState"] == "active" and props["ControlGroup"]:
@@ -1734,6 +1851,7 @@ class Supervisor:
                 record = {
                     **summary,
                     "boot_id": identity.boot_id,
+                    "boundary": boundary.identity.as_record(),
                     "cgroup": identity.cgroup,
                     "cgroup_device": identity.device,
                     "cgroup_inode": identity.inode,
@@ -1742,6 +1860,7 @@ class Supervisor:
                     "max_memory_mib": memory_mib,
                     "max_pids": maximum,
                     "name": name,
+                    "network_mode": "offline",
                     "operator_uid": self.operator_uid,
                     "run_id": run_id,
                     "schema_version": RUN_SCHEMA,
@@ -1772,6 +1891,7 @@ class Supervisor:
                     self._store(record)
                 return {
                     "name": name,
+                    "network_mode": "offline",
                     "run_id": run_id,
                     "state": record["state"],
                     "unit": unit,
@@ -1790,6 +1910,11 @@ class Supervisor:
                     verify_empty(identity)
                 except (JsonInputError, OSError, RuntimeError):
                     self._run(["/usr/bin/systemctl", "stop", unit])
+                if boundary is not None:
+                    try:
+                        self._teardown_boundary({"run_id": run_id, "boundary": boundary.identity.as_record()})
+                    except (JsonInputError, OSError):
+                        self.boundary_cleanup_healthy = False
                 raise
 
     def _orphan_record(self, cgroup: str) -> dict[str, Any]:
@@ -1802,6 +1927,7 @@ class Supervisor:
             "argv_count": 0,
             "argv_sha256": "0" * 64,
             "boot_id": identity.boot_id,
+            "boundary": None,
             "cgroup": identity.cgroup,
             "cgroup_device": identity.device,
             "cgroup_inode": identity.inode,
@@ -1811,6 +1937,7 @@ class Supervisor:
             "max_pids": 0,
             "max_memory_mib": 0,
             "name": f"orphan-{run_id}",
+            "network_mode": "none",
             "operator_uid": self.operator_uid,
             "run_id": run_id,
             "schema_version": RUN_SCHEMA,
@@ -1884,18 +2011,27 @@ class Supervisor:
                 and now_ns - self.last_scan_completed_ns <= SCAN_HEALTH_TIMEOUT_NS
                 and self.discovery_failures < MAX_DISCOVERY_FAILURES
                 and self.receipt_persistence_healthy
+                and getattr(self, "boundary_cleanup_healthy", True)
                 and self.discovery_thread is not None
                 and self.discovery_thread.is_alive()
             )
+            boundary_primitives = primitives_available()
             ready = (
                 available
                 and pidfd_available()
                 and self.quarantine_root is not None
+                and policy_network_mode(self.policy) == "offline"
+                and boundary_primitives["supported"]
                 and scan_healthy
             )
             return {
                 "autonomous_discovery": ready,
                 "backend": "root-supervisor",
+                "network": {
+                    "mode": policy_network_mode(self.policy),
+                    "primitives": boundary_primitives,
+                    "cleanup_healthy": getattr(self, "boundary_cleanup_healthy", True),
+                },
                 "catalogue": public_catalogue(self.catalogue),
                 "cgroup_v2": available,
                 "discovery": {
@@ -1923,6 +2059,11 @@ class Supervisor:
                 "run_id": record["run_id"],
                 "state": record["state"],
                 "unit": record["unit"],
+                "network_mode": (
+                    record["boundary"].get("mode", "offline")
+                    if isinstance(record.get("boundary"), dict)
+                    else "none"
+                ),
                 "workload_uid": record["workload_uid"],
             }
         if action == "list" and not args:
@@ -1953,11 +2094,33 @@ class Supervisor:
                 }
         if action == "detections" and not args:
             values: list[dict[str, Any]] = []
-            for path in sorted(
-                self.detections.glob("*.json"), key=self._detection_sort_key, reverse=True
-            ):
+            paths = [*self.detections.glob("*.json"), *self.receipts.glob("*.json")]
+            for path in sorted(paths, key=self._detection_sort_key, reverse=True):
                 try:
                     value = load_regular_json(path)
+                    trigger = value.get("trigger")
+                    trigger_kind = trigger.get("kind") if isinstance(trigger, dict) else None
+                    if path.parent == self.receipts and trigger_kind != "NETWORK_BOUNDARY":
+                        continue
+                    if path.parent == self.receipts:
+                        boundary = value.get("boundary")
+                        if not isinstance(boundary, dict) or set(boundary) != {
+                            "address_family",
+                            "mode",
+                            "policy_sha256",
+                            "violation",
+                        }:
+                            continue
+                        values.append(
+                            {
+                                "boundary": boundary,
+                                "event_id": value["event_id"],
+                                "result": value["result"],
+                                "trigger": trigger,
+                                "version": value["version"],
+                            }
+                        )
+                        continue
                     values.append(
                         {
                             key: value[key]

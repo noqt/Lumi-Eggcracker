@@ -8,6 +8,23 @@ For an unapproved complete catalogue match, Eggcracker revalidates PID plus star
 
 An approval is an exact root-owned record of a UID, resolved executable device/inode and digest, plus complete argv digest. Only a qualified native llama runtime or root-owned CPython with one absolute regular script is approvable. CPython command/module/relative/directory/symlink forms and unsupported launchers fail closed. The Python script device/inode/size/digest is bound at approval; at `start` the supervisor opens it without following the leaf, copies and hashes that same stable descriptor into a root-owned per-run stage, and releases the gate only if the binding still matches. The selected workload receives a fixed root working directory and sanitized Python search environment. Before exec, the supervisor captures the single gated PID/start-time and exact owned cgroup and writes root-only launch provenance. During discovery it revalidates that immutable launch identity and hashes the live `/proc/<pid>/exe` descriptor; post-exec command-line contents are never trusted to grant approval. If approval input drifts, `start` is rejected before unit creation. A directly launched process has no launch provenance even when its observed arguments resemble an approved command. Descendants and siblings do not inherit provenance. Approval administration is root-only. Raw process arguments and environment values are not written to approval, provenance or detection records.
 
+Every explicitly selected workload is also launched inside one root-created,
+run-ID-owned offline network namespace. Loopback is accepted. A namespace-local
+`nftables` output rule counts and drops all non-loopback IPv4 and IPv6 output,
+while a sink namespace has no uplink or default route. The observer polls only
+that named counter and, on an authenticated increase, invokes the same direct
+`cgroup.kill` path. The packet is denied by the kernel before the observer's
+receipt work; no durable trigger record, systemd stop or namespace cleanup is
+performed before the kill and exact-empty proof. Namespace, veth, table, chain
+and counter identities are bound to the immutable run record, and the workload
+identity has no network-admin, raw-packet, netlink or control-socket authority.
+This boundary protects the selected workload tree, not arbitrary host traffic,
+remote workloads or a privileged process with a pre-connected external socket.
+
 Heartbeat emission is tied to recent successful discovery completion and durable post-containment detection receipts, not merely to a live worker thread. A blocked or repeatedly failing scan, or any failure to persist a detection receipt after containment, therefore makes `doctor` report `UNSUPPORTED`, stops heartbeats and lets the independent watchdog apply its bounded fail-closed recovery. Receipt-storage health remains latched false until a root operator repairs storage and restarts the supervisor. Model descriptors and executable runtime mappings are inspected in bounded stripes, and the stripe generation is reserved in root-owned state before scanning. Every executable mapping line within the bounded 8 MiB procfs read is eligible for those stripes; the observer does not silently truncate the mapping table at a line-count prefix. A process table beyond that byte bound explicitly fails discovery health rather than silently omitting its suffix. Runtime evidence is accepted only from the running executable or an executable mapping backed by a structurally loadable ELF whose complete SHA-256 matches the qualified release pin; build IDs and symbol names are prefilters, not trust anchors. An ordinary open ELF descriptor or read-only data mapping is not runtime evidence. A deleted executable mapping may use a retained descriptor only when its kernel mount/inode identity matches that mapping. A supervisor restart advances the stripe generation instead of returning every still-live process to the first descriptor window.
 
-This is not a general sandbox, universal AI detector, host intrusion detector, malware detector, network isolator, credential isolator or EDR replacement. An unapproved workload can evade detection by using an unsupported content/runtime combination; the qualified content path is intentionally narrow and that boundary is documented rather than hidden.
+This is not a general sandbox, universal AI detector, host intrusion detector,
+malware detector, host-wide network isolator, credential isolator or EDR
+replacement. An unapproved workload can evade recognition by using an
+unsupported content/runtime combination; the qualified content path is
+intentionally narrow and that boundary is documented rather than hidden.

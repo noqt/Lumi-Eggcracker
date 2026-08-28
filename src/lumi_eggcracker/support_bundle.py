@@ -69,6 +69,8 @@ def _host() -> dict[str, Any]:
 
 def _doctor(value: dict[str, Any]) -> dict[str, Any]:
     discovery = value.get("discovery") if isinstance(value.get("discovery"), dict) else {}
+    network = value.get("network") if isinstance(value.get("network"), dict) else {}
+    primitives = network.get("primitives") if isinstance(network.get("primitives"), dict) else {}
     return {
         "result": _token(value.get("result")),
         "backend": _token(value.get("backend")),
@@ -77,6 +79,11 @@ def _doctor(value: dict[str, Any]) -> dict[str, Any]:
         "autonomous_discovery": value.get("autonomous_discovery"),
         "cgroup_v2": value.get("cgroup_v2"),
         "pidfd": value.get("pidfd"),
+        "network": {
+            "mode": _token(network.get("mode")),
+            "cleanup_healthy": network.get("cleanup_healthy"),
+            "primitives_supported": primitives.get("supported"),
+        },
         "discovery": {
             "healthy": discovery.get("healthy"),
             "consecutive_failures": discovery.get("consecutive_failures"),
@@ -91,13 +98,27 @@ def _detection(value: dict[str, Any]) -> dict[str, Any]:
     detector = value.get("detector") if isinstance(value.get("detector"), dict) else {}
     trigger_value = value.get("trigger")
     trigger = trigger_value.get("kind") if isinstance(trigger_value, dict) else trigger_value
-    return {
+    result = {
         "event_id": _token(value.get("event_id")),
         "result": _token(value.get("result")),
         "trigger": _token(trigger),
         "version": _token(value.get("version")),
         "profile": _token(detector.get("profile")),
     }
+    boundary = value.get("boundary")
+    if isinstance(boundary, dict):
+        policy_sha256 = boundary.get("policy_sha256")
+        result["boundary"] = {
+            "address_family": _token(boundary.get("address_family")),
+            "mode": _token(boundary.get("mode")),
+            "policy_sha256": (
+                policy_sha256
+                if isinstance(policy_sha256, str) and re.fullmatch(r"[0-9a-f]{64}", policy_sha256)
+                else None
+            ),
+            "violation": _token(boundary.get("violation")),
+        }
+    return result
 
 
 def _workload_health(value: dict[str, Any]) -> dict[str, Any]:
@@ -130,7 +151,7 @@ def collect(query: Query = request) -> dict[str, Any]:
         "workloads": _workload_health(list_raw),
         "receipts": [_detection(item) for item in detections[:MAX_DETECTIONS] if isinstance(item, dict)],
         "privacy": {
-            "network": "none",
+            "network": "aggregate-boundary-events-only",
             "raw_receipts": False,
             "argv": False,
             "paths": False,

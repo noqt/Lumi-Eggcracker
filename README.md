@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
-[v0.5.0 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v0.5.0)
+[v0.6.0 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v0.6.0)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
 · [Run the first kill](#run-the-first-kill)
@@ -21,8 +21,9 @@ that AI agents in a cybersecurity test broke out of their intended environment
 and breached Hugging Face. That incident made the point: the kill switch can't
 live inside the thing it's meant to stop.
 
-Eggcracker works on native Linux today and supports two qualified workload
-profiles. It's early and intentionally limited; the exact boundary is in
+Eggcracker works on native Linux today and supports two qualified AI workload
+profiles plus an offline boundary for every explicitly selected workload. It's
+early and intentionally limited; the exact boundary is in
 [Current boundary](#current-boundary).
 
 **Want to see the core idea work?** [Try the hosted proof](TRY_IT.md). You don't
@@ -34,7 +35,8 @@ harmless synthetic process tree and shows whether the kill mechanism worked.
 > **Run the kill. Find the miss.**
 >
 > On a disposable native Ubuntu host, the first-kill path verifies the signed
-> v0.5.0 Release, launches a pinned real Qwen workload, and shows whether
+> v0.6.0 Release, launches a pinned real Qwen workload inside an offline
+> boundary, and shows whether
 > Eggcracker terminates the complete process tree while an unrelated canary
 > survives. We are opening three design-partner places for people who will run
 > it, challenge the two supported profiles, and report friction or a
@@ -57,10 +59,11 @@ llama.cpp runner, shows it running, lets Eggcracker recognise the unapproved
 workload, and prints the post-kill receipt. It also checks that an unrelated
 canary survives.
 
-The recorded 62-second run produced this bounded result:
+The release demonstration prints a bounded result like this after native
+qualification:
 
 ```text
-[eggcracker] signature and release identity verified: v0.5.0 -> eb342808f56cdc213c0861726d5309a146965bef
+[eggcracker] signature and release identity verified: v0.6.0 -> <qualified-commit>
 {
   "primitive": "pidfd-stop+cgroup.kill",
   "profile": "content.gguf-llama",
@@ -100,7 +103,7 @@ sudo /usr/bin/python3 -I -S scripts/first_kill.py \
 
 The preflight is read-only: it checks the operator, supported host features,
 empty installation targets, required tool availability, and that the local
-annotated `v0.5.0` tag resolves to the qualified commit. It makes no network
+annotated `v0.6.0` tag resolves to the qualified commit. It makes no network
 request and creates no workspace, GPG home, build, installation or service.
 It does not verify the release signature, downloaded assets, functional build,
 installation or containment; those checks happen only in the full run.
@@ -133,6 +136,23 @@ log rotation.
 This is a proof of the deterministic containment primitive, not a test of AI
 workload recognition, the two supported profiles, installation, or universal
 product effectiveness. A pass does not replace the full first-kill path.
+
+### Qualify the offline boundary
+
+On the disposable native Ubuntu host, qualify the 0.6.0 network primitive
+before installing the supervisor:
+
+```sh
+sudo /usr/bin/python3 -I -S scripts/qualify_offline_boundary.py \
+  --output ./offline-boundary.json
+```
+
+The harness creates only transient, run-ID-owned namespaces and a veth pair,
+allows loopback, counts and drops synthetic IPv4/IPv6 output, checks an
+unprivileged rule/link/namespace modification attempt, verifies a same-host
+canary survives, hashes bounded host state before and after, and removes every
+transient object. Its JSON is qualification evidence, not a promise of general
+network isolation.
 
 #### Run it in a disposable GitHub-hosted fork
 
@@ -190,6 +210,10 @@ with a redacted support bundle; route security-sensitive findings through
 - enforces first with pidfds and direct cgroup-v2 `cgroup.kill`;
 - proves the owned cgroup and descendants are empty before writing the receipt;
 - keeps an unrelated canary outside the owned cgroup alive;
+- launches every selected workload in a root-controlled offline namespace where
+  loopback is allowed and non-loopback IPv4/IPv6 egress is denied and counted;
+- automatically kills the complete selected workload tree when that boundary
+  counter trips, then writes a post-containment receipt;
 - supports exact root approvals for protected launches, plus operator-triggered
   kills and status, list, doctor, detections and version queries.
 
@@ -199,11 +223,14 @@ does not wait for an operator after an unapproved complete match.
 ## Current boundary
 
 This public alpha is deliberately narrow. It supports native Linux with
-systemd, unified cgroup v2, `cgroup.kill`, pidfds and Python 3.11+. The
-qualified content profiles are CPU-first and require the published runtime
-and artifact evidence. It does not claim universal AI recognition, inference
-proof, container or remote-service coverage, network isolation, credential
-isolation, behavioural detection, malware prevention or EDR replacement.
+systemd, unified cgroup v2, `cgroup.kill`, pidfds, Python 3.11+, iproute2 and
+nftables. The qualified content profiles are CPU-first and require the
+published runtime and artifact evidence. Selected workloads are offline-only:
+loopback works, while non-loopback IPv4 and IPv6 output is denied and triggers
+whole-tree containment. This does not claim general host network isolation,
+universal AI recognition, inference proof, container or remote-service
+coverage, credential isolation, behavioural detection, malware prevention or
+EDR replacement.
 
 Ollama, vLLM, TGI, LocalAI, llamafile and agent launchers are not claimed as
 covered profiles yet. That is a qualification boundary, not an alert-only

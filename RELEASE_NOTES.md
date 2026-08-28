@@ -1,4 +1,30 @@
-# Lumi Eggcracker 0.5.0 — The kill switch outside the sandbox
+# Lumi Eggcracker 0.6.0 — The selected-workload offline kill boundary
+
+0.6.0 extends the qualified kill switch with one deliberately narrow boundary:
+every workload launched with `eggcracker start` runs in a transient,
+run-owned Linux network namespace. Loopback remains available for local worker
+communication. Every non-loopback IPv4 and IPv6 output packet is denied by a
+namespace-local `nftables` rule and counted; the first authenticated counter
+increase automatically kills the complete owned workload tree with direct
+cgroup-v2 `cgroup.kill`, proves exact emptiness, and writes one bounded breach
+receipt.
+
+The host network namespace is not changed. The sink namespace has no uplink,
+the workload identity has no network-admin/raw-packet/netlink authority, and
+no host-wide firewall object is installed. The selected workload policy has no
+networked or alert-only mode in this release. The primitive qualification
+harness must pass on a disposable native Ubuntu VM before this version can be
+called a release candidate; unit mocks or WSL results do not substitute for
+that gate.
+
+0.6.0 does not claim general host network isolation, universal AI recognition,
+inference proof, remote/container coverage, credential or filesystem isolation,
+malware prevention or EDR replacement. The release continues to recognise the
+two exact CPU-first AI content profiles from 0.5.0, including unapproved
+Safetensors/PyTorch converters and inspectors without requiring proof of a
+forward pass.
+
+## 0.5.0 — Historical release
 
 0.5.0 is a public-alpha release line and does not move or replace
 the historical `v0.4.0` tag. It closes the independent release-review items:

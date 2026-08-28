@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+- Add one root-controlled offline boundary for every explicitly selected workload.
+- Allow loopback and count/drop all non-loopback IPv4/IPv6 output in a transient
+  run-owned namespace; an authenticated counter increase automatically invokes
+  the existing whole-tree `cgroup.kill` path.
+- Bind namespace, veth, table, chain and counter identities to the active run,
+  preserve fail-closed restart and observer handling, and expose only bounded
+  boundary health and receipt summaries.
+- Add the primitive-only native qualification harness and expand release,
+  installer, watchdog, support-bundle and documentation checks for 0.6.0.
+
 ## 0.5.0
 
 - Repair the independently reported Linux artifact-cache regression and test the supported Python 3.11, 3.12 and 3.13 runtimes in CI.

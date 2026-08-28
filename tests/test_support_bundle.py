@@ -16,7 +16,7 @@ class SupportBundleTests(unittest.TestCase):
             return {
                 "result": "PASS",
                 "backend": "root-supervisor",
-                "version": "0.5.0",
+                "version": "0.6.0",
                 "workload_uid": 997,
                 "autonomous_discovery": True,
                 "cgroup_v2": True,
@@ -37,7 +37,7 @@ class SupportBundleTests(unittest.TestCase):
                         "event_id": "abc123",
                         "result": "TERMINATED",
                         "trigger": "UNAPPROVED_AI",
-                        "version": "0.5.0",
+                        "version": "0.6.0",
                         "detector": {"profile": "content.gguf-llama", "path": "/private/model.gguf"},
                         "argv": ["--secret"],
                     }
