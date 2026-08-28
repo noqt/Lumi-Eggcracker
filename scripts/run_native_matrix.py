@@ -135,7 +135,10 @@ def main() -> int:
             try:
                 name = f"race-{token}-{index}"
                 start_workload(operator, ["start", "--name", name, "--max-pids", "4096", "--", "/usr/bin/python3", str(fixtures["fork_race.py"]), modes[index % len(modes)]])
-                time.sleep(0.12)
+                # The fixture is intentionally fork-heavy; issue the operator
+                # kill immediately after gated launch so it does not race its
+                # own PID-limit tripwire.
+                time.sleep(0.01)
                 receipt_path = Path("/tmp") / f"lumi-eggcracker-receipt-{token}-{index}.json"
                 receipt = call(operator, ["kill", "--name", name, "--receipt", str(receipt_path)])
                 if receipt.get("result") != "TERMINATED" or receipt["trigger"]["kind"] != "OPERATOR" or receipt["containment"]["surviving_pids"]:
