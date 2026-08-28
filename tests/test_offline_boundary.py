@@ -186,6 +186,18 @@ class OfflineBoundaryTests(unittest.TestCase):
         with self.assertRaises(JsonInputError):
             observer.poll()
 
+    def test_warmup_primes_and_waits_for_quiet_counter(self) -> None:
+        boundary = OfflineBoundary(BoundaryIdentity.from_record(identity_record()))
+        values = iter((CounterSnapshot(0, 0), CounterSnapshot(1, 96), CounterSnapshot(1, 96)))
+        with (
+            patch("lumi_eggcracker.offline_boundary._require") as require,
+            patch.object(boundary, "counter", side_effect=lambda: next(values)),
+            patch("lumi_eggcracker.offline_boundary.time.sleep"),
+            patch("lumi_eggcracker.offline_boundary.time.monotonic", side_effect=(0.0, 0.0, 0.05, 0.30)),
+        ):
+            self.assertEqual(boundary.warmup(), CounterSnapshot(1, 96))
+        require.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

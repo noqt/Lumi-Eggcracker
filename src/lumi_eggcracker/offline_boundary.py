@@ -36,6 +36,8 @@ OUTPUT_CHAIN = "output"
 INPUT_CHAIN = "input"
 POLL_INTERVAL_SECONDS = 0.05
 HEALTH_INTERVAL_SECONDS = 0.25
+WARMUP_TIMEOUT_SECONDS = 5.0
+WARMUP_QUIET_SECONDS = 0.25
 MAX_COMMAND_OUTPUT = 128 * 1024
 MAX_COUNTER = (1 << 63) - 1
 
@@ -621,6 +623,35 @@ class OfflineBoundary:
             action="deny-rule counter reset",
         )
         return self.assert_healthy(require_zero=True)
+
+    def warmup(self) -> CounterSnapshot:
+        """Prime namespace network state before the selected workload is released.
+
+        Linux may emit delayed IPv6 neighbour-discovery and multicast-control
+        packets when a transient namespace is first entered.  A root-owned
+        no-op enters the exact namespace while the launch FIFO is still
+        closed; the supervisor then waits for that bounded setup traffic to
+        become quiet.  The watcher resets the counter immediately afterward,
+        so only post-release workload traffic can trigger containment.
+        """
+        _require(
+            [str(IP), "netns", "exec", self.identity.workload_namespace, "/bin/true"],
+            action="namespace warmup",
+        )
+        deadline = time.monotonic() + WARMUP_TIMEOUT_SECONDS
+        quiet_since = time.monotonic()
+        previous = self.counter()
+        while True:
+            time.sleep(POLL_INTERVAL_SECONDS)
+            current = self.counter()
+            now = time.monotonic()
+            if current != previous:
+                previous = current
+                quiet_since = now
+            elif now - quiet_since >= WARMUP_QUIET_SECONDS:
+                return current
+            if now >= deadline:
+                raise JsonInputError("offline boundary did not reach a quiet pre-release state")
 
     def assert_healthy(self, *, require_zero: bool = False) -> CounterSnapshot:
         self._assert_namespace_identity(

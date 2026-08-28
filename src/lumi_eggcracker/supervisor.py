@@ -1851,6 +1851,11 @@ class Supervisor:
                     time.sleep(0.01)
                 if props.get("ActiveState") != "active" or not props.get("ControlGroup"):
                     raise JsonInputError("gated workload did not become active")
+                # Enter the exact namespace once while the launch FIFO remains
+                # closed. Linux can emit delayed IPv6 control-plane traffic on
+                # first entry; settle it before the observer is armed so that
+                # only post-release workload egress is authoritative.
+                boundary.warmup()
                 identity = capture_identity(props["ControlGroup"], run_id, unit)
                 record = {
                     **summary,
