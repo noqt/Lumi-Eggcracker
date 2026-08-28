@@ -665,6 +665,24 @@ class Supervisor:
             value["MODEL_TOPOLOGY"] = topology
         return value
 
+    def _authorizes_protected_scope(
+        self, snapshot: ProcessSnapshot, provenance: dict[str, Any] | None
+    ) -> bool:
+        """Authorize descendants of one exact root-approved workload cgroup.
+
+        A topology launcher commonly execs or forks a worker whose PID/start
+        time was not present at the pre-exec gate.  The root-owned provenance
+        record and exact delegated cgroup are the approval closure for that
+        worker; UID and cgroup identity remain mandatory, so this does not
+        broaden approval to a user, directory, process name or wildcard.
+        """
+        if provenance is None or snapshot.uid != self.policy["workload_uid"]:
+            return False
+        selected = f"0::{provenance['cgroup']}"
+        if provenance["cgroup"] not in getattr(self, "active_cgroups", set()):
+            return False
+        return any(line == selected for line in snapshot.cgroups)
+
     def _profile_match(
         self,
         candidates: tuple[_EvidenceCandidate, ...] | list[_EvidenceCandidate],
@@ -1338,6 +1356,7 @@ class Supervisor:
                 ProcessIdentity(item["pid"], item["start_time"]): item
                 for item in provenances
             }
+            provenance_by_cgroup = {item["cgroup"]: item for item in provenances}
             trigger_candidate = witness[0]
             aggregate_content: list[ArtifactEvidence] = []
             aggregate_runtimes: list[RuntimeEvidence] = []
@@ -1377,14 +1396,29 @@ class Supervisor:
                     continue
                 executable_digests[candidate.snapshot.identity] = executable_sha256
                 provenance = provenance_by_identity.get(candidate.snapshot.identity)
-                if provenance is None or not launch_authorizes(
-                    candidate.snapshot,
-                    executable_sha256,
-                    getattr(self, "executable_metadata", {}).get(
-                        candidate.snapshot.identity
+                candidate_cgroup = next(
+                    (
+                        line[3:]
+                        for line in candidate.snapshot.cgroups
+                        if line.startswith("0::/system.slice/")
                     ),
-                    provenance,
-                ):
+                    "",
+                )
+                scope_provenance = provenance_by_cgroup.get(candidate_cgroup)
+                authorized = (
+                    provenance is not None
+                    and launch_authorizes(
+                        candidate.snapshot,
+                        executable_sha256,
+                        getattr(self, "executable_metadata", {}).get(
+                            candidate.snapshot.identity
+                        ),
+                        provenance,
+                    )
+                ) or self._authorizes_protected_scope(
+                    candidate.snapshot, scope_provenance
+                )
+                if not authorized:
                     unapproved.append(candidate)
             if not unapproved:
                 continue
