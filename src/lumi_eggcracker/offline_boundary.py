@@ -471,7 +471,11 @@ class OfflineBoundary:
                     policy_sha256=policy_digest(value.table),
                 )
             )
-            boundary.assert_healthy(require_zero=True)
+            # Namespace construction itself can emit kernel control traffic
+            # while the veth and routes settle. Establish the authenticated
+            # zero baseline only after the complete topology and ruleset are
+            # in place; no selected workload exists at this point.
+            boundary.reset_counter()
             return boundary
         except BaseException:
             for namespace in reversed(created):
