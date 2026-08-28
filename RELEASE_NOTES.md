@@ -1,3 +1,18 @@
+# Lumi Eggcracker 1.0.0 — release candidate freeze
+
+This local 1.0.0 candidate freezes the qualified root-supervisor product after
+the 0.7 runtime-topology, 0.8 execution-boundary, 0.8.1 deployment-hardening
+and 0.9 bounded-local-lockdown milestones. It carries four exact native CPU
+AI profiles, direct cgroup-v2 containment, offline selected-workload and
+execution boundaries, watchdog recovery, and root-controlled exact relaunch
+lockdown.
+
+The candidate is not tagged, signed or published. Its release decision is
+bound to the exact commit, artifact hashes, disposable Ubuntu qualification
+evidence and the internal black-box/source-informed campaign. Unsupported
+formats, runtimes, containers, remote workloads, behavioural recognition,
+host-wide isolation and remote retaliation remain outside the claim.
+
 # Lumi Eggcracker 0.9.0 — bounded local lockdown
 
 0.9.0 adds one post-containment response: after a successful unapproved-AI,
@@ -16,6 +31,15 @@ root-admin socket. Clearing an incident never restores its revoked approval.
 This release does not add remote retaliation, hack-back behaviour, arbitrary
 response hooks, host-wide UID/name quarantine, automatic expiry, a behavioural
 model, attribution or universal AI recognition.
+
+# Lumi Eggcracker 0.7.0 — native topology coverage
+
+0.7.0 qualified two additional exact native CPU topology profiles:
+`content.gguf-ollama` and `content.safetensors-vllm`. They require the pinned
+launcher/worker identities, structurally validated model content and a bounded
+relationship; process names, ports, package names and partial evidence never
+trigger a kill. GPU, container, remote and unqualified runtime variants remain
+outside the claim.
 
 # Lumi Eggcracker 0.6.0 — The selected-workload offline kill boundary
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Qualify the 0.6.0 offline boundary primitive on disposable native Linux.
+"""Qualify the offline boundary primitive on disposable native Linux.
 
 This harness is intentionally independent of the supervisor state machine.  It
 creates one exact namespace pair, exercises loopback and synthetic IPv4/IPv6
@@ -216,7 +216,7 @@ assert all(checks.values())
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="qualify the native 0.6.0 offline boundary primitive")
+    parser = argparse.ArgumentParser(description="qualify the native offline boundary primitive")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     if os.name != "posix" or os.geteuid() != 0:

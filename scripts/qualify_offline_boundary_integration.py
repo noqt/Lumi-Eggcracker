@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root-only native integration gates for the 0.6.0 offline boundary.
+"""Root-only native integration gates for the offline boundary.
 
 This runner exercises the installed public CLI.  It deliberately keeps the
 evidence aggregate-only: receipts are inspected locally, while no command

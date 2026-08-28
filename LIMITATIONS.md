@@ -1,11 +1,12 @@
 # Limitations
 
-Lumi Eggcracker 0.6.0 autonomously acts on a complete match from its two active,
-publicly qualified content profiles and on a prohibited egress event from every
+Lumi Eggcracker 1.0.0 autonomously acts on a complete match from its four active,
+publicly qualified native content profiles and on a prohibited egress event from every
 explicitly selected workload. Its content path supports a regular GGUF v2/v3
 artifact combined with the exact SHA-256-pinned qualified llama.cpp ELF, or a
 regular Safetensors artifact combined with the exact SHA-256-pinned CPU PyTorch
-bridge-plus-ATen ELF pair. Runtime identity must be a structurally loadable ELF
+bridge-plus-ATen ELF pair, including the qualified native Ollama/GGUF and
+vLLM/Safetensors topology forms. Runtime identity must be a structurally loadable ELF
 observed as the running executable or an executable mapping; merely opening or
 read-only mapping ELF bytes is not runtime evidence. This deliberate pinning
 means other builds and versions are unsupported until their full-file identities
@@ -20,10 +21,12 @@ workloads.
 
 The qualification contract is published in `QUALIFICATION.md`. Qualification
 is exact-commit and host bound. The release manifest, installed policy, native
-receipts and portable evidence seal must agree; a prior 0.5.0 result or CI pass
-does not qualify a 0.6.0 package or another host.
+receipts and portable evidence seal must agree; a prior 0.5.0, 0.6.0 or 0.9.0
+result or CI pass does not qualify a 1.0.0 package or another host.
 
-Name-only profiles for Ollama, vLLM, TGI, LocalAI, llamafile and agent CLIs are intentionally not active in this release. They require exact invocation fixtures and launcher-identity qualification before they can become destructive profiles.
+Ollama and vLLM are active only for the exact native CPU topology fixtures and
+launcher identities in the candidate catalogue. Name-only profiles for TGI,
+LocalAI, llamafile and agent CLIs remain inactive until separately qualified.
 
 The observer uses bounded `/proc` polling. It has no kernel execution hook, eBPF programme or guarantee that a process which forks, daemonises or exits before discovery can be reconstructed as one complete historical tree. A successful receipt proves the exact captured quarantine cgroup is empty.
 
@@ -35,7 +38,7 @@ The product does not kill generic Python, Node.js, Java, shell, GPU-intensive or
 memory-intensive processes based on those generic properties. It does not
 require or claim proof of inference: an unapproved converter, inspector,
 evaluator or trainer satisfying both evidence groups is an intended kill.
-Selected workloads are offline-only in 0.6.0. Loopback is allowed; all
+Selected workloads are offline-only in 1.0.0. Loopback is allowed; all
 non-loopback IPv4/IPv6 output is kernel-denied in a transient run namespace and
 trips whole-tree containment. This is not general host network isolation,
 allowlisting, DNS policy, proxying, filesystem isolation, credential isolation,

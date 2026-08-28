@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0 (release candidate)
+
+- Freeze the integrated four-profile native CPU product after the 0.7, 0.8,
+  0.8.1 and 0.9 milestones.
+- Bind the candidate to deterministic qualification, packaged-artifact
+  verification and the adaptive campaign evidence plan.
+- Keep publication, signing, tagging and external deployment as separate
+  decisions.
+
 ## 0.6.0
 
 - Add one root-controlled offline boundary for every explicitly selected workload.

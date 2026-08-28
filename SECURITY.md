@@ -22,9 +22,10 @@ can use the repository's [bug form](https://github.com/noqt/Lumi-Eggcracker/issu
 
 ## Supported scope
 
-Security handling currently covers the public `v0.5.0` Release and current
-public `main`. Historical tags may be useful for comparison but do not receive
-new qualification claims.
+Security handling covers the published release line and the current 1.0.0
+release-candidate branch only for the exact candidate identity under review.
+Historical tags may be useful for comparison but do not receive new
+qualification claims.
 
 The exact boundary and non-claims are documented in
 [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md), and
