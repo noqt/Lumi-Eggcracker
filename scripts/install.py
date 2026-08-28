@@ -217,6 +217,9 @@ def service() -> bytes:
 _SERVICE_RELEASE = service().replace(b"PrivateTmp=yes\n", b"").replace(
     b"ReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker\n",
     b"ReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker /run/netns\n",
+).replace(
+    b"RestrictAddressFamilies=AF_UNIX AF_NETLINK\n",
+    b"RestrictAddressFamilies=AF_UNIX AF_NETLINK\nMountFlags=shared\n",
 )
 
 
