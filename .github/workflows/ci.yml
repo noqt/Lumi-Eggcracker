@@ -57,7 +57,7 @@ jobs:
 
       - name: Upload tag artifacts
         if: startsWith(github.ref, 'refs/tags/v') && matrix.python-version == '3.11'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: lumi-eggcracker-${{ github.ref_name }}
           path: |
