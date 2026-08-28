@@ -129,7 +129,7 @@ def main() -> int:
             raise RuntimeError("workload identity accessed supervisor client")
         if call(operator, ["doctor"]).get("result") != "PASS":
             raise RuntimeError("operator supervisor authentication failed")
-        modes = ("fork", "session", "replace", "fork")
+        modes = ("bounded", "bounded-session", "bounded-replace", "bounded")
         for index in range(args.fork_race_repetitions):
             canary = subprocess.Popen(["/usr/sbin/runuser", "-u", workload, "--", "/usr/bin/python3", str(fixtures["canary.py"])], start_new_session=True)
             try:
