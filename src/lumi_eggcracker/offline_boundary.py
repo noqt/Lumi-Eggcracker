@@ -382,8 +382,8 @@ class OfflineBoundary:
             _require([str(IP), "-n", value.sink_namespace, "link", "set", value.sink_interface, "up"], action="sink veth activation")
             _require([str(IP), "-n", value.workload_namespace, "addr", "add", "192.0.2.2/30", "dev", value.workload_interface], action="workload IPv4 setup")
             _require([str(IP), "-n", value.sink_namespace, "addr", "add", "192.0.2.1/30", "dev", value.sink_interface], action="sink IPv4 setup")
-            _require([str(IP), "-n", value.workload_namespace, "-6", "addr", "add", "2001:db8::2/126", "dev", value.workload_interface], action="workload IPv6 setup")
-            _require([str(IP), "-n", value.sink_namespace, "-6", "addr", "add", "2001:db8::1/126", "dev", value.sink_interface], action="sink IPv6 setup")
+            _require([str(IP), "-n", value.workload_namespace, "-6", "addr", "add", "2001:db8::2/126", "dev", value.workload_interface, "nodad"], action="workload IPv6 setup")
+            _require([str(IP), "-n", value.sink_namespace, "-6", "addr", "add", "2001:db8::1/126", "dev", value.sink_interface, "nodad"], action="sink IPv6 setup")
             _require([str(IP), "-n", value.workload_namespace, "route", "add", "default", "via", "192.0.2.1", "dev", value.workload_interface], action="workload IPv4 route setup")
             _require([str(IP), "-n", value.workload_namespace, "-6", "route", "add", "default", "via", "2001:db8::1", "dev", value.workload_interface], action="workload IPv6 route setup")
             _require(
