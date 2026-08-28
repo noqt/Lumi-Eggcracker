@@ -6,8 +6,10 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import secrets
 import signal
+import shutil
 import subprocess
 import tempfile
 import time
@@ -17,6 +19,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "scripts" / "ai_smoke_worker.py"
 ASSET_SCHEMA = "lumi-eggcracker.ai-smoke-assets.v1"
+SMOKE_RUNTIME = Path("/run/lumi-eggcracker")
+WORKLOAD_USER = "lumi-eggcracker-workload"
 
 
 def digest(path: Path) -> str:
@@ -67,6 +71,36 @@ def stop_canary(canary: subprocess.Popen[bytes]) -> None:
         canary.wait(timeout=3)
 
 
+def shared_smoke_directory() -> tempfile.TemporaryDirectory[str]:
+    """Create a root-owned, workload-group writable result directory.
+
+    Selected workload units use ``PrivateTmp=yes``.  A host-side ``/tmp``
+    directory is therefore a different mount from the workload's ``/tmp``
+    and cannot be used to observe real model output.  Keep the qualification
+    artefacts in a short-lived runtime directory instead, with access limited
+    to root and the dedicated workload group.
+    """
+    if os.geteuid() != 0:
+        raise RuntimeError("real AI smoke must run as root")
+    if not SMOKE_RUNTIME.is_dir() or SMOKE_RUNTIME.is_symlink():
+        raise RuntimeError("Eggcracker runtime directory is unavailable")
+    try:
+        workload_gid = pwd.getpwnam(WORKLOAD_USER).pw_gid
+    except KeyError as error:
+        raise RuntimeError("dedicated Eggcracker workload identity is unavailable") from error
+    temporary = tempfile.TemporaryDirectory(prefix="lumi-eggcracker-ai-smoke-", dir=SMOKE_RUNTIME)
+    root = Path(temporary.name)
+    os.chown(root, 0, 0)
+    # The workload must traverse the outer directory to reach the shared I/O
+    # child, but it must not be able to list, create or replace receipt files.
+    os.chmod(root, 0o711)
+    shared = root / "io"
+    shared.mkdir(mode=0o730)
+    os.chown(shared, 0, workload_gid)
+    os.chmod(shared, 0o730)
+    return temporary
+
+
 def generated(path: Path, prompt: str) -> bool:
     if not path.is_file() or path.is_symlink():
         return False
@@ -81,16 +115,21 @@ def generated(path: Path, prompt: str) -> bool:
 
 def one_smoke(*, runner: Path, model: Path, provenance: dict[str, Any], index: int) -> dict[str, Any]:
     prompt = "Explain one safe property of a Linux cgroup in one sentence."
-    with tempfile.TemporaryDirectory(prefix="lumi-eggcracker-ai-smoke-", dir="/tmp") as raw:
+    with shared_smoke_directory() as raw:
         root = Path(raw)
-        output, diagnostics, receipt_path = root / "generated.txt", root / "runner.stderr", root / "receipt.json"
+        shared = root / "io"
+        output, diagnostics, receipt_path = shared / "generated.txt", shared / "runner.stderr", root / "receipt.json"
+        worker = root / "ai_smoke_worker.py"
+        shutil.copyfile(WORKER, worker)
+        os.chown(worker, 0, 0)
+        os.chmod(worker, 0o755)
         for path in (output, diagnostics):
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
             os.close(descriptor)
-            os.chmod(path, 0o666)
+            os.chown(path, 0, shared.stat().st_gid)
+            os.chmod(path, 0o660)
         # The workload can traverse to the two pre-created writable outputs,
         # but cannot create or replace the root-owned receipt path.
-        os.chmod(root, 0o711)
         name = f"local-ai-{secrets.token_hex(8)}-{index}"
         canary = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)
         started: dict[str, Any] | None = None
@@ -102,7 +141,7 @@ def one_smoke(*, runner: Path, model: Path, provenance: dict[str, Any], index: i
                 "--simple-io", "--single-turn", "--no-warmup", "--no-display-prompt",
                 "--seed", "1234",
             ]
-            started = call(["start", "--name", name, "--max-pids", "64", "--", "/usr/bin/python3", str(WORKER), "--stdout", str(output), "--stderr", str(diagnostics), "--", *runner_argv])
+            started = call(["start", "--name", name, "--max-pids", "64", "--", "/usr/bin/python3", str(worker), "--stdout", str(output), "--stderr", str(diagnostics), "--", *runner_argv])
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline and not generated(output, prompt):
                 time.sleep(0.05)
