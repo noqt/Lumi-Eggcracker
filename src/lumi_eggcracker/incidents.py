@@ -22,7 +22,7 @@ HEX = re.compile(r"[0-9a-f]{64}\Z")
 SOURCE = re.compile(r"[0-9a-f]{40}\Z")
 SAFE_TOKEN = re.compile(r"[A-Za-z0-9_.:-]{1,96}\Z")
 STATES = {"ACTIVE", "ACKNOWLEDGED", "CLEARED"}
-MAX_INCIDENTS = 128
+MAX_INCIDENTS = 256
 # Permit one bounded compaction window when an older package or interrupted
 # campaign left a small number of cleared records above the live cap.  Active
 # records are never discarded; a store with too many active records remains
