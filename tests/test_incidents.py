@@ -162,6 +162,37 @@ class IncidentTests(unittest.TestCase):
                 incidents.MAX_INCIDENTS,
             )
 
+    def test_summary_is_bounded_query_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            value = incidents.create(
+                root,
+                receipt=_receipt(),
+                policy={"version": "1.0.0"},
+                catalogue_sha256="e" * 64,
+                source_commit="f" * 40,
+                version="1.0.0",
+                trigger="UNAPPROVED_AI_MATCH",
+                profile="content.gguf-llama",
+                evidence=["gguf-v3"],
+                match={
+                    "argv_sha256": "b" * 64,
+                    "executable_sha256": "c" * 64,
+                    "profile": "content.gguf-llama",
+                    "uid": 2001,
+                },
+                workload=_receipt()["workload"],
+                approval=None,
+            )
+            self.assertEqual(
+                incidents.summary(value),
+                {
+                    "incident_id": "a" * 24,
+                    "state": "ACTIVE",
+                    "trigger": "UNAPPROVED_AI_MATCH",
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

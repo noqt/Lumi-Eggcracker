@@ -428,15 +428,14 @@ def link(root: Path, value: dict[str, Any], receipt: dict[str, Any], *, partial:
 
 def summary(value: dict[str, Any]) -> dict[str, Any]:
     checked = validate(value)
+    # Query/operator sockets receive only the identities needed to correlate
+    # and clear a bounded incident.  Full detector, approval and workload
+    # detail stays behind the root-admin ``incident show`` action so a busy
+    # campaign cannot make the authenticated response frame unavailable.
     return {
         "incident_id": checked["incident_id"],
         "state": checked["state"],
         "trigger": checked["trigger"],
-        "created_monotonic_ns": checked["created_monotonic_ns"],
-        "generation": checked["generation"],
-        "relaunch_suppressed": checked["response"]["relaunch_suppressed"],
-        "response_completed": checked["response"]["completed"],
-        "recurrence_contained": checked["recurrence"]["contained_matches"],
     }
 
 
