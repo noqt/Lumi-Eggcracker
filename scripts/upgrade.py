@@ -244,8 +244,24 @@ def replace_install(release: dict[str, Any], operator: pwd.struct_passwd, manife
 
 
 def socket_ready(operator_gid: int) -> bool:
-    contracts = ((installer.QUERY_SOCKET, 0o660, operator_gid), (installer.OPERATOR_SOCKET, 0o660, operator_gid), (installer.ADMIN_SOCKET, 0o600, 0), (installer.HEARTBEAT_SOCKET, 0o600, 0))
-    return all(path.is_socket() and stat.S_IMODE(path.stat().st_mode) == mode and path.stat().st_uid == uid for path, mode, uid in contracts)
+    # All control sockets are created by the root supervisor.  The operator
+    # sockets are group-readable/writable by the resolved operator group; the
+    # admin and watchdog sockets remain root-only.  Keep uid and gid as
+    # separate contract fields so a non-root operator gid is never mistaken
+    # for the socket owner uid.
+    contracts = (
+        (installer.QUERY_SOCKET, 0o660, 0, operator_gid),
+        (installer.OPERATOR_SOCKET, 0o660, 0, operator_gid),
+        (installer.ADMIN_SOCKET, 0o600, 0, 0),
+        (installer.HEARTBEAT_SOCKET, 0o600, 0, 0),
+    )
+    return all(
+        path.is_socket()
+        and stat.S_IMODE(path.stat().st_mode) == mode
+        and path.stat().st_uid == uid
+        and path.stat().st_gid == gid
+        for path, mode, uid, gid in contracts
+    )
 
 
 def start_services(operator: str) -> None:
