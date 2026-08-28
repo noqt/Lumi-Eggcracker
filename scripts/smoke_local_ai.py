@@ -8,8 +8,8 @@ import json
 import os
 import pwd
 import secrets
-import signal
 import shutil
+import signal
 import subprocess
 import tempfile
 import time

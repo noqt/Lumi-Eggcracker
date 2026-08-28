@@ -49,6 +49,32 @@ class DetectorTests(unittest.TestCase):
         self.assertIsNone(
             match(catalogue, sample, evidence={"MODEL_CONTENT": {"safetensors-v1"}})
         )
+
+    def test_topology_profiles_require_their_topology_group(self) -> None:
+        catalogue = load_bundled()
+        sample = Sample("opaque", ("opaque",))
+        self.assertIsNone(
+            match(
+                catalogue,
+                sample,
+                evidence={
+                    "MODEL_CONTENT": {"gguf-v3"},
+                    "MODEL_RUNTIME": {"ollama-runner-pinned"},
+                },
+            )
+        )
+        result = match(
+            catalogue,
+            sample,
+            evidence={
+                "MODEL_CONTENT": {"gguf-v3"},
+                "MODEL_RUNTIME": {"ollama-runner-pinned"},
+                "MODEL_TOPOLOGY": {"ollama-launcher-pinned"},
+            },
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual("content.gguf-ollama", result.profile)
         self.assertIsNone(
             match(catalogue, sample, evidence={"MODEL_RUNTIME": {"pytorch-aten-build-id-pinned-cpu"}})
         )

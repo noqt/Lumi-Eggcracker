@@ -48,7 +48,14 @@ from .discovery import (
     identity as process_identity,
 )
 from .discovery import snapshot as process_snapshot
-from .elfmarkers import MAX_RUNTIME_CANDIDATES, RuntimeEvidence, with_pytorch_pair
+from .elfmarkers import (
+    MAX_RUNTIME_CANDIDATES,
+    OLLAMA_LAUNCHER_EVIDENCE_ID,
+    VLLM_PAIR_EVIDENCE_ID,
+    RuntimeEvidence,
+    with_pytorch_pair,
+    with_vllm_pair,
+)
 from .elfmarkers import from_snapshot as runtime_from_snapshot
 from .jsonio import JsonInputError, load_regular_json
 from .launches import authorizes as launch_authorizes
@@ -640,15 +647,23 @@ class Supervisor:
     def _candidate_evidence(
         self, candidates: tuple[_EvidenceCandidate, ...] | list[_EvidenceCandidate]
     ) -> dict[str, set[str]]:
-        paired = with_pytorch_pair(
+        paired = with_vllm_pair(with_pytorch_pair(
             item for candidate in candidates for item in candidate.runtimes
-        )
-        return {
+        ))
+        value = {
             "MODEL_CONTENT": {
                 item.evidence_id for candidate in candidates for item in candidate.content
             },
             "MODEL_RUNTIME": {item.evidence_id for item in paired},
         }
+        topology = {
+            item.evidence_id
+            for item in paired
+            if item.evidence_id in {OLLAMA_LAUNCHER_EVIDENCE_ID, VLLM_PAIR_EVIDENCE_ID}
+        }
+        if topology:
+            value["MODEL_TOPOLOGY"] = topology
+        return value
 
     def _profile_match(
         self,
@@ -734,18 +749,20 @@ class Supervisor:
             complete: list[_EvidenceCandidate] = []
             partial: list[_EvidenceCandidate] = []
             for item in component:
-                own_runtime = with_pytorch_pair(item.runtimes)
+                own_runtime = with_vllm_pair(with_pytorch_pair(item.runtimes))
                 own_match = match(
                     self.catalogue,
                     item.snapshot,
-                    evidence={
-                        "MODEL_CONTENT": {
-                            value.evidence_id for value in item.content
-                        },
-                        "MODEL_RUNTIME": {
-                            value.evidence_id for value in own_runtime
-                        },
-                    },
+                    evidence=self._candidate_evidence(
+                        (
+                            _EvidenceCandidate(
+                                item.snapshot,
+                                item.content,
+                                tuple(own_runtime),
+                                item.first_seen_ns,
+                            ),
+                        )
+                    ),
                 )
                 current = _EvidenceCandidate(
                     item.snapshot,
@@ -969,11 +986,11 @@ class Supervisor:
         correlated: tuple[_EvidenceCandidate, ...] = (),
         boundary_type: str = "same-process",
     ) -> dict[str, Any]:
-        trigger_kind = (
-            "UNAPPROVED_SAFETENSORS_PYTORCH"
-            if detected.profile == "content.safetensors-pytorch"
-            else "UNAPPROVED_AI_MATCH"
-        )
+        trigger_kind = {
+            "content.safetensors-pytorch": "UNAPPROVED_SAFETENSORS_PYTORCH",
+            "content.safetensors-vllm": "UNAPPROVED_VLLM_SAFETENSORS",
+            "content.gguf-ollama": "UNAPPROVED_OLLAMA_GGUF",
+        }.get(detected.profile, "UNAPPROVED_AI_MATCH")
         detector: dict[str, Any] = {
             "catalogue_schema": "lumi-eggcracker.detectors.v3",
             "detection_path": detected.path,
@@ -1027,6 +1044,8 @@ class Supervisor:
                 roles.append("MODEL_CONTENT")
             if candidate.runtimes:
                 roles.append("MODEL_RUNTIME")
+            if self._candidate_evidence((candidate,)).get("MODEL_TOPOLOGY"):
+                roles.append("MODEL_TOPOLOGY")
             evidence_roles.append(
                 {
                     "pid": candidate.snapshot.identity.pid,
@@ -1329,11 +1348,18 @@ class Supervisor:
                 for evidence in candidate.runtimes:
                     if evidence not in aggregate_runtimes:
                         aggregate_runtimes.append(evidence)
-            aggregate_runtimes = list(with_pytorch_pair(aggregate_runtimes))
-            supplied = {
-                "MODEL_CONTENT": {item.evidence_id for item in aggregate_content},
-                "MODEL_RUNTIME": {item.evidence_id for item in aggregate_runtimes},
-            }
+            aggregate_runtimes = list(with_vllm_pair(with_pytorch_pair(aggregate_runtimes)))
+            supplied = self._candidate_evidence(
+                tuple(
+                    _EvidenceCandidate(
+                        candidate.snapshot,
+                        tuple(aggregate_content),
+                        tuple(aggregate_runtimes),
+                        candidate.first_seen_ns,
+                    )
+                    for candidate in witness[:1]
+                )
+            )
             detected = trigger_candidate.fast_match or match(
                 self.catalogue, trigger_candidate.snapshot, evidence=supplied
             )
