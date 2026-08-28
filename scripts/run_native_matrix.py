@@ -200,7 +200,7 @@ def main() -> int:
                 CLI,
             ]
         )
-        hostile_policy_id = str(hostile_policy["policy_id"])
+        hostile_policy_id = str(hostile_policy["exec_policy"]["policy_id"])
         start_workload(
             operator,
             [
