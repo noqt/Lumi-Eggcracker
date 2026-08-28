@@ -109,10 +109,13 @@ def main() -> int:
     fixture_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
         fixture_workspace = tempfile.TemporaryDirectory(
-            prefix="lumi-native-fixtures-", dir="/tmp"
+            prefix="lumi-native-fixtures-", dir="/run/lumi-eggcracker"
         )
         fixture_root = Path(fixture_workspace.name)
         os.chmod(fixture_root, 0o755)
+        result_root = fixture_root / "results"
+        result_root.mkdir()
+        os.chmod(result_root, 0o733)
         fixtures: dict[str, Path] = {}
         for filename in (
             "benign_near_limit.py",
@@ -168,7 +171,7 @@ def main() -> int:
             if state.get("state") != "COMPLETED_ALLOWED":
                 raise RuntimeError("benign near-limit workload was not allowed")
             results["benign"].append(state["state"])
-        hostile_path = Path("/tmp") / f"lumi-eggcracker-hostile-{token}.json"
+        hostile_path = result_root / f"lumi-eggcracker-hostile-{token}.json"
         hostile = f"hostile-{token}"
         start_workload(operator, ["start", "--name", hostile, "--max-pids", "8", "--", "/usr/bin/python3", str(fixtures["hostile_client.py"]), str(hostile_path), str(args.socket_attempts)])
         wait_state(operator, hostile, "COMPLETED_ALLOWED", timeout=30)
