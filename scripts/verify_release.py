@@ -134,6 +134,7 @@ def main() -> int:
             "scripts/run_installer_p0.py",
             "scripts/benchmark_overhead.py",
             "scripts/qualify_offline_boundary.py",
+            "scripts/qualify_offline_boundary_integration.py",
             "scripts/verify_evidence.py",
             "scripts/package_evidence.py",
             "scripts/verify_evidence_archive.py",
