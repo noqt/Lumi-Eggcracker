@@ -17,10 +17,13 @@ ADMIN_SOCKET = "/run/lumi-eggcracker/admin.sock"
 SOCKETS = {
     "approvals": QUERY_SOCKET,
     "detections": QUERY_SOCKET,
+    "exec_policies": QUERY_SOCKET,
     "doctor": QUERY_SOCKET,
     "list": QUERY_SOCKET,
     "status": QUERY_SOCKET,
     "approve": ADMIN_SOCKET,
+    "exec_policy_create": ADMIN_SOCKET,
+    "exec_policy_revoke": ADMIN_SOCKET,
     "revoke": ADMIN_SOCKET,
     "kill": OPERATOR_SOCKET,
     "start": OPERATOR_SOCKET,

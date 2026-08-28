@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import array
 import datetime as dt
 import errno
 import json
@@ -57,6 +58,13 @@ from .elfmarkers import (
     with_vllm_pair,
 )
 from .elfmarkers import from_snapshot as runtime_from_snapshot
+from .execution_policy import STATE_DIR as EXEC_POLICY_DIR
+from .execution_policy import create as create_execution_policy
+from .execution_policy import ephemeral as ephemeral_execution_policy
+from .execution_policy import load as load_execution_policy
+from .execution_policy import load_all as load_execution_policies
+from .execution_policy import public as public_execution_policy
+from .execution_policy import revoke as revoke_execution_policy
 from .jsonio import JsonInputError, load_regular_json
 from .launches import authorizes as launch_authorizes
 from .launches import create as create_launch_provenance
@@ -81,6 +89,12 @@ from .records import (
     validate_run,
     write_atomic,
 )
+from .seccomp_notify import (
+    allowed_target,
+    notification_id_valid,
+    receive_notification,
+    send_response,
+)
 from .watchdog import HEARTBEAT, HEARTBEAT_MAGIC, HEARTBEAT_SOCKET
 
 MAX_FRAME = 32 * 1024
@@ -91,14 +105,15 @@ OPERATOR_SOCKET = Path("/run/lumi-eggcracker/operator.sock")
 ADMIN_SOCKET = Path("/run/lumi-eggcracker/admin.sock")
 LEGACY_SOCKET = Path("/run/lumi-eggcracker/control.sock")
 SOCKET_ACTIONS = {
-    QUERY_SOCKET: frozenset({"approvals", "detections", "doctor", "list", "status"}),
+    QUERY_SOCKET: frozenset({"approvals", "detections", "doctor", "exec_policies", "list", "status"}),
     OPERATOR_SOCKET: frozenset({"kill", "start"}),
-    ADMIN_SOCKET: frozenset({"approve", "revoke"}),
+    ADMIN_SOCKET: frozenset({"approve", "exec_policy_create", "exec_policy_revoke", "revoke"}),
 }
 STATE_DIR = Path("/var/lib/lumi-eggcracker")
 UNIT_PREFIX = "lumi-eggcracker-workload-"
 GATES_DIR = Path("/run/lumi-eggcracker/gates")
 STAGED_DIR = Path("/run/lumi-eggcracker/staged")
+EXEC_DIR = Path("/run/lumi-eggcracker/exec")
 DISCOVERY_PROGRESS_SCHEMA = "lumi-eggcracker.discovery-progress.v1"
 DISCOVERY_PROGRESS = STATE_DIR / "discovery-progress.json"
 MAX_TERMINAL_RECORDS = 128
@@ -241,6 +256,7 @@ class Supervisor:
         self.approvals = STATE_DIR / "approvals"
         self.launches = STATE_DIR / "launches"
         self.detections = STATE_DIR / "detections"
+        self.exec_policies = EXEC_POLICY_DIR
         self.quarantine_root: Path | None = None
         self.stop_event = threading.Event()
         self.locks: dict[str, threading.Lock] = {}
@@ -444,6 +460,7 @@ class Supervisor:
             (QUERY_SOCKET.parent, 0o711, self.policy["operator_gid"]),
             (GATES_DIR, 0o710, self.policy["workload_gid"]),
             (STAGED_DIR, 0o711, 0),
+            (EXEC_DIR, 0o710, self.policy["workload_gid"]),
             (STATE_DIR, 0o700, 0),
             (self.runs, 0o700, 0),
             (self.names, 0o700, 0),
@@ -451,6 +468,7 @@ class Supervisor:
             (self.approvals, 0o700, 0),
             (self.launches, 0o700, 0),
             (self.detections, 0o700, 0),
+            (self.exec_policies, 0o700, 0),
         ):
             path.mkdir(mode=mode, parents=True, exist_ok=True)
             os.chown(path, 0, gid)
@@ -1566,6 +1584,7 @@ class Supervisor:
         trigger_ns: int | None = None,
         *,
         boundary: OfflineBoundary | None = None,
+        execution_boundary: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Direct cgroup.kill is the first trigger-side effect; cleanup is post-proof only."""
         lock = self._new_lock(record["run_id"])
@@ -1575,7 +1594,7 @@ class Supervisor:
             identity = identity_from_run(record)
             observed = trigger_ns if trigger_ns is not None else time.monotonic_ns()
             boundary_error: str | None = None
-            if boundary is None:
+            if boundary is None and trigger != "EXECUTION_BOUNDARY":
                 try:
                     boundary = self._boundary_for_record(record)
                 except (JsonInputError, OSError) as error:
@@ -1608,6 +1627,7 @@ class Supervisor:
                 source_commit=self.policy["source_commit"],
                 event_id=event_id,
                 boundary=(boundary.receipt_metadata() if trigger == "NETWORK_BOUNDARY" and boundary is not None else None),
+                execution_boundary=execution_boundary,
             )
             try:
                 self._write_receipt(receipt, event_id)
@@ -1620,6 +1640,11 @@ class Supervisor:
                     f"contained but receipt persistence failed: {error}"
                 ) from error
             # Cleanup is deliberately not in the enforcement or proof path.
+            if boundary is None and record.get("boundary") is not None:
+                try:
+                    boundary = self._boundary_for_record(record)
+                except (JsonInputError, OSError) as error:
+                    boundary_error = str(error)[:160]
             cleanup = self._cleanup(record["unit"])
             if boundary is not None:
                 try:
@@ -1762,6 +1787,170 @@ class Supervisor:
         os.chmod(gate, 0o640)
         return gate
 
+    def _make_exec_channel(self, run_id: str) -> tuple[Path, socket.socket]:
+        """Create one root-owned fd-passing channel for the gated process."""
+        if not RUN_ID.fullmatch(run_id):
+            raise JsonInputError("execution channel identity is invalid")
+        path = EXEC_DIR / f"{run_id}.sock"
+        if path.exists() or path.is_symlink():
+            raise JsonInputError("execution channel already exists")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            listener.bind(str(path))
+            os.chown(path, 0, self.policy["workload_gid"])
+            os.chmod(path, 0o660)
+            listener.listen(4)
+            listener.settimeout(8.0)
+            return path, listener
+        except Exception:
+            listener.close()
+            path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _process_in_run(pid: int, record: dict[str, Any]) -> bool:
+        """Bind a notification task to the exact cgroup and workload UID."""
+        if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
+            return False
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+            uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+            uid = int(uid_line.split()[1])
+            cgroups = Path(f"/proc/{pid}/cgroup").read_text(encoding="ascii").splitlines()
+        except (OSError, StopIteration, ValueError):
+            return False
+        return uid == record["workload_uid"] and f"0::{record['cgroup']}" in cgroups
+
+    @staticmethod
+    def _cgroup_is_exactly_empty(record: dict[str, Any]) -> bool:
+        try:
+            root = validate_identity(identity_from_run(record))
+            events = dict(
+                line.split(" ", 1)
+                for line in (root / "cgroup.events").read_text(encoding="ascii").splitlines()
+                if " " in line
+            )
+            if events.get("populated") != "0":
+                return False
+            directories = [root, *(item for item in root.rglob("*") if item.is_dir() and not item.is_symlink())]
+            return all(not (directory / "cgroup.procs").read_text(encoding="ascii").strip() for directory in directories)
+        except (JsonInputError, OSError, ValueError):
+            return False
+
+    def _accept_exec_listener(
+        self,
+        channel: socket.socket,
+        record: dict[str, Any],
+        expected_pid: int,
+    ) -> int:
+        """Accept exactly the listener sent by the pre-exec gate process."""
+        connection, _ = channel.accept()
+        with connection:
+            try:
+                _pid, uid, _gid = struct.unpack(
+                    "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+                )
+                if uid != record["workload_uid"] or _pid != expected_pid or not self._process_in_run(_pid, record):
+                    raise JsonInputError("execution listener peer is not the gated workload")
+                payload, ancillary, _flags, _address = connection.recvmsg(32, socket.CMSG_SPACE(struct.calcsize("i")))
+                if payload != b"LUMI-EXEC\n":
+                    raise JsonInputError("execution listener handshake is invalid")
+                descriptors: list[int] = []
+                for level, kind, data in ancillary:
+                    if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                        values = array.array("i")
+                        values.frombytes(data[: values.itemsize * (len(data) // values.itemsize)])
+                        descriptors.extend(values.tolist())
+                if len(descriptors) != 1 or descriptors[0] < 0:
+                    raise JsonInputError("execution listener descriptor is invalid")
+                descriptor = descriptors[0]
+                connection.sendall(b"OK\n")
+                return descriptor
+            except Exception:
+                try:
+                    connection.sendall(b"NO\n")
+                except OSError:
+                    pass
+                raise
+
+    def _exec_listener_loop(
+        self,
+        record: dict[str, Any],
+        policy: dict[str, Any],
+        descriptor: int,
+    ) -> None:
+        """Mediate native exec requests; enforcement precedes any receipt."""
+        try:
+            poller = select.poll()
+            poller.register(descriptor, select.POLLIN | select.POLLHUP | select.POLLERR)
+            while not self.stop_event.is_set():
+                events = poller.poll(250)
+                if not events:
+                    if record.get("state") not in ACTIVE_STATES:
+                        return
+                    continue
+                if events[0][1] & (select.POLLHUP | select.POLLERR):
+                    if self._cgroup_is_exactly_empty(record):
+                        self._mark_completed(record)
+                        return
+                    if record.get("state") in ACTIVE_STATES:
+                        self._contain(record, "SUPERVISOR_FAILURE", time.monotonic_ns())
+                    return
+                try:
+                    notification = receive_notification(descriptor)
+                except OSError as error:
+                    if error.errno in {errno.EAGAIN, errno.EINTR, errno.ENOENT}:
+                        continue
+                    if record.get("state") in ACTIVE_STATES:
+                        self._contain(record, "SUPERVISOR_FAILURE", time.monotonic_ns())
+                    return
+                if not notification_id_valid(descriptor, notification.id):
+                    continue
+                if not self._process_in_run(notification.pid, record):
+                    # A notification that cannot be bound to this run is a
+                    # fail-closed event, not a reason to grant the exec.
+                    if record.get("state") in ACTIVE_STATES:
+                        self._contain(record, "EXECUTION_BOUNDARY", time.monotonic_ns(), execution_boundary={"policy_id": policy["policy_id"], "policy_sha256": policy["digest"]})
+                    try:
+                        send_response(descriptor, notification.id, allow=False)
+                    except OSError:
+                        pass
+                    return
+                if allowed_target(policy, notification):
+                    try:
+                        send_response(descriptor, notification.id, allow=True)
+                    except OSError:
+                        if record.get("state") in ACTIVE_STATES:
+                            self._contain(record, "SUPERVISOR_FAILURE", time.monotonic_ns())
+                        return
+                    continue
+                # Keep the syscall held while the authoritative direct kill
+                # and exact-empty proof complete.  Only then release it with
+                # EPERM, ensuring no prohibited image can enter.
+                if record.get("state") in ACTIVE_STATES:
+                    self._contain(
+                        record,
+                        "EXECUTION_BOUNDARY",
+                        time.monotonic_ns(),
+                        execution_boundary={"policy_id": policy["policy_id"], "policy_sha256": policy["digest"]},
+                    )
+                try:
+                    send_response(descriptor, notification.id, allow=False)
+                except OSError:
+                    pass
+                return
+        except (JsonInputError, OSError, RuntimeError):
+            if record.get("state") in ACTIVE_STATES:
+                try:
+                    self._contain(record, "SUPERVISOR_FAILURE", time.monotonic_ns())
+                except JsonInputError:
+                    pass
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
     def _release_gate(self, gate: Path) -> None:
         # systemd may take a little longer to schedule a freshly created
         # transient unit under sustained fork-race qualification.  The gate
@@ -1804,9 +1993,12 @@ class Supervisor:
         return bool(getattr(self, "active_cgroups", set()))
 
     def _start(self, args: dict[str, Any]) -> dict[str, Any]:
-        if set(args) != {"argv", "cpu_quota_percent", "max_memory_mib", "max_pids", "name"}:
+        if set(args) == {"argv", "cpu_quota_percent", "max_memory_mib", "max_pids", "name"}:
+            args = {**args, "exec_policy": None}
+        if set(args) != {"argv", "cpu_quota_percent", "exec_policy", "max_memory_mib", "max_pids", "name"}:
             raise JsonInputError("start arguments are invalid")
         name, argv, maximum = args["name"], args["argv"], args["max_pids"]
+        exec_policy_id = args["exec_policy"]
         memory_mib, cpu_quota = args["max_memory_mib"], args["cpu_quota_percent"]
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise JsonInputError("workload name is invalid")
@@ -1831,9 +2023,18 @@ class Supervisor:
             except JsonInputError:
                 approval = None
             run_id = os.urandom(12).hex()
+            if exec_policy_id is None:
+                execution_policy = ephemeral_execution_policy(argv[0], run_id)
+            elif isinstance(exec_policy_id, str):
+                execution_policy = load_execution_policy(self.exec_policies, exec_policy_id)
+            else:
+                raise JsonInputError("execution policy identity is invalid")
             unit = f"{UNIT_PREFIX}{run_id}.service"
             boundary: OfflineBoundary | None = None
             gate: Path | None = None
+            exec_channel_path: Path | None = None
+            exec_channel: socket.socket | None = None
+            exec_listener_fd = -1
             props: dict[str, str] = {}
             try:
                 boundary = OfflineBoundary.create(run_id)
@@ -1844,9 +2045,14 @@ class Supervisor:
                     else list(argv)
                 )
                 gate = self._make_gate(run_id)
+                exec_channel_path, exec_channel = self._make_exec_channel(run_id)
             except Exception:
                 if gate is not None:
                     gate.unlink(missing_ok=True)
+                if exec_channel is not None:
+                    exec_channel.close()
+                if exec_channel_path is not None:
+                    exec_channel_path.unlink(missing_ok=True)
                 self._clear_stage(run_id)
                 if boundary is not None:
                     try:
@@ -1905,12 +2111,18 @@ class Supervisor:
                     "_gate",
                     "--fifo",
                     str(gate),
+                    "--exec-socket",
+                    str(exec_channel_path),
                     "--",
                     *effective_argv,
                 ]
             )
             if result.returncode:
                 gate.unlink(missing_ok=True)
+                if exec_channel is not None:
+                    exec_channel.close()
+                if exec_channel_path is not None:
+                    exec_channel_path.unlink(missing_ok=True)
                 self._clear_stage(run_id)
                 try:
                     self._teardown_boundary(
@@ -1938,6 +2150,8 @@ class Supervisor:
                     "cgroup_inode": identity.inode,
                     "created_monotonic_ns": time.monotonic_ns(),
                     "cpu_quota_percent": cpu_quota,
+                    "exec_policy_digest": execution_policy["digest"],
+                    "exec_policy_id": execution_policy["policy_id"],
                     "max_memory_mib": memory_mib,
                     "max_pids": maximum,
                     "name": name,
@@ -1959,6 +2173,21 @@ class Supervisor:
                         process=gated_process,
                         approval=approval,
                     )
+                if exec_channel is None:
+                    raise JsonInputError("execution channel is unavailable")
+                exec_listener_fd = self._accept_exec_listener(exec_channel, record, gated_process.pid)
+                exec_channel.close()
+                exec_channel = None
+                if exec_channel_path is not None:
+                    exec_channel_path.unlink(missing_ok=True)
+                    exec_channel_path = None
+                exec_listener = threading.Thread(
+                    target=self._exec_listener_loop,
+                    args=(record, execution_policy, exec_listener_fd),
+                    daemon=True,
+                )
+                exec_listener.start()
+                exec_listener_fd = -1
                 ready = threading.Event()
                 watcher = threading.Thread(
                     target=self._watch,
@@ -1979,6 +2208,7 @@ class Supervisor:
                     self._store(record)
                 return {
                     "name": name,
+                    "exec_policy_id": record["exec_policy_id"],
                     "network_mode": "offline",
                     "run_id": run_id,
                     "state": record["state"],
@@ -1988,6 +2218,15 @@ class Supervisor:
                     "workload_uid": record["workload_uid"],
                 }
             except Exception:
+                if exec_listener_fd >= 0:
+                    try:
+                        os.close(exec_listener_fd)
+                    except OSError:
+                        pass
+                if exec_channel is not None:
+                    exec_channel.close()
+                if exec_channel_path is not None:
+                    exec_channel_path.unlink(missing_ok=True)
                 gate.unlink(missing_ok=True)
                 provenance_path(self.launches, run_id).unlink(missing_ok=True)
                 self._clear_stage(run_id)
@@ -2021,6 +2260,8 @@ class Supervisor:
             "cgroup_inode": identity.inode,
             "created_monotonic_ns": time.monotonic_ns(),
             "cpu_quota_percent": 0,
+            "exec_policy_digest": "0" * 64,
+            "exec_policy_id": "orphaned",
             "executable": "<orphaned-owned-cgroup>",
             "max_pids": 0,
             "max_memory_mib": 0,
@@ -2152,6 +2393,8 @@ class Supervisor:
                     if isinstance(record.get("boundary"), dict)
                     else "none"
                 ),
+                "exec_policy_id": record["exec_policy_id"],
+                "exec_policy_digest": record["exec_policy_digest"],
                 "workload_uid": record["workload_uid"],
             }
         if action == "list" and not args:
@@ -2180,6 +2423,21 @@ class Supervisor:
                         public_approval(value) for value in load_approvals(self.approvals)
                     ]
                 }
+        if action == "exec_policies" and not args:
+            with self.approval_lock:
+                return {"exec_policies": [public_execution_policy(value) for value in load_execution_policies(self.exec_policies)]}
+        if action == "exec_policy_create" and set(args) == {"name", "paths"}:
+            with self.approval_lock:
+                value = create_execution_policy(
+                    self.exec_policies,
+                    name=args["name"],
+                    paths=args["paths"],
+                    creator_uid=0,
+                )
+            return {"exec_policy": public_execution_policy(value), "result": "CREATED"}
+        if action == "exec_policy_revoke" and set(args) == {"policy_id"}:
+            with self.approval_lock:
+                return revoke_execution_policy(self.exec_policies, args["policy_id"])
         if action == "detections" and not args:
             values: list[dict[str, Any]] = []
             paths = [*self.detections.glob("*.json"), *self.receipts.glob("*.json")]
@@ -2188,26 +2446,22 @@ class Supervisor:
                     value = load_regular_json(path)
                     trigger = value.get("trigger")
                     trigger_kind = trigger.get("kind") if isinstance(trigger, dict) else None
-                    if path.parent == self.receipts and trigger_kind != "NETWORK_BOUNDARY":
+                    if path.parent == self.receipts and trigger_kind not in {"NETWORK_BOUNDARY", "EXECUTION_BOUNDARY"}:
                         continue
                     if path.parent == self.receipts:
                         boundary = value.get("boundary")
-                        if not isinstance(boundary, dict) or set(boundary) != {
-                            "address_family",
-                            "mode",
-                            "policy_sha256",
-                            "violation",
-                        }:
-                            continue
-                        values.append(
-                            {
-                                "boundary": boundary,
-                                "event_id": value["event_id"],
-                                "result": value["result"],
-                                "trigger": trigger,
-                                "version": value["version"],
-                            }
-                        )
+                        execution_boundary = value.get("execution_boundary")
+                        if trigger_kind == "NETWORK_BOUNDARY":
+                            if not isinstance(boundary, dict) or set(boundary) != {
+                                "address_family", "mode", "policy_sha256", "violation"
+                            }:
+                                continue
+                            extra = {"boundary": boundary}
+                        else:
+                            if not isinstance(execution_boundary, dict) or set(execution_boundary) != {"policy_id", "policy_sha256"}:
+                                continue
+                            extra = {"execution_boundary": execution_boundary}
+                        values.append({"event_id": value["event_id"], "result": value["result"], "trigger": trigger, "version": value["version"], **extra})
                         continue
                     values.append(
                         {

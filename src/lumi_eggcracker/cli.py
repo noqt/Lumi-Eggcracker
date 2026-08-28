@@ -25,6 +25,7 @@ def _parser() -> argparse.ArgumentParser:
     start.add_argument("--max-pids", required=True, type=int)
     start.add_argument("--max-memory-mib", default=2048, type=int)
     start.add_argument("--cpu-quota-percent", default=400, type=int)
+    start.add_argument("--exec-policy", help="root-created sealed-exec policy identifier")
     start.add_argument("argv", nargs=argparse.REMAINDER)
     kill = commands.add_parser("kill", help="terminate one protected workload")
     kill.add_argument("--name", required=True)
@@ -39,6 +40,14 @@ def _parser() -> argparse.ArgumentParser:
     revoke = commands.add_parser("revoke", help="revoke one exact AI runtime approval")
     revoke.add_argument("--name", required=True)
     commands.add_parser("approvals", help="list exact AI runtime approvals")
+    exec_policy = commands.add_parser("exec-policy", help="manage root-created executable policies")
+    exec_commands = exec_policy.add_subparsers(dest="exec_action", required=True)
+    create_policy = exec_commands.add_parser("create", help="create an immutable executable policy")
+    create_policy.add_argument("--name", required=True)
+    create_policy.add_argument("paths", nargs=argparse.REMAINDER)
+    revoke_policy = exec_commands.add_parser("revoke", help="revoke an executable policy")
+    revoke_policy.add_argument("--policy-id", required=True)
+    exec_commands.add_parser("list", help="list executable policies")
     commands.add_parser("detections", help="list autonomous containment summaries")
     commands.add_parser("doctor", help="check the installed protected supervisor")
     support = commands.add_parser(
@@ -73,14 +82,18 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(value, sort_keys=True))
             return 0 if value.get("result") == "PASS" else 6
         if args.command == "start":
-            value = request(
-                "start",
-                name=args.name,
-                max_pids=args.max_pids,
-                max_memory_mib=args.max_memory_mib,
-                cpu_quota_percent=args.cpu_quota_percent,
-                argv=_command(args.argv),
-            )
+            start_args = {
+                "action": "start",
+                "name": args.name,
+                "max_pids": args.max_pids,
+                "max_memory_mib": args.max_memory_mib,
+                "cpu_quota_percent": args.cpu_quota_percent,
+                "argv": _command(args.argv),
+            }
+            if args.exec_policy is not None:
+                start_args["exec_policy"] = args.exec_policy
+            action = start_args.pop("action")
+            value = request(action, **start_args)
         elif args.command == "status":
             value = request("status", name=args.name)
         elif args.command == "list":
@@ -95,6 +108,17 @@ def main(argv: list[str] | None = None) -> int:
             value = request("revoke", name=args.name)
         elif args.command == "approvals":
             value = request("approvals")
+        elif args.command == "exec-policy":
+            if args.exec_action == "list":
+                value = request("exec_policies")
+            elif args.exec_action == "create":
+                if os.geteuid() != 0:
+                    raise JsonInputError("execution policy creation requires root administrative authority; use sudo")
+                value = request("exec_policy_create", name=args.name, paths=_command(args.paths))
+            else:
+                if os.geteuid() != 0:
+                    raise JsonInputError("execution policy revocation requires root administrative authority; use sudo")
+                value = request("exec_policy_revoke", policy_id=args.policy_id)
         elif args.command == "detections":
             value = request("detections")
         else:

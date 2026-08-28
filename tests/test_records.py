@@ -140,3 +140,34 @@ class RecordTests(unittest.TestCase):
                     "violation": "OTHER",
                 },
             )
+
+    def test_execution_boundary_receipt_requires_policy_metadata(self) -> None:
+        value = record()
+        receipt = make_receipt(
+            record=value,
+            trigger="EXECUTION_BOUNDARY",
+            trigger_ns=10,
+            kill_started_ns=11,
+            kill_complete_ns=12,
+            empty_ns=13,
+            proof=EmptyProof(True, 1, 0, []),
+            version="0.8.0",
+            source_commit="c" * 40,
+            event_id="d" * 24,
+            execution_boundary={"policy_id": "a" * 24, "policy_sha256": "b" * 64},
+        )
+        self.assertEqual("EXECUTION_BOUNDARY", receipt["trigger"]["kind"])
+        self.assertEqual("a" * 24, receipt["execution_boundary"]["policy_id"])
+        with self.assertRaises(JsonInputError):
+            make_receipt(
+                record=value,
+                trigger="EXECUTION_BOUNDARY",
+                trigger_ns=10,
+                kill_started_ns=11,
+                kill_complete_ns=12,
+                empty_ns=13,
+                proof=EmptyProof(True, 1, 0, []),
+                version="0.8.0",
+                source_commit="c" * 40,
+                event_id="d" * 24,
+            )

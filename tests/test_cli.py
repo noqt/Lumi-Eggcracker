@@ -13,13 +13,14 @@ class CliTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(0, main(["version"]))
-        self.assertEqual("0.7.0", output.getvalue().strip())
+        self.assertEqual("0.8.0", output.getvalue().strip())
 
     def test_public_help_has_only_supported_commands(self) -> None:
         from lumi_eggcracker.cli import _parser
         help_text = _parser().format_help()
         for command in ("start", "kill", "status", "list", "approve", "revoke", "approvals", "detections", "doctor", "version"):
             self.assertIn(command, help_text)
+        self.assertIn("exec-policy", help_text)
         self.assertNotIn("_supervisor", help_text)
         self.assertNotIn("network" + "-deny", help_text)
 
@@ -40,3 +41,15 @@ class CliTests(unittest.TestCase):
             "start", name="demo", max_pids=8, max_memory_mib=2048,
             cpu_quota_percent=400, argv=["/bin/sleep", "1"],
         )
+
+    def test_start_forwards_selected_execution_policy(self) -> None:
+        with patch("lumi_eggcracker.cli.request", return_value={"result": "STARTED"}) as request:
+            self.assertEqual(0, main(["start", "--name", "demo", "--exec-policy", "a" * 24, "--max-pids", "8", "--", "/bin/sleep", "1"]))
+        request.assert_called_once_with(
+            "start", name="demo", max_pids=8, max_memory_mib=2048,
+            cpu_quota_percent=400, argv=["/bin/sleep", "1"], exec_policy="a" * 24,
+        )
+
+    def test_execution_policy_create_requires_root(self) -> None:
+        with patch("lumi_eggcracker.cli.os.geteuid", return_value=1001, create=True):
+            self.assertEqual(4, main(["exec-policy", "create", "--name", "demo", "--", "/bin/sh"]))

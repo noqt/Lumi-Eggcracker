@@ -13,13 +13,13 @@ from .containment import CgroupIdentity, EmptyProof
 from .jsonio import JsonInputError, canonical_bytes, load_regular_json
 from .offline_boundary import BoundaryIdentity
 
-RUN_SCHEMA = "lumi-eggcracker.run.v4"
+RUN_SCHEMA = "lumi-eggcracker.run.v5"
 RECEIPT_SCHEMA = "lumi-eggcracker.receipt.v3"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 RUN_ID = re.compile(r"[0-9a-f]{24}\Z")
 ACTIVE_STATES = {"STARTING", "RUNNING"}
 TERMINAL_STATES = {"COMPLETED_ALLOWED", "TERMINATED", "CONTAINMENT_FAILED", "CONTAINED_RECEIPT_FAILED"}
-RECEIPT_TRIGGERS = {"OPERATOR", "PID_LIMIT", "SUPERVISOR_FAILURE", "SUPERVISOR_RESTART_FAIL_CLOSED", "NETWORK_BOUNDARY"}
+RECEIPT_TRIGGERS = {"OPERATOR", "PID_LIMIT", "SUPERVISOR_FAILURE", "SUPERVISOR_RESTART_FAIL_CLOSED", "NETWORK_BOUNDARY", "EXECUTION_BOUNDARY"}
 
 
 def write_atomic(path: Path, value: dict[str, Any]) -> None:
@@ -106,6 +106,8 @@ def validate_run(value: dict[str, Any]) -> dict[str, Any]:
         "cgroup_inode",
         "created_monotonic_ns",
         "cpu_quota_percent",
+        "exec_policy_digest",
+        "exec_policy_id",
         "executable",
         "max_memory_mib",
         "max_pids",
@@ -119,8 +121,18 @@ def validate_run(value: dict[str, Any]) -> dict[str, Any]:
         "workload_gid",
         "workload_uid",
     }
-    if set(value) != expected or value.get("schema_version") != RUN_SCHEMA:
+    legacy_expected = expected - {"exec_policy_digest", "exec_policy_id"}
+    if set(value) not in (expected, legacy_expected) or value.get("schema_version") not in {RUN_SCHEMA, "lumi-eggcracker.run.v4"}:
         raise JsonInputError("run record schema is invalid")
+    if set(value) == legacy_expected:
+        # A 0.7 terminal record may still be present when the supervisor is
+        # upgraded in place.  It is never an active 0.8 sealed run, but it is
+        # retained as bounded historical state so recovery and diagnostics do
+        # not become a destructive migration step.
+        value = dict(value)
+        value["exec_policy_id"] = "legacy"
+        value["exec_policy_digest"] = "0" * 64
+        value["schema_version"] = RUN_SCHEMA
     if not isinstance(value["name"], str) or not NAME.fullmatch(value["name"]):
         raise JsonInputError("run record name is invalid")
     if not isinstance(value["run_id"], str) or not RUN_ID.fullmatch(value["run_id"]):
@@ -131,6 +143,10 @@ def validate_run(value: dict[str, Any]) -> dict[str, Any]:
         raise JsonInputError("run record executable is invalid")
     if not isinstance(value["argv_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["argv_sha256"]):
         raise JsonInputError("run record command hash is invalid")
+    if not isinstance(value["exec_policy_id"], str) or not value["exec_policy_id"]:
+        raise JsonInputError("run record execution policy identity is invalid")
+    if not isinstance(value["exec_policy_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["exec_policy_digest"]):
+        raise JsonInputError("run record execution policy digest is invalid")
     keys = ("cgroup_device", "cgroup_inode", "created_monotonic_ns", "cpu_quota_percent", "max_memory_mib", "operator_uid", "workload_gid", "workload_uid", "max_pids", "argv_count")
     if any(isinstance(value[key], bool) or not isinstance(value[key], int) or value[key] < 0 for key in keys):
         raise JsonInputError("run record integer field is invalid")
@@ -163,6 +179,7 @@ def make_receipt(
     *, record: dict[str, Any], trigger: str, trigger_ns: int, kill_started_ns: int, kill_complete_ns: int,
     empty_ns: int, proof: EmptyProof, version: str, source_commit: str, event_id: str,
     boundary: dict[str, str] | None = None,
+    execution_boundary: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if trigger not in RECEIPT_TRIGGERS or not RUN_ID.fullmatch(event_id):
         raise JsonInputError("receipt trigger or event identity is invalid")
@@ -178,6 +195,16 @@ def make_receipt(
             raise JsonInputError("network boundary receipt metadata is invalid")
     elif boundary is not None:
         raise JsonInputError("unexpected network boundary receipt metadata")
+    if trigger == "EXECUTION_BOUNDARY":
+        expected_execution = {"policy_id", "policy_sha256"}
+        if not isinstance(execution_boundary, dict) or set(execution_boundary) != expected_execution:
+            raise JsonInputError("execution boundary receipt metadata is invalid")
+        if not isinstance(execution_boundary["policy_id"], str) or not execution_boundary["policy_id"]:
+            raise JsonInputError("execution boundary receipt metadata is invalid")
+        if not isinstance(execution_boundary["policy_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", execution_boundary["policy_sha256"]):
+            raise JsonInputError("execution boundary receipt metadata is invalid")
+    elif execution_boundary is not None:
+        raise JsonInputError("unexpected execution boundary receipt metadata")
     receipt = {
         "cleanup": {"attempted": False},
         "containment": {
@@ -206,4 +233,6 @@ def make_receipt(
     }
     if boundary is not None:
         receipt["boundary"] = boundary
+    if execution_boundary is not None:
+        receipt["execution_boundary"] = execution_boundary
     return receipt
