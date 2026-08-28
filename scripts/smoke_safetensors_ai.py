@@ -59,6 +59,30 @@ def control(argv: list[str], *, operator: str | None = None) -> dict[str, Any]:
     return value
 
 
+def clear_new_incident(previous: set[str]) -> str:
+    """Clear only this smoke's incident before its approved phase."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        current = control(["incidents"]).get("incidents", [])
+        if not isinstance(current, list):
+            raise TypeError("Eggcracker incident response is invalid")
+        new_active = [
+            item["incident_id"]
+            for item in current
+            if isinstance(item, dict)
+            and item.get("state") == "ACTIVE"
+            and isinstance(item.get("incident_id"), str)
+            and item["incident_id"] not in previous
+        ]
+        if len(new_active) == 1:
+            control(["incident", "clear", new_active[0]])
+            return new_active[0]
+        if len(new_active) > 1:
+            raise RuntimeError("Safetensors smoke created multiple local incidents")
+        time.sleep(0.05)
+    raise RuntimeError("Safetensors smoke incident was not persisted")
+
+
 def rejected_control(argv: list[str], *, operator: str) -> dict[str, Any]:
     result = subprocess.run(
         ["/usr/sbin/runuser", "-u", operator, "--", CLI, *argv],
@@ -168,6 +192,11 @@ def one(
         run_name = f"safetensors-run-{index}-{secrets.token_hex(4)}"
         argv = [str(python), str(wrapper), str(weights), str(config_copy), str(output)]
         try:
+            before_incidents = {
+                item["incident_id"]
+                for item in control(["incidents"]).get("incidents", [])
+                if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+            }
             before = set(DETECTIONS.glob("*.json"))
             first_process = launch(python, user, wrapper, weights, config_copy, output)
             first = receipt_after(before)
@@ -182,6 +211,7 @@ def one(
             if any(secret in json.dumps(first, sort_keys=True) for secret in (str(weights), str(wrapper))):
                 raise RuntimeError("Safetensors receipt leaked local paths")
             output.unlink(missing_ok=True)
+            clear_new_incident(before_incidents)
             approval = control(["approve", "--name", name, "--uid", str(user_uid), "--", *argv])
             if approval.get("result") != "APPROVED":
                 raise RuntimeError("exact Safetensors approval failed")

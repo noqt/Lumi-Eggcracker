@@ -69,6 +69,49 @@ def control(operator: str, argv: list[str]) -> dict[str, Any]:
     return value
 
 
+def root_control(argv: list[str]) -> dict[str, Any]:
+    """Use the root-admin channel for deliberate smoke-test cleanup only."""
+    result = subprocess.run(
+        [CLI, *argv],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            result.stderr.strip() or result.stdout.strip() or "Eggcracker root control failed"
+        )
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise TypeError("Eggcracker root control returned invalid JSON")
+    return value
+
+
+def clear_new_incident(previous: set[str]) -> str:
+    """Clear only the incident created by this test before its approved run."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        current = root_control(["incidents"]).get("incidents", [])
+        if not isinstance(current, list):
+            raise TypeError("Eggcracker incident response is invalid")
+        new_active = [
+            item["incident_id"]
+            for item in current
+            if isinstance(item, dict)
+            and item.get("state") == "ACTIVE"
+            and isinstance(item.get("incident_id"), str)
+            and item["incident_id"] not in previous
+        ]
+        if len(new_active) == 1:
+            root_control(["incident", "clear", new_active[0]])
+            return new_active[0]
+        if len(new_active) > 1:
+            raise RuntimeError("content smoke created multiple local incidents")
+        time.sleep(0.05)
+    raise RuntimeError("content smoke incident was not persisted")
+
+
 def stop(process: subprocess.Popen[bytes] | None) -> None:
     if process is not None and process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
@@ -209,6 +252,11 @@ def one(
         name = f"content-{index}-{secrets.token_hex(4)}"
         run_name = f"content-run-{index}-{secrets.token_hex(4)}"
         try:
+            before_incidents = {
+                item["incident_id"]
+                for item in root_control(["incidents"]).get("incidents", [])
+                if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+            }
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, wrapper, final_argv, output, runner.parent)
             first = receipt_after(before)
@@ -224,6 +272,7 @@ def one(
                 wrapper
             ) in json.dumps(first, sort_keys=True):
                 raise RuntimeError("content receipt leaked a local model or wrapper path")
+            clear_new_incident(before_incidents)
             approved = control(
                 operator,
                 [
