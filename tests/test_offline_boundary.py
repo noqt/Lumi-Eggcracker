@@ -19,6 +19,7 @@ from lumi_eggcracker.offline_boundary import (
 def identity_record() -> dict[str, object]:
     value = names("a" * 24)
     return {
+        "control_counter": value.control_counter,
         "counter": value.counter,
         "input_chain": value.input_chain,
         "mode": "offline",
@@ -67,7 +68,7 @@ class OfflineBoundaryTests(unittest.TestCase):
         with self.assertRaises(JsonInputError):
             BoundaryIdentity.from_record(changed)
 
-    def test_ruleset_contains_only_loopback_and_count_drop_rules(self) -> None:
+    def test_ruleset_contains_loopback_control_and_count_drop_rules(self) -> None:
         value = names("a" * 24)
         expected = {
             "nftables": [
@@ -76,6 +77,15 @@ class OfflineBoundaryTests(unittest.TestCase):
                     "counter": {
                         "family": "inet",
                         "name": value.counter,
+                        "table": value.table,
+                        "packets": 0,
+                        "bytes": 0,
+                    }
+                },
+                {
+                    "counter": {
+                        "family": "inet",
+                        "name": value.control_counter,
                         "table": value.table,
                         "packets": 0,
                         "bytes": 0,
@@ -134,6 +144,53 @@ class OfflineBoundaryTests(unittest.TestCase):
                                 }
                             },
                             {"accept": None},
+                        ],
+                    }
+                },
+                {
+                    "rule": {
+                        "family": "inet",
+                        "table": value.table,
+                        "chain": value.output_chain,
+                        "expr": [
+                            {
+                                "match": {
+                                    "op": "==",
+                                    "left": {
+                                        "payload": {
+                                            "field": "nexthdr",
+                                            "protocol": "ip6",
+                                        }
+                                    },
+                                    "right": "ipv6-icmp",
+                                }
+                            },
+                            {
+                                "match": {
+                                    "op": "==",
+                                    "left": {
+                                        "payload": {
+                                            "field": "type",
+                                            "protocol": "icmpv6",
+                                        }
+                                    },
+                                    "right": {
+                                        "set": [
+                                            "mld-listener-query",
+                                            "mld-listener-report",
+                                            "mld-listener-done",
+                                            "nd-router-solicit",
+                                            "nd-router-advert",
+                                            "nd-neighbor-solicit",
+                                            "nd-neighbor-advert",
+                                            "nd-redirect",
+                                            "mld2-listener-report",
+                                        ]
+                                    },
+                                }
+                            },
+                            {"counter": value.control_counter},
+                            {"drop": None},
                         ],
                     }
                 },

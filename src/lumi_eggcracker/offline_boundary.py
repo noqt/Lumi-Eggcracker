@@ -32,6 +32,20 @@ WORKLOAD_PREFIX = "lumi-eggcracker-w-"
 SINK_PREFIX = "lumi-eggcracker-s-"
 TABLE_PREFIX = "lumi_eggcracker_"
 COUNTER_NAME = "violation"
+CONTROL_COUNTER_NAME = "control"
+CONTROL_ICMPV6_TYPES = frozenset(
+    {
+        "mld-listener-query",
+        "mld-listener-report",
+        "mld-listener-done",
+        "nd-router-solicit",
+        "nd-router-advert",
+        "nd-neighbor-solicit",
+        "nd-neighbor-advert",
+        "nd-redirect",
+        "mld2-listener-report",
+    }
+)
 OUTPUT_CHAIN = "output"
 INPUT_CHAIN = "input"
 POLL_INTERVAL_SECONDS = 0.05
@@ -53,6 +67,7 @@ class BoundaryNames:
     input_chain: str = INPUT_CHAIN
     output_chain: str = OUTPUT_CHAIN
     counter: str = COUNTER_NAME
+    control_counter: str = CONTROL_COUNTER_NAME
 
 
 @dataclass(frozen=True)
@@ -68,6 +83,7 @@ class BoundaryIdentity:
     input_chain: str
     output_chain: str
     counter: str
+    control_counter: str
     workload_namespace_device: int
     workload_namespace_inode: int
     sink_namespace_device: int
@@ -76,6 +92,7 @@ class BoundaryIdentity:
 
     def as_record(self) -> dict[str, Any]:
         return {
+            "control_counter": self.control_counter,
             "counter": self.counter,
             "input_chain": self.input_chain,
             "mode": "offline",
@@ -113,6 +130,7 @@ class BoundaryIdentity:
             "input_chain": expected.input_chain,
             "output_chain": expected.output_chain,
             "counter": expected.counter,
+            "control_counter": expected.control_counter,
         }
         if any(value.get(key) != expected_value for key, expected_value in strings.items()):
             raise JsonInputError("offline boundary object identity is invalid")
@@ -137,6 +155,7 @@ class BoundaryIdentity:
         ):
             raise JsonInputError("offline boundary namespace identity is invalid")
         if set(value) != {
+            "control_counter",
             "counter",
             "input_chain",
             "mode",
@@ -168,6 +187,7 @@ class BoundaryIdentity:
             input_chain=expected.input_chain,
             output_chain=expected.output_chain,
             counter=expected.counter,
+            control_counter=expected.control_counter,
             workload_namespace_device=value["workload_namespace_device"],
             workload_namespace_inode=value["workload_namespace_inode"],
             sink_namespace_device=value["sink_namespace_device"],
@@ -313,10 +333,12 @@ def _nft_program(table: str) -> str:
         (
             f"add table inet {table}",
             f"add counter inet {table} {COUNTER_NAME}",
+            f"add counter inet {table} {CONTROL_COUNTER_NAME}",
             f"add chain inet {table} {INPUT_CHAIN} {{ type filter hook input priority 0; policy drop; }}",
             f"add chain inet {table} {OUTPUT_CHAIN} {{ type filter hook output priority 0; policy drop; }}",
             f"add rule inet {table} {INPUT_CHAIN} iifname \"lo\" accept",
             f"add rule inet {table} {OUTPUT_CHAIN} oifname \"lo\" accept",
+            f"add rule inet {table} {OUTPUT_CHAIN} ip6 nexthdr icmpv6 icmpv6 type {{ 130, 131, 132, 133, 134, 135, 136, 137, 143 }} counter name {CONTROL_COUNTER_NAME} drop",
             f"add rule inet {table} {OUTPUT_CHAIN} counter name {COUNTER_NAME} drop",
             "",
         )
@@ -441,6 +463,7 @@ class OfflineBoundary:
                     input_chain=value.input_chain,
                     output_chain=value.output_chain,
                     counter=value.counter,
+                    control_counter=value.control_counter,
                     workload_namespace_device=workload_device,
                     workload_namespace_inode=workload_inode,
                     sink_namespace_device=sink_device,
@@ -505,16 +528,14 @@ class OfflineBoundary:
                 raise JsonInputError("offline boundary deny-rule output contains an unknown object")
         if len(tables) != 1 or tables[0].get("family") != "inet" or tables[0].get("name") != self.identity.table:
             raise JsonInputError("offline boundary table identity is invalid")
-        if len(counters) != 1:
+        if len(counters) != 2:
             raise JsonInputError("offline boundary counter identity is invalid")
-        counter = counters[0]
-        if any(
-            counter.get(key) != expected
-            for key, expected in (
-                ("family", "inet"),
-                ("table", self.identity.table),
-                ("name", self.identity.counter),
-            )
+        expected_counters = {self.identity.counter, self.identity.control_counter}
+        if {
+            counter.get("name") for counter in counters
+        } != expected_counters or any(
+            counter.get("family") != "inet" or counter.get("table") != self.identity.table
+            for counter in counters
         ):
             raise JsonInputError("offline boundary counter identity is invalid")
         expected_chains = {
@@ -535,21 +556,52 @@ class OfflineBoundary:
                 or chain.get("prio") != 0
             ):
                 raise JsonInputError("offline boundary chain policy is invalid")
-        if len(rules) != 3:
+        if len(rules) != 4:
             raise JsonInputError("offline boundary rule count is invalid")
         loopback_rules: set[tuple[str, str]] = set()
         deny_rules = 0
+        control_rules = 0
         for rule in rules:
             if (
                 rule.get("family") != "inet"
                 or rule.get("table") != self.identity.table
                 or not isinstance(rule.get("chain"), str)
                 or not isinstance(rule.get("expr"), list)
-                or len(rule["expr"]) != 2
             ):
                 raise JsonInputError("offline boundary rule identity is invalid")
             chain = rule["chain"]
-            first, second = rule["expr"]
+            expr = rule["expr"]
+            if len(expr) == 2:
+                first, second = expr
+            elif len(expr) == 4 and chain == self.identity.output_chain:
+                first, second, third, fourth = expr
+                first_match = first.get("match") if isinstance(first, dict) else None
+                second_match = second.get("match") if isinstance(second, dict) else None
+                first_left = first_match.get("left") if isinstance(first_match, dict) else None
+                second_left = second_match.get("left") if isinstance(second_match, dict) else None
+                first_payload = first_left.get("payload") if isinstance(first_left, dict) else None
+                second_payload = second_left.get("payload") if isinstance(second_left, dict) else None
+                right = second_match.get("right") if isinstance(second_match, dict) else None
+                right_set = right.get("set") if isinstance(right, dict) else None
+                if (
+                    not isinstance(first_match, dict)
+                    or first_match.get("op") != "=="
+                    or first_payload != {"field": "nexthdr", "protocol": "ip6"}
+                    or first_match.get("right") != "ipv6-icmp"
+                    or not isinstance(second_match, dict)
+                    or second_match.get("op") != "=="
+                    or second_payload != {"field": "type", "protocol": "icmpv6"}
+                    or not isinstance(right_set, list)
+                    or set(right_set) != CONTROL_ICMPV6_TYPES
+                    or len(right_set) != len(CONTROL_ICMPV6_TYPES)
+                    or third != {"counter": self.identity.control_counter}
+                    or fourth != {"drop": None}
+                ):
+                    raise JsonInputError("offline boundary control rule is invalid")
+                control_rules += 1
+                continue
+            else:
+                raise JsonInputError("offline boundary rule identity is invalid")
             if not isinstance(first, dict) or not isinstance(second, dict):
                 raise JsonInputError("offline boundary rule expression is invalid")
             match = first.get("match")
@@ -576,7 +628,7 @@ class OfflineBoundary:
         if loopback_rules != {
             (self.identity.input_chain, "iifname"),
             (self.identity.output_chain, "oifname"),
-        } or deny_rules != 1:
+        } or deny_rules != 1 or control_rules != 1:
             raise JsonInputError("offline boundary rule set is incomplete")
 
     def counter(self) -> CounterSnapshot:
@@ -607,21 +659,22 @@ class OfflineBoundary:
 
     def reset_counter(self) -> CounterSnapshot:
         """Clear setup-only namespace traffic while the pre-exec gate is closed."""
-        _require(
-            [
-                str(IP),
-                "netns",
-                "exec",
-                self.identity.workload_namespace,
-                str(NFT),
-                "reset",
-                "counter",
-                "inet",
-                self.identity.table,
-                self.identity.counter,
-            ],
-            action="deny-rule counter reset",
-        )
+        for counter in (self.identity.control_counter, self.identity.counter):
+            _require(
+                [
+                    str(IP),
+                    "netns",
+                    "exec",
+                    self.identity.workload_namespace,
+                    str(NFT),
+                    "reset",
+                    "counter",
+                    "inet",
+                    self.identity.table,
+                    counter,
+                ],
+                action="deny-rule counter reset",
+            )
         return self.assert_healthy(require_zero=True)
 
     def warmup(self) -> CounterSnapshot:
