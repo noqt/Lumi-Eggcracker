@@ -222,7 +222,9 @@ def one(
     operator: str,
     index: int,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="lumi-content-smoke-", dir="/tmp") as raw:
+    with tempfile.TemporaryDirectory(
+        prefix="lumi-content-smoke-", dir="/run/lumi-eggcracker"
+    ) as raw:
         root = Path(raw)
         # Inputs stay in a root-controlled pathname so an approval can bind
         # both the unfamiliar runtime and exact model without a swap window.

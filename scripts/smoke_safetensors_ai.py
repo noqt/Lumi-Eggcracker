@@ -166,7 +166,9 @@ def one(
     operator: str,
     index: int,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="lumi-safetensors-smoke-", dir="/tmp") as raw:
+    with tempfile.TemporaryDirectory(
+        prefix="lumi-safetensors-smoke-", dir="/run/lumi-eggcracker"
+    ) as raw:
         root = Path(raw)
         # Approval-bound inputs live below a root-controlled directory.  Only
         # the separate output directory is writable by the workload identity.
