@@ -1621,6 +1621,10 @@ class Supervisor:
             poller.register(pids_fd, select.POLLPRI)
             poller.register(cgroup_fd, select.POLLPRI)
             if observer is not None:
+                # systemd may emit one namespace setup packet before the
+                # gated target is released. It is denied by nftables and is
+                # not workload traffic; reset it before readiness is exposed.
+                boundary.reset_counter()
                 observer.arm()
             if ready is not None:
                 ready.set()

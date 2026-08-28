@@ -603,6 +603,25 @@ class OfflineBoundary:
             raise JsonInputError("offline boundary counter is unavailable")
         return found
 
+    def reset_counter(self) -> CounterSnapshot:
+        """Clear setup-only namespace traffic while the pre-exec gate is closed."""
+        _require(
+            [
+                str(IP),
+                "netns",
+                "exec",
+                self.identity.workload_namespace,
+                str(NFT),
+                "reset",
+                "counter",
+                "inet",
+                self.identity.table,
+                self.identity.counter,
+            ],
+            action="deny-rule counter reset",
+        )
+        return self.assert_healthy(require_zero=True)
+
     def assert_healthy(self, *, require_zero: bool = False) -> CounterSnapshot:
         self._assert_namespace_identity(
             self.identity.workload_namespace,
