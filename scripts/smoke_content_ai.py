@@ -222,8 +222,11 @@ def one(
     operator: str,
     index: int,
 ) -> dict[str, Any]:
+    # Keep the fixture below the root-controlled asset tree.  The model can be
+    # hundreds of MiB, while /run is a small tmpfs on many native hosts; using
+    # the disk-backed asset parent also lets the hard-link path stay cheap.
     with tempfile.TemporaryDirectory(
-        prefix="lumi-content-smoke-", dir="/run/lumi-eggcracker"
+        prefix="lumi-content-smoke-", dir=str(model.parent.parent)
     ) as raw:
         root = Path(raw)
         # Inputs stay in a root-controlled pathname so an approval can bind

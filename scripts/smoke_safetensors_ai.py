@@ -166,8 +166,11 @@ def one(
     operator: str,
     index: int,
 ) -> dict[str, Any]:
+    # Keep the fixture below the root-controlled asset tree.  Safetensors
+    # weights can be large, while /run is a small tmpfs on many native hosts;
+    # the disk-backed asset parent avoids a staging-space false failure.
     with tempfile.TemporaryDirectory(
-        prefix="lumi-safetensors-smoke-", dir="/run/lumi-eggcracker"
+        prefix="lumi-safetensors-smoke-", dir=str(model.parent.parent)
     ) as raw:
         root = Path(raw)
         # Approval-bound inputs live below a root-controlled directory.  Only
