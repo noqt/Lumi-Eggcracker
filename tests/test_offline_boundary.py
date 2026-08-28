@@ -193,7 +193,7 @@ class OfflineBoundaryTests(unittest.TestCase):
             patch("lumi_eggcracker.offline_boundary._require") as require,
             patch.object(boundary, "counter", side_effect=lambda: next(values)),
             patch("lumi_eggcracker.offline_boundary.time.sleep"),
-            patch("lumi_eggcracker.offline_boundary.time.monotonic", side_effect=(0.0, 0.0, 0.05, 0.30)),
+            patch("lumi_eggcracker.offline_boundary.time.monotonic", side_effect=(0.0, 0.0, 0.05, 1.60)),
         ):
             self.assertEqual(boundary.warmup(), CounterSnapshot(1, 96))
         require.assert_called_once()
