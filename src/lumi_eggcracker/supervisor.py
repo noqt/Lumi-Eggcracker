@@ -1907,7 +1907,9 @@ class Supervisor:
                     daemon=True,
                 )
                 watcher.start()
-                if not ready.wait(2.0):
+                # Boundary priming may wait through delayed kernel IPv6
+                # control traffic before exposing the launch gate.
+                if not ready.wait(8.0):
                     raise JsonInputError("watcher did not become ready before target release")
                 # The gated target has not executed yet.  The watcher has opened
                 # both event descriptors and captured the PID baseline.
