@@ -41,6 +41,40 @@ def call(operator: str, args: list[str], *, check: bool = True) -> dict[str, Any
     return value
 
 
+def root_call(args: list[str]) -> dict[str, Any]:
+    result = run([CLI, *args])
+    if not result.stdout.strip():
+        return {}
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise TypeError("Eggcracker root response is not an object")
+    return value
+
+
+def incident_ids() -> set[str]:
+    value = root_call(["incidents"])
+    incidents = value.get("incidents", [])
+    if not isinstance(incidents, list):
+        raise TypeError("Eggcracker incident response is invalid")
+    return {
+        item["incident_id"]
+        for item in incidents
+        if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+    }
+
+
+def clear_new_incidents(previous: set[str]) -> None:
+    """Reset each independent boundary repetition after its kill proof."""
+    for item in root_call(["incidents"]).get("incidents", []):
+        if (
+            isinstance(item, dict)
+            and item.get("state") == "ACTIVE"
+            and isinstance(item.get("incident_id"), str)
+            and item["incident_id"] not in previous
+        ):
+            root_call(["incident", "clear", item["incident_id"]])
+
+
 def wait_state(operator: str, name: str, expected: str, timeout: float = 20.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     latest: dict[str, Any] = {}
@@ -144,6 +178,7 @@ def main() -> int:
             raise RuntimeError("installed supervisor doctor failed")
         for index in range(args.boundary_repetitions):
             name = f"boundary-{token}-{index}"
+            before_incidents = incident_ids()
             canary = subprocess.Popen(
                 ["/usr/sbin/runuser", "-u", workload, "--", "/bin/sleep", "60"],
                 start_new_session=True,
@@ -182,6 +217,7 @@ def main() -> int:
                 latencies.append(latency)
                 results["boundary"].append(latency)
             finally:
+                clear_new_incidents(before_incidents)
                 stop_canary(canary)
         for index in range(args.benign_repetitions):
             name = f"benign-{token}-{index}"
