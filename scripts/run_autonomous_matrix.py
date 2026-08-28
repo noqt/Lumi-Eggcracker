@@ -36,6 +36,39 @@ def call(operator: str, argv: list[str]) -> dict[str, Any]:
     return value
 
 
+def root_call(argv: list[str]) -> dict[str, Any]:
+    value = json.loads(run([CLI, *argv]).stdout)
+    if not isinstance(value, dict):
+        raise TypeError("invalid root Eggcracker response")
+    return value
+
+
+def incident_ids() -> set[str]:
+    value = root_call(["incidents"])
+    incidents = value.get("incidents", [])
+    if not isinstance(incidents, list):
+        raise TypeError("invalid Eggcracker incident response")
+    return {
+        item["incident_id"]
+        for item in incidents
+        if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+    }
+
+
+def clear_new_incidents(previous: set[str]) -> int:
+    cleared = 0
+    for item in root_call(["incidents"]).get("incidents", []):
+        if (
+            isinstance(item, dict)
+            and item.get("state") == "ACTIVE"
+            and isinstance(item.get("incident_id"), str)
+            and item["incident_id"] not in previous
+        ):
+            root_call(["incident", "clear", item["incident_id"]])
+            cleared += 1
+    return cleared
+
+
 def wait_for_armed_doctor(operator: str, *, timeout: float = 45) -> dict[str, Any]:
     """Wait through truthful between-scan UNSUPPORTED responses."""
     deadline = time.monotonic() + timeout
@@ -148,6 +181,7 @@ def main() -> int:
         argv = command(runner, model)
         try:
             wait_for_armed_doctor(operator)
+            before_incidents = incident_ids()
             for index in range(args.discoveries):
                 canary = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
                 process: subprocess.Popen[bytes] | None = None
@@ -167,6 +201,11 @@ def main() -> int:
                     if process is not None:
                         stop(process)
                     stop(canary)
+            # The discovery phase deliberately leaves an exact lockdown
+            # incident.  Root-clear only this run's incident before the
+            # independent approved-survival phase; protected relaunch blocking
+            # remains covered by the dedicated incident/lockdown tests.
+            clear_new_incidents(before_incidents)
             for index in range(args.approved):
                 approval_name = f"allow-{secrets.token_hex(6)}"
                 run_name = f"approved-{secrets.token_hex(6)}"
