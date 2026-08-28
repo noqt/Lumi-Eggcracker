@@ -26,6 +26,7 @@ RUN_ID = re.compile(r"[0-9a-f]{24}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 IP = Path("/usr/sbin/ip")
 NFT = Path("/usr/sbin/nft")
+NSENTER = Path("/usr/bin/nsenter")
 NETNS_DIR = Path("/run/netns")
 WORKLOAD_PREFIX = "lumi-eggcracker-w-"
 SINK_PREFIX = "lumi-eggcracker-s-"
@@ -236,6 +237,21 @@ def _require(
     return result
 
 
+def _run_host_mount(argv: list[str], *, action: str) -> subprocess.CompletedProcess[str]:
+    """Run one exact netns mount operation in PID 1's mount namespace.
+
+    The supervisor service intentionally keeps its protective read-only mount
+    namespace. Bind mounts made by ``ip netns add`` there would be invisible to
+    systemd when it later resolves ``NetworkNamespacePath``. Entering only PID
+    1's mount namespace for this iproute2 operation keeps the namespace file
+    visible to both the supervisor and the service manager.
+    """
+    return _require(
+        [str(NSENTER), "-t", "1", "-m", "--", *argv],
+        action=action,
+    )
+
+
 def _netns_path(namespace: str) -> Path:
     if not namespace.startswith((WORKLOAD_PREFIX, SINK_PREFIX)):
         raise JsonInputError("offline boundary namespace is outside the owned prefix")
@@ -314,8 +330,12 @@ def primitives_available() -> dict[str, Any]:
     return {
         "ip": IP.is_file() and os.access(IP, os.X_OK),
         "nft": NFT.is_file() and os.access(NFT, os.X_OK),
+        "nsenter": NSENTER.is_file() and os.access(NSENTER, os.X_OK),
         "netns_directory": NETNS_DIR.is_dir() or NETNS_DIR.parent.is_dir(),
-        "supported": IP.is_file() and NFT.is_file() and os.access(IP, os.X_OK) and os.access(NFT, os.X_OK),
+        "supported": all(
+            path.is_file() and os.access(path, os.X_OK)
+            for path in (IP, NFT, NSENTER)
+        ),
     }
 
 
@@ -336,9 +356,9 @@ def _delete_namespace(namespace: str) -> None:
     path = _netns_path(namespace)
     if not path.exists() and not path.is_symlink():
         return
-    result = _run([str(IP), "netns", "del", namespace], action="namespace teardown")
-    if result.returncode and (path.exists() or path.is_symlink()):
-        raise JsonInputError(_command_output(result, "namespace teardown"))
+    _run_host_mount([str(IP), "netns", "del", namespace], action="namespace teardown")
+    if path.exists() or path.is_symlink():
+        raise JsonInputError("offline boundary namespace remained after teardown")
 
 
 class OfflineBoundary:
@@ -360,9 +380,15 @@ class OfflineBoundary:
             raise JsonInputError("iproute2 and nftables are required for offline boundary")
         created: list[str] = []
         try:
-            _require([str(IP), "netns", "add", value.workload_namespace], action="workload namespace setup")
+            _run_host_mount(
+                [str(IP), "netns", "add", value.workload_namespace],
+                action="workload namespace setup",
+            )
             created.append(value.workload_namespace)
-            _require([str(IP), "netns", "add", value.sink_namespace], action="sink namespace setup")
+            _run_host_mount(
+                [str(IP), "netns", "add", value.sink_namespace],
+                action="sink namespace setup",
+            )
             created.append(value.sink_namespace)
             _require(
                 [str(IP), "link", "add", value.workload_interface, "type", "veth", "peer", "name", value.sink_interface],

@@ -254,7 +254,7 @@ def autonomous_primitives_available() -> bool:
 
 def offline_boundary_primitives_available() -> bool:
     """Check the fixed tools and one disposable namespace operation."""
-    tools = (Path("/usr/sbin/ip"), Path("/usr/sbin/nft"))
+    tools = (Path("/usr/sbin/ip"), Path("/usr/sbin/nft"), Path("/usr/bin/nsenter"))
     if not all(path.is_file() and os.access(path, os.X_OK) for path in tools):
         return False
     namespace = f"lumi-eggcracker-preflight-{secrets.token_hex(8)}"
