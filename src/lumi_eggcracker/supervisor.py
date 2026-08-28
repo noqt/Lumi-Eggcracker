@@ -1229,19 +1229,7 @@ class Supervisor:
                     profile=match["profile"],
                 )
                 if existing is not None:
-                    linked = list(existing["linked_receipts"])
-                    receipt_hash = incident_store.receipt_digest(receipt)
-                    if receipt_hash not in linked:
-                        linked.append(receipt_hash)
-                    recurrence = dict(existing["recurrence"])
-                    recurrence["complete_matches"] += 1
-                    recurrence["contained_matches"] += 1
-                    incident_store.update(
-                        root,
-                        existing,
-                        linked_receipts=linked,
-                        recurrence=recurrence,
-                    )
+                    incident_store.link(root, existing, receipt)
                     self.operations.append("incident-state")
                     return
                 detector = receipt.get("detector") if isinstance(receipt.get("detector"), dict) else {}

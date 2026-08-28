@@ -369,9 +369,10 @@ def find_match(
 def link(root: Path, value: dict[str, Any], receipt: dict[str, Any], *, partial: bool = False) -> dict[str, Any]:
     linked = list(value["linked_receipts"])
     digest = receipt_digest(receipt)
-    if digest not in linked:
-        if len(linked) >= MAX_LINKED_RECEIPTS:
-            raise JsonInputError("incident linked receipt capacity reached")
+    # Keep a bounded receipt sample, but never let evidence volume turn a
+    # successful containment into an unavailable incident store.  Recurrence
+    # counters remain authoritative after the sample is full.
+    if digest not in linked and len(linked) < MAX_LINKED_RECEIPTS:
         linked.append(digest)
     recurrence = dict(value["recurrence"])
     recurrence["complete_matches"] += 1

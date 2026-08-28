@@ -88,6 +88,39 @@ class IncidentTests(unittest.TestCase):
             with self.assertRaises(JsonInputError):
                 incidents.load_all(root)
 
+    def test_recurrence_keeps_counting_after_receipt_sample_is_full(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            value = incidents.create(
+                root,
+                receipt=_receipt(),
+                policy={"version": "1.0.0"},
+                catalogue_sha256="e" * 64,
+                source_commit="f" * 40,
+                version="1.0.0",
+                trigger="UNAPPROVED_AI_MATCH",
+                profile="content.gguf-llama",
+                evidence=["gguf-v3"],
+                match={
+                    "argv_sha256": "b" * 64,
+                    "executable_sha256": "c" * 64,
+                    "profile": "content.gguf-llama",
+                    "uid": 2001,
+                },
+                workload=_receipt()["workload"],
+                approval=None,
+            )
+            for index in range(incidents.MAX_LINKED_RECEIPTS + 3):
+                receipt = dict(_receipt())
+                receipt["event_id"] = f"{index:024x}"
+                value = incidents.link(root, value, receipt)
+            self.assertEqual(len(value["linked_receipts"]), incidents.MAX_LINKED_RECEIPTS)
+            self.assertEqual(
+                value["recurrence"]["complete_matches"],
+                incidents.MAX_LINKED_RECEIPTS + 3,
+            )
+            self.assertEqual(incidents.load_all(root)[0], value)
+
 
 if __name__ == "__main__":
     unittest.main()
