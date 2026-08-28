@@ -338,7 +338,7 @@ def _nft_program(table: str) -> str:
             f"add chain inet {table} {OUTPUT_CHAIN} {{ type filter hook output priority 0; policy drop; }}",
             f"add rule inet {table} {INPUT_CHAIN} iifname \"lo\" accept",
             f"add rule inet {table} {OUTPUT_CHAIN} oifname \"lo\" accept",
-            f"add rule inet {table} {OUTPUT_CHAIN} ip6 nexthdr icmpv6 icmpv6 type {{ 130, 131, 132, 133, 134, 135, 136, 137, 143 }} counter name {CONTROL_COUNTER_NAME} drop",
+            f"add rule inet {table} {OUTPUT_CHAIN} icmpv6 type {{ 130, 131, 132, 133, 134, 135, 136, 137, 143 }} counter name {CONTROL_COUNTER_NAME} drop",
             f"add rule inet {table} {OUTPUT_CHAIN} counter name {COUNTER_NAME} drop",
             "",
         )
@@ -577,29 +577,22 @@ class OfflineBoundary:
             expr = rule["expr"]
             if len(expr) == 2:
                 first, second = expr
-            elif len(expr) == 4 and chain == self.identity.output_chain:
-                first, second, third, fourth = expr
+            elif len(expr) == 3 and chain == self.identity.output_chain:
+                first, second, third = expr
                 first_match = first.get("match") if isinstance(first, dict) else None
-                second_match = second.get("match") if isinstance(second, dict) else None
                 first_left = first_match.get("left") if isinstance(first_match, dict) else None
-                second_left = second_match.get("left") if isinstance(second_match, dict) else None
                 first_payload = first_left.get("payload") if isinstance(first_left, dict) else None
-                second_payload = second_left.get("payload") if isinstance(second_left, dict) else None
-                right = second_match.get("right") if isinstance(second_match, dict) else None
+                right = first_match.get("right") if isinstance(first_match, dict) else None
                 right_set = right.get("set") if isinstance(right, dict) else None
                 if (
                     not isinstance(first_match, dict)
                     or first_match.get("op") != "=="
-                    or first_payload != {"field": "nexthdr", "protocol": "ip6"}
-                    or first_match.get("right") != "ipv6-icmp"
-                    or not isinstance(second_match, dict)
-                    or second_match.get("op") != "=="
-                    or second_payload != {"field": "type", "protocol": "icmpv6"}
+                    or first_payload != {"field": "type", "protocol": "icmpv6"}
                     or not isinstance(right_set, list)
                     or set(right_set) != CONTROL_ICMPV6_TYPES
                     or len(right_set) != len(CONTROL_ICMPV6_TYPES)
-                    or third != {"counter": self.identity.control_counter}
-                    or fourth != {"drop": None}
+                    or second != {"counter": self.identity.control_counter}
+                    or third != {"drop": None}
                 ):
                     raise JsonInputError("offline boundary control rule is invalid")
                 control_rules += 1

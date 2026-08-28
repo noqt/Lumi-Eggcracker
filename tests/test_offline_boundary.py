@@ -158,18 +158,6 @@ class OfflineBoundaryTests(unittest.TestCase):
                                     "op": "==",
                                     "left": {
                                         "payload": {
-                                            "field": "nexthdr",
-                                            "protocol": "ip6",
-                                        }
-                                    },
-                                    "right": "ipv6-icmp",
-                                }
-                            },
-                            {
-                                "match": {
-                                    "op": "==",
-                                    "left": {
-                                        "payload": {
                                             "field": "type",
                                             "protocol": "icmpv6",
                                         }
