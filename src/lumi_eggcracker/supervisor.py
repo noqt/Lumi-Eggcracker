@@ -1837,6 +1837,23 @@ class Supervisor:
         except (JsonInputError, OSError, ValueError):
             return False
 
+    @staticmethod
+    def _cgroup_was_collected_empty(record: dict[str, Any]) -> bool:
+        """Accept a listener HUP only when the owned cgroup was collected empty."""
+        try:
+            validate_identity(identity_from_run(record))
+        except JsonInputError as error:
+            if "unavailable" not in str(error):
+                return False
+            try:
+                _empty_ns, proof = verify_empty(identity_from_run(record))
+            except (JsonInputError, OSError):
+                return False
+            return proof.complete
+        except OSError:
+            return False
+        return False
+
     def _accept_exec_listener(
         self,
         channel: socket.socket,
@@ -1890,7 +1907,7 @@ class Supervisor:
                         return
                     continue
                 if events[0][1] & (select.POLLHUP | select.POLLERR):
-                    if self._cgroup_is_exactly_empty(record):
+                    if self._cgroup_is_exactly_empty(record) or self._cgroup_was_collected_empty(record):
                         self._mark_completed(record)
                         return
                     if record.get("state") in ACTIVE_STATES:
