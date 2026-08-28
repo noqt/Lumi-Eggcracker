@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for trying Lumi Eggcracker. Share the public GitHub Actions run and tell us what happened. Do not post credentials, private data, raw process arguments, environment values, private paths, or security-sensitive exploit details. Report a security issue privately through https://github.com/noqt/Lumi-Eggcracker/security/advisories/new.
+        Thanks for trying Lumi Eggcracker. Share the public GitHub Actions run and tell us what happened. NOQT will acknowledge a complete public hosted-proof report within two Australian business days; that acknowledgement is not a promise of a fix, release, private support, or product qualification. Do not post credentials, private data, raw process arguments, environment values, private paths, or security-sensitive exploit details. Report a security issue privately through https://github.com/noqt/Lumi-Eggcracker/security/advisories/new.
   - type: dropdown
     id: outcome
     attributes:
