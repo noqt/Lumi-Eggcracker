@@ -111,6 +111,7 @@ def main() -> int:
             "QUALIFICATION.md",
             "RELEASE_NOTES.md",
             "scripts/install.py",
+            "scripts/upgrade.py",
             "scripts/uninstall.py",
             "scripts/verify_uninstalled.py",
             "scripts/verify_release.py",
