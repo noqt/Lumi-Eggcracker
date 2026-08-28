@@ -1762,9 +1762,12 @@ class Supervisor:
                 # A collected transient unit is accepted only through the same
                 # exact-empty proof used after a direct cgroup kill.  It is
                 # not inferred from systemd's inactive state.
-                if "owned cgroup is unavailable" in str(error):
-                    _empty_ns, proof = verify_empty(identity_from_run(record))
-                    if proof.complete:
+                if "unavailable" in str(error) or "No such file" in str(error):
+                    try:
+                        _empty_ns, proof = verify_empty(identity_from_run(record))
+                    except (JsonInputError, OSError):
+                        proof = None
+                    if proof is not None and proof.complete:
                         self._mark_completed(record)
                         return
                 failure = error
@@ -1854,6 +1857,16 @@ class Supervisor:
             return False
         return False
 
+    @classmethod
+    def _wait_for_cgroup_empty(cls, record: dict[str, Any], *, timeout_seconds: float = 2.0) -> bool:
+        """Bridge the short race between process exit, listener HUP and unit collection."""
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if cls._cgroup_is_exactly_empty(record) or cls._cgroup_was_collected_empty(record):
+                return True
+            time.sleep(0.005)
+        return cls._cgroup_is_exactly_empty(record) or cls._cgroup_was_collected_empty(record)
+
     def _accept_exec_listener(
         self,
         channel: socket.socket,
@@ -1907,7 +1920,7 @@ class Supervisor:
                         return
                     continue
                 if events[0][1] & (select.POLLHUP | select.POLLERR):
-                    if self._cgroup_is_exactly_empty(record) or self._cgroup_was_collected_empty(record):
+                    if self._wait_for_cgroup_empty(record):
                         self._mark_completed(record)
                         return
                     if record.get("state") in ACTIVE_STATES:
