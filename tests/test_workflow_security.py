@@ -1,31 +1,72 @@
 from __future__ import annotations
 
-import re
 import unittest
 from pathlib import Path
 
+import yaml
+from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_DIRECTORY = ROOT / ".github" / "workflows"
-USES_LINE = re.compile(r"^\s*(?:-\s*)?uses\s*:\s*(?P<value>.+?)\s*$")
-FULL_COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+FULL_COMMIT_SHA_LENGTH = 40
+
+
+def mapping_values(node: Node, name: str) -> list[Node]:
+    if not isinstance(node, MappingNode):
+        return []
+    return [
+        value
+        for key, value in node.value
+        if isinstance(key, ScalarNode) and key.value == name
+    ]
+
+
+def uses_references(node: Node) -> list[tuple[int, str]]:
+    references: list[tuple[int, str]] = []
+    if not isinstance(node, MappingNode):
+        return references
+    for key, value in node.value:
+        if isinstance(key, ScalarNode) and key.value == "uses":
+            reference = value.value if isinstance(value, ScalarNode) else "<non-scalar>"
+            references.append((key.start_mark.line + 1, reference))
+    return references
+
+
+def action_references(document: Node) -> list[tuple[int, str]]:
+    references: list[tuple[int, str]] = []
+    for jobs in mapping_values(document, "jobs"):
+        if not isinstance(jobs, MappingNode):
+            continue
+        for _, job in jobs.value:
+            references.extend(uses_references(job))
+            for steps in mapping_values(job, "steps"):
+                if isinstance(steps, SequenceNode):
+                    for step in steps.value:
+                        references.extend(uses_references(step))
+    return references
 
 
 def mutable_external_action_references(workflow: str) -> list[tuple[int, str]]:
     mutable: list[tuple[int, str]] = []
-    for line_number, line in enumerate(workflow.splitlines(), start=1):
-        match = USES_LINE.match(line)
-        if match is None:
+    for document in yaml.compose_all(workflow):
+        if document is None:
             continue
+        for line_number, reference in action_references(document):
+            if reference.startswith(("./", "docker://")):
+                continue
 
-        reference = match.group("value").split(" #", maxsplit=1)[0].strip()
-        if len(reference) >= 2 and reference[0] == reference[-1] and reference[0] in "\"'":
-            reference = reference[1:-1]
-        if reference.startswith(("./", "docker://")):
-            continue
-
-        action, separator, revision = reference.rpartition("@")
-        if not separator or len(action.split("/")) < 2 or FULL_COMMIT_SHA.fullmatch(revision) is None:
-            mutable.append((line_number, reference))
+            action, separator, revision = reference.rpartition("@")
+            components = action.split("/")
+            full_sha = len(revision) == FULL_COMMIT_SHA_LENGTH and all(
+                character in "0123456789abcdefABCDEF" for character in revision
+            )
+            if (
+                not separator
+                or len(components) < 2
+                or any(not part for part in components)
+                or not full_sha
+            ):
+                mutable.append((line_number, reference))
     return mutable
 
 
@@ -43,17 +84,55 @@ class WorkflowSecurityTests(unittest.TestCase):
         }
         self.assertEqual({}, {path: refs for path, refs in violations.items() if refs})
 
-    def test_mutable_external_action_tag_is_rejected(self) -> None:
-        workflow = "steps:\n  - uses: actions/checkout@v6\n"
-        self.assertEqual([(2, "actions/checkout@v6")], mutable_external_action_references(workflow))
-
-    def test_full_commit_sha_and_local_action_are_allowed(self) -> None:
+    def test_mutable_external_action_tags_are_rejected_across_yaml_styles(self) -> None:
         workflow = (
-            "steps:\n"
-            "  - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803\n"
-            "  - uses: ./.github/actions/local-check\n"
+            "jobs:\n"
+            "  inline: {uses: noqt/reusable/.github/workflows/check.yml@main}\n"
+            "  quoted:\n"
+            '    steps: [{"uses": actions/checkout@v6}]\n'
+        )
+        self.assertEqual(
+            [
+                (2, "noqt/reusable/.github/workflows/check.yml@main"),
+                (4, "actions/checkout@v6"),
+            ],
+            mutable_external_action_references(workflow),
+        )
+
+    def test_full_commit_sha_local_action_and_script_text_are_allowed(self) -> None:
+        workflow = (
+            "jobs:\n"
+            "  reusable:\n"
+            "    uses: noqt/reusable/.github/workflows/check.yml@0123456789abcdef0123456789abcdef01234567\n"
+            "  test:\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6\n"
+            "      - uses: ./.github/actions/local-check\n"
+            "      - run: |\n"
+            "          printf 'uses: actions/checkout@v6'\n"
+            "      - env: {uses: actions/checkout@v6}\n"
+            "        run: echo safe\n"
         )
         self.assertEqual([], mutable_external_action_references(workflow))
+
+    def test_only_exactly_40_hexadecimal_revision_characters_are_allowed(self) -> None:
+        revisions = {
+            "39": "a" * 39,
+            "40": "b" * 40,
+            "41": "c" * 41,
+            "non-hex": "g" * 40,
+        }
+        workflow = "jobs:\n  test:\n    steps:\n" + "".join(
+            f"      - uses: example/action@{revision}\n" for revision in revisions.values()
+        )
+        self.assertEqual(
+            [
+                (4, f"example/action@{revisions['39']}"),
+                (6, f"example/action@{revisions['41']}"),
+                (7, f"example/action@{revisions['non-hex']}"),
+            ],
+            mutable_external_action_references(workflow),
+        )
 
 
 if __name__ == "__main__":
