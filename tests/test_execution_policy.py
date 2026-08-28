@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -72,7 +73,7 @@ class ExecutionPolicyTests(unittest.TestCase):
         with self.assertRaises(JsonInputError):
             validate(value)
 
-    @unittest.skipIf(__import__("os").name != "posix", "native executable identity is Linux-only")
+    @unittest.skipUnless(os.name == "posix" and os.geteuid() == 0, "requires root on Linux")
     def test_create_and_ephemeral_bind_root_controlled_binary(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             value = create(Path(raw), name="shell", paths=["/bin/sh"])

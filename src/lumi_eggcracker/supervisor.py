@@ -2393,8 +2393,8 @@ class Supervisor:
                     if isinstance(record.get("boundary"), dict)
                     else "none"
                 ),
-                "exec_policy_id": record["exec_policy_id"],
-                "exec_policy_digest": record["exec_policy_digest"],
+                "exec_policy_id": record.get("exec_policy_id", "legacy"),
+                "exec_policy_digest": record.get("exec_policy_digest", "0" * 64),
                 "workload_uid": record["workload_uid"],
             }
         if action == "list" and not args:

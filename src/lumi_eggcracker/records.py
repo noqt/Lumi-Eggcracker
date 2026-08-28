@@ -124,15 +124,6 @@ def validate_run(value: dict[str, Any]) -> dict[str, Any]:
     legacy_expected = expected - {"exec_policy_digest", "exec_policy_id"}
     if set(value) not in (expected, legacy_expected) or value.get("schema_version") not in {RUN_SCHEMA, "lumi-eggcracker.run.v4"}:
         raise JsonInputError("run record schema is invalid")
-    if set(value) == legacy_expected:
-        # A 0.7 terminal record may still be present when the supervisor is
-        # upgraded in place.  It is never an active 0.8 sealed run, but it is
-        # retained as bounded historical state so recovery and diagnostics do
-        # not become a destructive migration step.
-        value = dict(value)
-        value["exec_policy_id"] = "legacy"
-        value["exec_policy_digest"] = "0" * 64
-        value["schema_version"] = RUN_SCHEMA
     if not isinstance(value["name"], str) or not NAME.fullmatch(value["name"]):
         raise JsonInputError("run record name is invalid")
     if not isinstance(value["run_id"], str) or not RUN_ID.fullmatch(value["run_id"]):
