@@ -708,16 +708,25 @@ class Supervisor:
         return value
 
     def _authorizes_protected_scope(
-        self, snapshot: ProcessSnapshot, provenance: dict[str, Any] | None
+        self,
+        snapshot: ProcessSnapshot,
+        provenance: dict[str, Any] | None,
+        *,
+        profile: str | None = None,
     ) -> bool:
-        """Authorize descendants of one exact root-approved workload cgroup.
+        """Authorize a qualified topology worker in one approved cgroup.
 
         A topology launcher commonly execs or forks a worker whose PID/start
         time was not present at the pre-exec gate.  The root-owned provenance
         record and exact delegated cgroup are the approval closure for that
-        worker; UID and cgroup identity remain mandatory, so this does not
-        broaden approval to a user, directory, process name or wildcard.
+        worker.  Direct profiles deliberately do not receive this cgroup-wide
+        closure: an approved launcher must not shelter a separate direct AI
+        process.  UID and cgroup identity remain mandatory, so the topology
+        exception does not broaden approval to a user, directory, process name
+        or wildcard.
         """
+        if profile not in {"content.gguf-ollama", "content.safetensors-vllm"}:
+            return False
         if provenance is None or snapshot.uid != self.policy["workload_uid"]:
             return False
         selected = f"0::{provenance['cgroup']}"
@@ -1703,6 +1712,12 @@ class Supervisor:
                     "",
                 )
                 scope_provenance = provenance_by_cgroup.get(candidate_cgroup)
+                # A root-approved launch identity authorizes only that exact
+                # process.  Cgroup-wide approval is reserved for detector
+                # profiles whose contract explicitly includes a qualified
+                # launcher/worker topology.  A direct profile (for example
+                # GGUF+llama) must not let an approved Python launcher hide a
+                # separate AI process in the same owned cgroup.
                 authorized = (
                     provenance is not None
                     and launch_authorizes(
@@ -1714,7 +1729,9 @@ class Supervisor:
                         provenance,
                     )
                 ) or self._authorizes_protected_scope(
-                    candidate.snapshot, scope_provenance
+                    candidate.snapshot,
+                    scope_provenance,
+                    profile=detected.profile,
                 )
                 # An active local lockdown turns an exact protected
                 # recurrence into an enforcement candidate even when a stale

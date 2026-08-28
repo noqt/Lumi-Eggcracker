@@ -109,6 +109,33 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(supervisor._managed(snapshot))
         self.assertFalse(supervisor._discovery_excluded(snapshot))
 
+    def test_approved_cgroup_closure_is_limited_to_topology_profiles(self) -> None:
+        supervisor = self._instance()
+        cgroup = "/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service"
+        supervisor.active_cgroups = {cgroup}
+        snapshot = ProcessSnapshot(
+            ProcessIdentity(10, 100),
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + cgroup,),
+            (),
+            (),
+        )
+        provenance = {"cgroup": cgroup}
+
+        self.assertFalse(
+            supervisor._authorizes_protected_scope(
+                snapshot, provenance, profile="content.gguf-llama"
+            )
+        )
+        self.assertTrue(
+            supervisor._authorizes_protected_scope(
+                snapshot, provenance, profile="content.gguf-ollama"
+            )
+        )
+
     def test_group_refresh_replaces_preexec_gate_snapshot_without_losing_evidence(self) -> None:
         identity = ProcessIdentity(10, 100)
         stale = ProcessSnapshot(
