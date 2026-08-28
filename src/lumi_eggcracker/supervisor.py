@@ -1351,6 +1351,17 @@ class Supervisor:
             "trigger": {"kind": trigger_kind},
             "version": __version__,
         }
+        if result is not None:
+            quarantine = str(result.identity.path)
+            value["workload"] = {
+                "boot_id": f"detection-{event_id}",
+                "cgroup": quarantine,
+                "cgroup_device": result.identity.device,
+                "cgroup_inode": result.identity.inode,
+                "run_id": event_id,
+                "unit": Path(quarantine).name,
+                "workload_uid": snapshot.uid,
+            }
         evidence_roles: list[dict[str, Any]] = []
         for candidate in correlated or (
             _EvidenceCandidate(snapshot, content, runtimes, first_seen_ns, detected),
@@ -2605,7 +2616,7 @@ class Supervisor:
             "max_memory_mib": 0,
             "name": f"orphan-{run_id}",
             "network_mode": "none",
-            "operator_uid": self.operator_uid,
+            "operator_uid": self.policy.get("operator_uid", 0),
             "run_id": run_id,
             "schema_version": RUN_SCHEMA,
             "state": "RUNNING",
@@ -2662,7 +2673,11 @@ class Supervisor:
         """Verify the installed-file inventory without trusting arbitrary paths."""
         manifest_path = STATE_DIR / "install-manifest.json"
         journal_path = STATE_DIR / "upgrade-journal.json"
-        if journal_path.exists() or journal_path.is_symlink():
+        try:
+            journal_present = journal_path.exists() or journal_path.is_symlink()
+        except OSError:
+            return {"state": "DRIFT", "journal": False, "files_match": False}
+        if journal_present:
             return {"state": "RECOVERY_REQUIRED", "journal": True, "files_match": False}
         if manifest_path.is_symlink() or not manifest_path.is_file():
             return {"state": "NOT_INSTALLED", "journal": False, "files_match": False}
