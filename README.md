@@ -159,7 +159,10 @@ workload, qualify another host, or establish product-wide effectiveness or
 safety. A public non-NOQT run is evidence only after its source digest and
 workflow blob match the reviewed upstream versions. Share a pass, safe refusal,
 or reproducible friction report through the
-[redacted result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=first_kill_result.yml).
+[redacted hosted-proof result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
+NOQT will acknowledge a complete public hosted-proof report within two
+Australian business days. That acknowledgement is not a promise of a fix,
+release, private support, or product qualification.
 
 After a passing preflight, run the full demonstration:
 

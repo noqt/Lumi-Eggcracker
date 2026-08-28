@@ -21,6 +21,10 @@ run](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_re
 The short form asks for the workflow URL and what happened. That is useful
 evidence either way.
 
+NOQT will acknowledge a complete public hosted-proof report within two
+Australian business days. That acknowledgement is not a promise of a fix,
+release, private support, or product qualification.
+
 This hosted proof tests only the bounded kill mechanism. It does not install
 Eggcracker, recognise an AI workload or prove the whole product. The workflow
 is designed for GitHub's disposable Ubuntu 24.04 runner; don't adapt it to a
