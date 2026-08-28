@@ -1606,7 +1606,13 @@ class Supervisor:
                 self.boundary_cleanup_healthy = False
             return True
 
-    def _watch_once(self, record: dict[str, Any], ready: threading.Event | None = None) -> None:
+    def _watch_once(
+        self,
+        record: dict[str, Any],
+        ready: threading.Event | None = None,
+        *,
+        prime_boundary: bool = False,
+    ) -> None:
         identity = identity_from_run(record)
         path = validate_identity(identity)
         boundary = self._boundary_for_record(record)
@@ -1621,6 +1627,11 @@ class Supervisor:
             poller.register(pids_fd, select.POLLPRI)
             poller.register(cgroup_fd, select.POLLPRI)
             if observer is not None:
+                if prime_boundary:
+                    # The launch FIFO is still closed. Prime immediately
+                    # before arming so delayed kernel setup traffic cannot
+                    # fall into the gap between warmup and readiness.
+                    boundary.warmup()
                 # systemd may emit one namespace setup packet before the
                 # gated target is released. It is denied by nftables and is
                 # not workload traffic; reset it before readiness is exposed.
@@ -1650,11 +1661,17 @@ class Supervisor:
             os.close(pids_fd)
             os.close(cgroup_fd)
 
-    def _watch(self, record: dict[str, Any], ready: threading.Event | None = None) -> None:
+    def _watch(
+        self,
+        record: dict[str, Any],
+        ready: threading.Event | None = None,
+        *,
+        prime_boundary: bool = False,
+    ) -> None:
         failure: BaseException | None = None
         for attempt in range(2):
             try:
-                self._watch_once(record, ready)
+                self._watch_once(record, ready, prime_boundary=prime_boundary)
                 return
             except (JsonInputError, OSError, RuntimeError) as error:
                 # A collected transient unit is accepted only through the same
@@ -1851,11 +1868,6 @@ class Supervisor:
                     time.sleep(0.01)
                 if props.get("ActiveState") != "active" or not props.get("ControlGroup"):
                     raise JsonInputError("gated workload did not become active")
-                # Enter the exact namespace once while the launch FIFO remains
-                # closed. Linux can emit delayed IPv6 control-plane traffic on
-                # first entry; settle it before the observer is armed so that
-                # only post-release workload egress is authoritative.
-                boundary.warmup()
                 identity = capture_identity(props["ControlGroup"], run_id, unit)
                 record = {
                     **summary,
@@ -1888,7 +1900,12 @@ class Supervisor:
                         approval=approval,
                     )
                 ready = threading.Event()
-                watcher = threading.Thread(target=self._watch, args=(record, ready), daemon=True)
+                watcher = threading.Thread(
+                    target=self._watch,
+                    args=(record, ready),
+                    kwargs={"prime_boundary": True},
+                    daemon=True,
+                )
                 watcher.start()
                 if not ready.wait(2.0):
                     raise JsonInputError("watcher did not become ready before target release")
