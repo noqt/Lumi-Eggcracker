@@ -6,6 +6,7 @@ import argparse
 import array
 import datetime as dt
 import errno
+import hashlib
 import json
 import os
 import re
@@ -95,6 +96,7 @@ from .seccomp_notify import (
     receive_notification,
     send_response,
 )
+from .seccomp_notify import primitive_available as seccomp_primitive_available
 from .watchdog import HEARTBEAT, HEARTBEAT_MAGIC, HEARTBEAT_SOCKET
 
 MAX_FRAME = 32 * 1024
@@ -2350,6 +2352,49 @@ class Supervisor:
                     "SUPERVISOR_RESTART_FAIL_CLOSED",
                 )
 
+    def _installation_health(self) -> dict[str, Any]:
+        """Verify the installed-file inventory without trusting arbitrary paths."""
+        manifest_path = STATE_DIR / "install-manifest.json"
+        journal_path = STATE_DIR / "upgrade-journal.json"
+        if journal_path.exists() or journal_path.is_symlink():
+            return {"state": "RECOVERY_REQUIRED", "journal": True, "files_match": False}
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            return {"state": "NOT_INSTALLED", "journal": False, "files_match": False}
+        try:
+            manifest = load_regular_json(manifest_path)
+            files = manifest.get("files")
+            expected_paths = {
+                "/usr/local/bin/eggcracker",
+                "/usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz",
+                "/etc/lumi-eggcracker/detector_catalogue.json",
+                "/etc/lumi-eggcracker/policy.json",
+                "/etc/systemd/system/lumi-eggcracker.service",
+                "/etc/systemd/system/lumi-eggcracker-watchdog.service",
+            }
+            if not isinstance(files, dict) or set(files) != expected_paths:
+                return {"state": "DRIFT", "journal": False, "files_match": False}
+            matches = True
+            for raw_path, expected in files.items():
+                path = Path(raw_path)
+                if path.is_symlink() or not path.is_file() or not isinstance(expected, str):
+                    matches = False
+                    break
+                value = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for block in iter(lambda: handle.read(64 * 1024), b""):
+                        value.update(block)
+                if value.hexdigest() != expected:
+                    matches = False
+                    break
+            version = manifest.get("version", self.policy["version"])
+            if not isinstance(version, str):
+                version = "unknown"
+            if version != self.policy["version"]:
+                matches = False
+            return {"state": "HEALTHY" if matches else "DRIFT", "journal": False, "files_match": matches, "manifest_version": version}
+        except (JsonInputError, OSError, TypeError, ValueError):
+            return {"state": "DRIFT", "journal": False, "files_match": False}
+
     def handle(self, value: dict[str, Any]) -> dict[str, Any]:
         if (
             set(value) != {"action", "args"}
@@ -2375,12 +2420,14 @@ class Supervisor:
                 and self.discovery_thread.is_alive()
             )
             boundary_primitives = primitives_available()
+            execution_primitives = seccomp_primitive_available()
             ready = (
                 available
                 and pidfd_available()
                 and self.quarantine_root is not None
                 and policy_network_mode(self.policy) == "offline"
                 and boundary_primitives["supported"]
+                and execution_primitives["supported"]
                 and scan_healthy
             )
             return {
@@ -2393,6 +2440,7 @@ class Supervisor:
                 },
                 "catalogue": public_catalogue(self.catalogue),
                 "cgroup_v2": available,
+                "execution_boundary": execution_primitives,
                 "discovery": {
                     "consecutive_failures": self.discovery_failures,
                     "last_scan_duration_ms": self.last_scan_duration_ns / 1_000_000,
@@ -2402,6 +2450,7 @@ class Supervisor:
                     "scan_health_timeout_ms": SCAN_HEALTH_TIMEOUT_NS / 1_000_000,
                 },
                 "pidfd": pidfd_available(),
+                "installation": self._installation_health(),
                 "result": "PASS" if ready else "UNSUPPORTED",
                 "version": __version__,
                 "workload_uid": self.policy["workload_uid"],

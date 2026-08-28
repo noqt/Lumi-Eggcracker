@@ -79,6 +79,8 @@ def _doctor(value: dict[str, Any]) -> dict[str, Any]:
         "autonomous_discovery": value.get("autonomous_discovery"),
         "cgroup_v2": value.get("cgroup_v2"),
         "pidfd": value.get("pidfd"),
+        "execution_boundary": value.get("execution_boundary"),
+        "installation": value.get("installation"),
         "network": {
             "mode": _token(network.get("mode")),
             "cleanup_healthy": network.get("cleanup_healthy"),

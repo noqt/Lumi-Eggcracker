@@ -23,6 +23,7 @@ import grp
 import hashlib
 import json
 import os
+import platform
 import pwd
 import re
 import secrets
@@ -49,7 +50,7 @@ WATCHDOG_RUNTIME = Path("/run/lumi-eggcracker-watchdog")
 HEARTBEAT_SOCKET = WATCHDOG_RUNTIME / "heartbeat.sock"
 WORKLOAD_NAME = "lumi-eggcracker-workload"
 TARGETS = (LIB, BIN, ETC, UNIT, WATCHDOG_UNIT, STATE, RUNTIME, WATCHDOG_RUNTIME)
-INSTALLER_VERSION = "0.8.0"
+INSTALLER_VERSION = "0.8.1"
 MAX_RELEASE_MANIFEST_BYTES = 32 * 1024
 
 
@@ -273,6 +274,16 @@ def offline_boundary_primitives_available() -> bool:
             run([str(tools[0]), "netns", "del", namespace])
 
 
+def execution_boundary_primitives_available() -> bool:
+    """Check native seccomp user-notification support before mutation."""
+    if platform.system() != "Linux" or platform.machine() not in {"x86_64", "amd64"}:
+        return False
+    try:
+        return "user_notif" in Path("/proc/sys/kernel/seccomp/actions_avail").read_text(encoding="ascii").split()
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def catalogue_from_artifact(artifact: Path) -> bytes:
     try:
         with zipfile.ZipFile(artifact) as bundle:
@@ -334,9 +345,10 @@ def main() -> int:
         or "pids" not in controllers.read_text(encoding="ascii").split()
         or not autonomous_primitives_available()
         or not offline_boundary_primitives_available()
+        or not execution_boundary_primitives_available()
     ):
         raise SystemExit(
-            "unified cgroup v2, delegated child cgroups, cgroup.kill, pidfds, iproute2 and nftables are required"
+            "unified cgroup v2, delegated child cgroups, cgroup.kill, pidfds, seccomp user-notification, iproute2 and nftables are required"
         )
     account, created_user = workload_account()
     group = grp.getgrgid(account.pw_gid)
@@ -368,7 +380,7 @@ def main() -> int:
         created.append(UNIT)
         write_new(WATCHDOG_UNIT, watchdog_service().replace(b"Before=lumi-eggcracker.service\n\n", b"Before=lumi-eggcracker.service\nStartLimitIntervalSec=0\n\n"), 0o644)
         created.append(WATCHDOG_UNIT)
-        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT), str(WATCHDOG_UNIT): digest(WATCHDOG_UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v5", "targets": [str(path) for path in TARGETS], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
+        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT), str(WATCHDOG_UNIT): digest(WATCHDOG_UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v5", "targets": [str(path) for path in TARGETS], "version": release["version"], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
         write_new(STATE / "install-manifest.json", (json.dumps(manifest, sort_keys=True) + "\n").encode(), 0o600)
         checked = run(["/usr/bin/systemctl", "daemon-reload"])
         started_watchdog = run(["/usr/bin/systemctl", "enable", "--now", "lumi-eggcracker-watchdog.service"])

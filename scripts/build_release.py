@@ -105,6 +105,7 @@ def main() -> int:
         ROOT / "QUALIFICATION.md": "QUALIFICATION.md",
         ROOT / "RELEASE_NOTES.md": "RELEASE_NOTES.md",
         ROOT / "scripts" / "install.py": "scripts/install.py",
+        ROOT / "scripts" / "upgrade.py": "scripts/upgrade.py",
         ROOT / "scripts" / "uninstall.py": "scripts/uninstall.py",
         ROOT / "scripts" / "verify_uninstalled.py": "scripts/verify_uninstalled.py",
         ROOT / "scripts" / "verify_release.py": "scripts/verify_release.py",

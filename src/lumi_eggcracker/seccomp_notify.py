@@ -11,6 +11,7 @@ import array
 import ctypes
 import errno
 import os
+import platform
 import socket
 from pathlib import Path
 from typing import Any
@@ -87,6 +88,26 @@ IOC_WRITE = 1 << 30
 SECCOMP_IOCTL_NOTIF_RECV = _ioc(IOC_READ | IOC_WRITE, 0, ctypes.sizeof(SeccompNotif))
 SECCOMP_IOCTL_NOTIF_SEND = _ioc(IOC_READ | IOC_WRITE, 1, ctypes.sizeof(SeccompNotifResp))
 SECCOMP_IOCTL_NOTIF_ID_VALID = _ioc(IOC_WRITE, 2, ctypes.sizeof(ctypes.c_uint64))
+
+
+def primitive_available() -> dict[str, bool]:
+    """Return a read-only capability summary for the sealed-exec primitive."""
+    linux = os.name == "posix" and platform.system() == "Linux"
+    architecture = platform.machine() in {"x86_64", "amd64"}
+    actions = False
+    if linux:
+        try:
+            actions = "user_notif" in Path("/proc/sys/kernel/seccomp/actions_avail").read_text(encoding="ascii").split()
+        except (OSError, UnicodeDecodeError):
+            actions = False
+    return {
+        "linux": linux,
+        "architecture": architecture,
+        "fcntl": fcntl is not None,
+        "libc": LIBC is not None,
+        "user_notification": actions,
+        "supported": linux and architecture and fcntl is not None and LIBC is not None and actions,
+    }
 
 
 def _syscall(number: int, *args: Any) -> int:

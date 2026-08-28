@@ -13,7 +13,7 @@ class CliTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(0, main(["version"]))
-        self.assertEqual("0.8.0", output.getvalue().strip())
+        self.assertEqual("0.8.1", output.getvalue().strip())
 
     def test_public_help_has_only_supported_commands(self) -> None:
         from lumi_eggcracker.cli import _parser
