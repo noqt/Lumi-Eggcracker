@@ -99,7 +99,13 @@ def _validate_workload(value: Any) -> dict[str, Any]:
         raise JsonInputError("incident workload boot identity is invalid")
     if (
         not isinstance(value["cgroup"], str)
-        or not value["cgroup"].startswith("/system.slice/lumi-eggcracker-workload-")
+        or not (
+            value["cgroup"].startswith("/system.slice/lumi-eggcracker-workload-")
+            or value["cgroup"].startswith("/run/lumi-eggcracker/quarantine/")
+            or value["cgroup"].startswith(
+                "/sys/fs/cgroup/system.slice/lumi-eggcracker.service/quarantine/"
+            )
+        )
         or len(value["cgroup"]) > 256
     ):
         raise JsonInputError("incident workload cgroup identity is invalid")
