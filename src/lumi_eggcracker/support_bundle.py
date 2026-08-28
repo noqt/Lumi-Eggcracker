@@ -81,6 +81,7 @@ def _doctor(value: dict[str, Any]) -> dict[str, Any]:
         "pidfd": value.get("pidfd"),
         "execution_boundary": value.get("execution_boundary"),
         "installation": value.get("installation"),
+        "incidents": value.get("incidents"),
         "network": {
             "mode": _token(network.get("mode")),
             "cleanup_healthy": network.get("cleanup_healthy"),
@@ -135,11 +136,27 @@ def _workload_health(value: dict[str, Any]) -> dict[str, Any]:
     return {"run_count": len(runs), "states": states}
 
 
+def _incident_health(value: dict[str, Any]) -> dict[str, Any]:
+    incidents = value.get("incidents") if isinstance(value.get("incidents"), list) else []
+    active = 0
+    states: dict[str, int] = {}
+    for item in incidents:
+        if not isinstance(item, dict):
+            continue
+        state = _token(item.get("state"))
+        if state is not None:
+            states[state] = states.get(state, 0) + 1
+            if state in {"ACTIVE", "ACKNOWLEDGED"}:
+                active += 1
+    return {"count": len(incidents), "active": active, "states": states}
+
+
 def collect(query: Query = request) -> dict[str, Any]:
     """Collect only bounded fields from public read-only supervisor queries."""
     doctor = query("doctor")
     detections_raw = query("detections")
     list_raw = query("list")
+    incidents_raw = query("incidents")
     detections = detections_raw.get("detections")
     if not isinstance(detections, list):
         detections = []
@@ -151,6 +168,7 @@ def collect(query: Query = request) -> dict[str, Any]:
         "host": _host(),
         "health": _doctor(doctor),
         "workloads": _workload_health(list_raw),
+        "incidents": _incident_health(incidents_raw),
         "receipts": [_detection(item) for item in detections[:MAX_DETECTIONS] if isinstance(item, dict)],
         "privacy": {
             "network": "aggregate-boundary-events-only",

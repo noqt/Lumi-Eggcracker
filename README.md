@@ -214,8 +214,11 @@ with a redacted support bundle; route security-sensitive findings through
   loopback is allowed and non-loopback IPv4/IPv6 egress is denied and counted;
 - automatically kills the complete selected workload tree when that boundary
   counter trips, then writes a post-containment receipt;
+- records a bounded local lockdown after an autonomous, network-boundary or
+  execution-boundary kill, revokes only the exact affected approval, and
+  suppresses an exact protected relaunch until root clears it;
 - supports exact root approvals for protected launches, plus operator-triggered
-  kills and status, list, doctor, detections and version queries.
+  kills and status, list, doctor, detections, incidents and version queries.
 
 The product is intentionally a kill switch, not an alerting dashboard. It
 does not wait for an operator after an unapproved complete match.

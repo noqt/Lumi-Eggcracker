@@ -1,3 +1,22 @@
+# Lumi Eggcracker 0.9.0 — bounded local lockdown
+
+0.9.0 adds one post-containment response: after a successful unapproved-AI,
+offline-boundary or execution-boundary kill, Eggcracker records a bounded
+root-owned incident, revokes the exact affected approval when one exists, and
+suppresses an exact protected relaunch until root clears the local lockdown and
+creates a fresh approval. A bounded recurrence sweep reuses the existing
+detector and cgroup.kill path; unrelated and partial matches remain outside
+the response scope.
+
+The original empty-cgroup receipt is always written before incident state,
+approval revocation or recurrence work. Query and operator identities can only
+see bounded incident summaries; show, acknowledge and clear require the
+root-admin socket. Clearing an incident never restores its revoked approval.
+
+This release does not add remote retaliation, hack-back behaviour, arbitrary
+response hooks, host-wide UID/name quarantine, automatic expiry, a behavioural
+model, attribution or universal AI recognition.
+
 # Lumi Eggcracker 0.6.0 — The selected-workload offline kill boundary
 
 0.6.0 extends the qualified kill switch with one deliberately narrow boundary:

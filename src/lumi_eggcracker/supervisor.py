@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import incidents as incident_store
 from .adoption import AdoptionResult, contain_many, open_pidfd, pidfd_available
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
@@ -107,9 +108,17 @@ OPERATOR_SOCKET = Path("/run/lumi-eggcracker/operator.sock")
 ADMIN_SOCKET = Path("/run/lumi-eggcracker/admin.sock")
 LEGACY_SOCKET = Path("/run/lumi-eggcracker/control.sock")
 SOCKET_ACTIONS = {
-    QUERY_SOCKET: frozenset({"approvals", "detections", "doctor", "exec_policies", "list", "status"}),
+    QUERY_SOCKET: frozenset({"approvals", "detections", "doctor", "exec_policies", "incidents", "list", "status"}),
     OPERATOR_SOCKET: frozenset({"kill", "start"}),
-    ADMIN_SOCKET: frozenset({"approve", "exec_policy_create", "exec_policy_revoke", "revoke"}),
+    ADMIN_SOCKET: frozenset({
+        "approve",
+        "exec_policy_create",
+        "exec_policy_revoke",
+        "incident_acknowledge",
+        "incident_clear",
+        "incident_show",
+        "revoke",
+    }),
 }
 STATE_DIR = Path("/var/lib/lumi-eggcracker")
 UNIT_PREFIX = "lumi-eggcracker-workload-"
@@ -258,6 +267,7 @@ class Supervisor:
         self.approvals = STATE_DIR / "approvals"
         self.launches = STATE_DIR / "launches"
         self.detections = STATE_DIR / "detections"
+        self.incidents = STATE_DIR / "incidents"
         self.exec_policies = EXEC_POLICY_DIR
         self.quarantine_root: Path | None = None
         self.stop_event = threading.Event()
@@ -297,6 +307,10 @@ class Supervisor:
         self.discovery_failures = 0
         self.receipt_persistence_healthy = True
         self.boundary_cleanup_healthy = True
+        self.incident_health_healthy = True
+        self.incident_response_lock = threading.RLock()
+        self.incident_sweep_lock = threading.Lock()
+        self.incident_sweep_active = False
         self.boundaries: dict[str, OfflineBoundary] = {}
         self.enforcement_saturation_until_ns = 0
         self.heartbeat_sequence = 0
@@ -470,6 +484,7 @@ class Supervisor:
             (self.approvals, 0o700, 0),
             (self.launches, 0o700, 0),
             (self.detections, 0o700, 0),
+            (self.incidents, 0o700, 0),
             (self.exec_policies, 0o700, 0),
         ):
             path.mkdir(mode=mode, parents=True, exist_ok=True)
@@ -479,6 +494,13 @@ class Supervisor:
             if path.exists() or path.is_symlink():
                 raise JsonInputError("Eggcracker socket already exists")
         self._reserve_discovery_window()
+        # A malformed or replayed incident must not be adopted.  Keep the
+        # service available for root diagnosis, but fail health and all new
+        # starts closed until the store is repaired or cleared by root.
+        try:
+            incident_store.load_all(self.incidents)
+        except (JsonInputError, OSError):
+            self.incident_health_healthy = False
         self._recover()
         self.quarantine_root = self._prepare_quarantine()
         self._scan_synchronously()
@@ -998,6 +1020,262 @@ class Supervisor:
             self.receipt_persistence_healthy = False
             raise
 
+    def _incident_values(self) -> list[dict[str, Any]]:
+        root = getattr(self, "incidents", None)
+        if root is None:
+            return []
+        if not getattr(self, "incident_health_healthy", True):
+            raise JsonInputError("incident store is unavailable; root recovery is required")
+        try:
+            return incident_store.load_all(root)
+        except (JsonInputError, OSError):
+            self.incident_health_healthy = False
+            raise
+
+    def _incident_status(self) -> dict[str, Any]:
+        root = getattr(self, "incidents", None)
+        if root is None:
+            return {"healthy": True, "count": 0, "active": 0, "lockdown": False}
+        try:
+            values = self._incident_values()
+        except (JsonInputError, OSError):
+            return {"healthy": False, "count": 0, "active": 0, "lockdown": True}
+        active = incident_store.active(values)
+        return {
+            "healthy": True,
+            "count": len(values),
+            "active": len(active),
+            "lockdown": bool(active),
+        }
+
+    def _incident_block_for_start(self, argv_sha256: str) -> dict[str, Any] | None:
+        values = self._incident_values()
+        return incident_store.find_match(
+            values,
+            argv_sha256=argv_sha256,
+            uid=self.policy["workload_uid"],
+        )
+
+    def _incident_match_for_candidate(
+        self,
+        snapshot: ProcessSnapshot,
+        detected: DetectionMatch,
+        executable_sha256: str | None,
+    ) -> dict[str, Any] | None:
+        if not getattr(self, "incident_health_healthy", True):
+            return None
+        try:
+            values = self._incident_values()
+        except (JsonInputError, OSError):
+            return None
+        return incident_store.find_match(
+            values,
+            argv_sha256=argv_digest(snapshot.argv),
+            uid=snapshot.uid,
+            executable_sha256=executable_sha256,
+            profile=detected.profile,
+        )
+
+    def _approval_identity(self, run_id: str) -> dict[str, Any] | None:
+        try:
+            values = load_launch_provenance(self.launches)
+        except (JsonInputError, OSError):
+            return None
+        value = next((item for item in values if item["run_id"] == run_id), None)
+        if value is None:
+            return None
+        return {
+            "argv_sha256": value["argv_sha256"],
+            "bound_input_sha256": list(value["bound_input_sha256"]),
+            "created_monotonic_ns": value["approval_created_monotonic_ns"],
+            "executable_sha256": value["executable_sha256"],
+            "name": value["approval_name"],
+            "uid": value["uid"],
+        }
+
+    def _revoke_exact_approval(self, approval: dict[str, Any] | None) -> bool:
+        if approval is None:
+            return True
+        values = load_approvals(self.approvals)
+        matches = [
+            item
+            for item in values
+            if item["name"] == approval["name"]
+            and item["created_monotonic_ns"] == approval["created_monotonic_ns"]
+            and item["argv_sha256"] == approval["argv_sha256"]
+            and item["executable_sha256"] == approval["executable_sha256"]
+            and item["uid"] == approval["uid"]
+        ]
+        if not matches:
+            # The exact record may already have been revoked by root.  Never
+            # delete a same-named but different approval.
+            if any(item["name"] == approval["name"] for item in values):
+                raise JsonInputError("affected approval identity no longer matches")
+            return True
+        revoke(self.approvals, approval["name"])
+        return True
+
+    @staticmethod
+    def _incident_match(
+        receipt: dict[str, Any],
+        record: dict[str, Any] | None,
+        approval: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        observed = receipt.get("observed") if isinstance(receipt.get("observed"), dict) else {}
+        executable = receipt.get("executable") if isinstance(receipt.get("executable"), dict) else {}
+        argv_sha256 = (
+            record.get("argv_sha256")
+            if record is not None
+            else observed.get("argv_sha256")
+        )
+        executable_sha256 = (
+            approval.get("executable_sha256")
+            if approval is not None
+            else executable.get("sha256")
+        )
+        uid = record.get("workload_uid") if record is not None else observed.get("uid")
+        if not isinstance(argv_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", argv_sha256):
+            raise JsonInputError("incident launch identity is unavailable")
+        if not isinstance(executable_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", executable_sha256):
+            executable_sha256 = "0" * 64
+        if isinstance(uid, bool) or not isinstance(uid, int) or uid < 1:
+            raise JsonInputError("incident workload identity is unavailable")
+        detector = receipt.get("detector") if isinstance(receipt.get("detector"), dict) else {}
+        profile = detector.get("profile")
+        return {
+            "argv_sha256": argv_sha256,
+            "executable_sha256": executable_sha256,
+            "profile": profile if isinstance(profile, str) else None,
+            "uid": uid,
+        }
+
+    @staticmethod
+    def _incident_workload(record: dict[str, Any] | None, receipt: dict[str, Any]) -> dict[str, Any]:
+        if record is not None:
+            return {
+                "boot_id": record["boot_id"],
+                "cgroup": record["cgroup"],
+                "cgroup_device": record["cgroup_device"],
+                "cgroup_inode": record["cgroup_inode"],
+                "run_id": record["run_id"],
+                "unit": record["unit"],
+                "uid": record["workload_uid"],
+            }
+        workload = receipt.get("workload")
+        if not isinstance(workload, dict):
+            raise JsonInputError("incident workload receipt identity is unavailable")
+        return {
+            "boot_id": workload["boot_id"],
+            "cgroup": workload["cgroup"],
+            "cgroup_device": workload["cgroup_device"],
+            "cgroup_inode": workload["cgroup_inode"],
+            "run_id": workload["run_id"],
+            "unit": workload["unit"],
+            "uid": workload["workload_uid"],
+        }
+
+    def _incident_sweep(self, incident_id: str) -> None:
+        lock = getattr(self, "incident_sweep_lock", None)
+        if lock is None:
+            return
+        with lock:
+            if getattr(self, "incident_sweep_active", False):
+                return
+            self.incident_sweep_active = True
+            try:
+                values = self._incident_values()
+                current = next(item for item in values if item["incident_id"] == incident_id)
+                recurrence = dict(current["recurrence"])
+                recurrence["sweep_count"] += 1
+                incident_store.update(self.incidents, current, recurrence=recurrence)
+                self.operations.append("incident-sweep")
+                # Reuse the existing bounded discovery and containment path.
+                # Nested response calls link receipts to this incident but do
+                # not recurse into another sweep while this flag is set.
+                self._scan_once(synchronous=True)
+            except (JsonInputError, OSError, RuntimeError):
+                self.incident_health_healthy = False
+            finally:
+                self.incident_sweep_active = False
+
+    def _post_containment_response(
+        self,
+        receipt: dict[str, Any],
+        *,
+        record: dict[str, Any] | None = None,
+        approval: dict[str, Any] | None = None,
+    ) -> None:
+        trigger_value = receipt.get("trigger")
+        trigger = trigger_value.get("kind") if isinstance(trigger_value, dict) else None
+        if not isinstance(trigger, str) or not (
+            trigger in {"NETWORK_BOUNDARY", "EXECUTION_BOUNDARY"}
+            or trigger.startswith("UNAPPROVED_")
+        ):
+            return
+        root = getattr(self, "incidents", None)
+        if root is None:
+            return
+        if receipt.get("result") != "TERMINATED":
+            return
+        try:
+            with self.incident_response_lock:
+                match = self._incident_match(receipt, record, approval)
+                values = self._incident_values()
+                existing = incident_store.find_match(
+                    values,
+                    argv_sha256=match["argv_sha256"],
+                    uid=match["uid"],
+                    executable_sha256=match["executable_sha256"],
+                    profile=match["profile"],
+                )
+                if existing is not None:
+                    linked = list(existing["linked_receipts"])
+                    receipt_hash = incident_store.receipt_digest(receipt)
+                    if receipt_hash not in linked:
+                        linked.append(receipt_hash)
+                    recurrence = dict(existing["recurrence"])
+                    recurrence["complete_matches"] += 1
+                    recurrence["contained_matches"] += 1
+                    incident_store.update(
+                        root,
+                        existing,
+                        linked_receipts=linked,
+                        recurrence=recurrence,
+                    )
+                    self.operations.append("incident-state")
+                    return
+                detector = receipt.get("detector") if isinstance(receipt.get("detector"), dict) else {}
+                evidence = detector.get("matched_evidence")
+                if not isinstance(evidence, list):
+                    evidence = []
+                incident = incident_store.create(
+                    root,
+                    receipt=receipt,
+                    policy=self.policy,
+                    catalogue_sha256=self.catalogue.digest,
+                    source_commit=self.policy["source_commit"],
+                    version=__version__,
+                    trigger=trigger,
+                    profile=match["profile"],
+                    evidence=[item for item in evidence if isinstance(item, str)],
+                    match=match,
+                    workload=self._incident_workload(record, receipt),
+                    approval=approval,
+                )
+                self.operations.append("incident-state")
+                revoked = self._revoke_exact_approval(approval)
+                response = dict(incident["response"])
+                response["approval_revoked"] = revoked
+                response["completed"] = revoked
+                response["response_completed_monotonic_ns"] = time.monotonic_ns()
+                incident = incident_store.update(root, incident, response=response)
+                self._incident_sweep(incident["incident_id"])
+        except (JsonInputError, OSError, RuntimeError):
+            # The kill and original receipt already succeeded.  A response
+            # persistence fault fails health closed and stops future starts;
+            # it never turns a successful containment into a false failure.
+            self.incident_health_healthy = False
+
     def _detection_sort_key(self, path: Path) -> tuple[int, str]:
         try:
             value = load_regular_json(path)
@@ -1187,6 +1465,7 @@ class Supervisor:
                 dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
             )
             self._store_detection(receipt)
+            self._post_containment_response(receipt)
             self._mark_discovered_runs_terminated(discovered_run_cgroups)
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
             receipt = self._detection_receipt(
@@ -1438,7 +1717,17 @@ class Supervisor:
                 ) or self._authorizes_protected_scope(
                     candidate.snapshot, scope_provenance
                 )
-                if not authorized:
+                # An active local lockdown turns an exact protected
+                # recurrence into an enforcement candidate even when a stale
+                # provenance record still makes it look authorised.  The
+                # comparison is conjunctive and bounded by the same argv,
+                # executable, uid and detector identities as the incident.
+                incident_match = self._incident_match_for_candidate(
+                    candidate.snapshot,
+                    detected,
+                    executable_sha256,
+                )
+                if not authorized or incident_match is not None:
                     unapproved.append(candidate)
             if not unapproved:
                 continue
@@ -1548,6 +1837,7 @@ class Supervisor:
             or time.monotonic_ns() - self.last_scan_completed_ns > SCAN_HEALTH_TIMEOUT_NS
             or self.discovery_failures >= MAX_DISCOVERY_FAILURES
             or not self.receipt_persistence_healthy
+            or not getattr(self, "incident_health_healthy", True)
             or time.monotonic_ns() < self.enforcement_saturation_until_ns
         ):
             return
@@ -1605,6 +1895,14 @@ class Supervisor:
                 # A malformed or missing boundary must still be contained, but
                 # must not produce a false network-boundary receipt.
                 trigger = "SUPERVISOR_FAILURE"
+            # Terminal storage removes launch provenance.  Capture the exact
+            # approval identity before containment so a post-containment local
+            # lockdown can revoke only the affected approval.
+            approval = (
+                self._approval_identity(record["run_id"])
+                if trigger in {"NETWORK_BOUNDARY", "EXECUTION_BOUNDARY"}
+                else None
+            )
             try:
                 path = validate_identity(identity)
                 self.operations.append("cgroup.kill")
@@ -1662,6 +1960,7 @@ class Supervisor:
             except (OSError, JsonInputError):
                 receipt["cleanup_update_error"] = True
             receipt["receipt_path"] = str(self._receipt_path(event_id))
+            self._post_containment_response(receipt, record=record, approval=approval)
             self.completed[record["run_id"]] = receipt
             return receipt
 
@@ -2041,10 +2340,17 @@ class Supervisor:
             raise JsonInputError("max_memory_mib must be from 64 to 131072")
         if isinstance(cpu_quota, bool) or not isinstance(cpu_quota, int) or not 10 <= cpu_quota <= 10_000:
             raise JsonInputError("cpu_quota_percent must be from 10 to 10000")
+        if not self._incident_status()["healthy"]:
+            raise JsonInputError("local lockdown state is unavailable; root recovery is required")
         with self.start_lock, self.approval_lock:
             if name_path(self.names, name).exists() or self._active_exists():
                 raise JsonInputError(
                     "one protected workload is already active or name is unavailable"
+                )
+            blocked = self._incident_block_for_start(summary["argv_sha256"])
+            if blocked is not None:
+                raise JsonInputError(
+                    f"INCIDENT_LOCKDOWN: exact protected relaunch is blocked ({blocked['incident_id']})"
                 )
             try:
                 approval = match_launch(
@@ -2421,6 +2727,7 @@ class Supervisor:
             )
             boundary_primitives = primitives_available()
             execution_primitives = seccomp_primitive_available()
+            incident_status = self._incident_status()
             ready = (
                 available
                 and pidfd_available()
@@ -2429,6 +2736,7 @@ class Supervisor:
                 and boundary_primitives["supported"]
                 and execution_primitives["supported"]
                 and scan_healthy
+                and incident_status["healthy"]
             )
             return {
                 "autonomous_discovery": ready,
@@ -2441,6 +2749,7 @@ class Supervisor:
                 "catalogue": public_catalogue(self.catalogue),
                 "cgroup_v2": available,
                 "execution_boundary": execution_primitives,
+                "incidents": incident_status,
                 "discovery": {
                     "consecutive_failures": self.discovery_failures,
                     "last_scan_duration_ms": self.last_scan_duration_ns / 1_000_000,
@@ -2474,6 +2783,7 @@ class Supervisor:
                 ),
                 "exec_policy_id": record.get("exec_policy_id", "legacy"),
                 "exec_policy_digest": record.get("exec_policy_digest", "0" * 64),
+                "incident_lockdown": self._incident_status()["lockdown"],
                 "workload_uid": record["workload_uid"],
             }
         if action == "list" and not args:
@@ -2482,6 +2792,8 @@ class Supervisor:
                 for path in sorted(self.names.glob("*.json"))
             ]
             return {"runs": runs}
+        if action in {"approve", "revoke", "exec_policy_create", "exec_policy_revoke"} and not self._incident_status()["healthy"]:
+            raise JsonInputError("local lockdown state is unavailable; root recovery is required")
         if action == "approve" and set(args) == {"argv", "name", "uid"}:
             with self.approval_lock:
                 value = create_approval(
@@ -2517,6 +2829,48 @@ class Supervisor:
         if action == "exec_policy_revoke" and set(args) == {"policy_id"}:
             with self.approval_lock:
                 return revoke_execution_policy(self.exec_policies, args["policy_id"])
+        if action == "incidents" and not args:
+            return {"incidents": [incident_store.summary(item) for item in self._incident_values()]}
+        if action == "incident_show" and set(args) == {"incident_id"}:
+            values = self._incident_values()
+            value = next(
+                (item for item in values if item["incident_id"] == args["incident_id"]),
+                None,
+            )
+            if value is None:
+                raise JsonInputError("incident is unavailable")
+            return incident_store.public_detail(value)
+        if action in {"incident_acknowledge", "incident_clear"} and set(args) == {"incident_id"}:
+            values = self._incident_values()
+            value = next(
+                (item for item in values if item["incident_id"] == args["incident_id"]),
+                None,
+            )
+            if value is None:
+                raise JsonInputError("incident is unavailable")
+            if action == "incident_acknowledge":
+                if value["state"] == "CLEARED":
+                    raise JsonInputError("cleared incident cannot be acknowledged")
+                updated = incident_store.update(
+                    self.incidents,
+                    value,
+                    acknowledgement={"monotonic_ns": time.monotonic_ns(), "uid": 0},
+                    state="ACKNOWLEDGED",
+                )
+            else:
+                if value["state"] == "CLEARED":
+                    return incident_store.public_detail(value)
+                response = dict(value["response"])
+                response["relaunch_suppressed"] = False
+                updated = incident_store.update(
+                    self.incidents,
+                    value,
+                    clearance={"monotonic_ns": time.monotonic_ns(), "uid": 0},
+                    response=response,
+                    state="CLEARED",
+                )
+            self.operations.append("incident-state")
+            return incident_store.public_detail(updated)
         if action == "detections" and not args:
             values: list[dict[str, Any]] = []
             paths = [*self.detections.glob("*.json"), *self.receipts.glob("*.json")]

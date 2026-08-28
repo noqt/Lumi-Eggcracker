@@ -45,6 +45,8 @@ class SupportBundleTests(unittest.TestCase):
             }
         if action == "list":
             return {"runs": [{"name": "private-name", "state": "TERMINATED", "unit": "/private"}]}
+        if action == "incidents":
+            return {"incidents": []}
         raise AssertionError(action)
 
     def test_collect_is_redacted_and_bounded(self) -> None:
