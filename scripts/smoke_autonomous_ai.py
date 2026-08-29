@@ -139,7 +139,11 @@ def one(
             receipt = receipt_after(before)
             stop(unapproved)
             unapproved = None
-            if receipt.get("trigger", {}).get("kind") != "UNAPPROVED_AI_MATCH" or receipt.get("detector", {}).get("profile") != "llama.cpp" or canary.poll() is not None:
+            if (
+                receipt.get("trigger", {}).get("kind") != "UNAPPROVED_AI_MATCH"
+                or receipt.get("detector", {}).get("profile") != "content.gguf-llama"
+                or canary.poll() is not None
+            ):
                 raise RuntimeError("unapproved real AI result or canary is invalid")
             approval = call(
                 operator,
