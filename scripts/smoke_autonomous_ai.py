@@ -131,7 +131,10 @@ def one(
         canary = subprocess.Popen(["/bin/sleep", "180"], start_new_session=True)
         unapproved: subprocess.Popen[bytes] | None = None
         allowed_started = False
-        name = f"real-qwen-{index}"
+        # Approval names must remain unique after an interrupted smoke.  A
+        # fixed name can strand a prior exact approval and make the next
+        # repetition fail before it exercises the product.
+        name = f"real-qwen-{index}-{os.urandom(4).hex()}"
         run_name = f"real-qwen-run-{index}-{os.urandom(4).hex()}"
         try:
             before = set(DETECTIONS.glob("*.json"))
