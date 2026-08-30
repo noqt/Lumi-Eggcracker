@@ -18,6 +18,7 @@ except OSError:
 else:
     raise SystemExit("refusing a symlinked privileged uninstaller")
 
+import argparse
 import grp
 import hashlib
 import json
@@ -158,7 +159,11 @@ def empty_stopped_service_cgroup(path: Path) -> None:
     raise SystemExit(f"stopped service cgroup remained populated: {path}")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Remove a manifest-verified Lumi Eggcracker installation"
+    )
+    parser.parse_args(argv)
     if os.geteuid() != 0:
         raise SystemExit("uninstaller must run as root")
     manifest_path = STATE / "install-manifest.json"
