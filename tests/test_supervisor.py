@@ -232,6 +232,7 @@ class SupervisorTests(unittest.TestCase):
                     provenance,
                     profile="content.gguf-llama",
                     scope=(anchor_candidate, child_candidate),
+                    independently_complete=False,
                 )
             )
             self.assertTrue(
@@ -240,6 +241,7 @@ class SupervisorTests(unittest.TestCase):
                     provenance,
                     profile="content.gguf-ollama",
                     scope=(anchor_candidate, child_candidate),
+                    independently_complete=False,
                 )
             )
             self.assertFalse(
@@ -248,6 +250,16 @@ class SupervisorTests(unittest.TestCase):
                     provenance,
                     profile="content.gguf-ollama",
                     scope=(child_candidate,),
+                    independently_complete=False,
+                )
+            )
+            self.assertFalse(
+                supervisor._authorizes_protected_scope(
+                    child,
+                    provenance,
+                    profile="content.gguf-ollama",
+                    scope=(anchor_candidate, child_candidate),
+                    independently_complete=True,
                 )
             )
 

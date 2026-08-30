@@ -744,6 +744,7 @@ class Supervisor:
         *,
         profile: str | None = None,
         scope: tuple[_EvidenceCandidate, ...] = (),
+        independently_complete: bool,
     ) -> bool:
         """Authorize a partial topology worker anchored by the exact launch.
 
@@ -751,10 +752,12 @@ class Supervisor:
         time was not present at the pre-exec gate.  A bounded split-topology
         match may use the root-owned launch provenance only while the exact
         approved anchor is itself a live member of that same detection scope.
-        An independently complete descendant is evaluated in its own scope and
-        cannot inherit approval merely by sharing the delegated cgroup.  Direct
-        profiles never receive this closure.
+        An independently complete descendant can never receive this closure,
+        even while the approved anchor is live in the same related component.
+        Direct profiles never receive this closure.
         """
+        if independently_complete:
+            return False
         if profile not in {"content.gguf-ollama", "content.safetensors-vllm"}:
             return False
         if provenance is None or snapshot.uid != self.policy["workload_uid"]:
@@ -1816,6 +1819,7 @@ class Supervisor:
                     scope_provenance,
                     profile=detected.profile,
                     scope=scope,
+                    independently_complete=candidate.fast_match is not None,
                 )
                 # An active local lockdown turns an exact protected
                 # recurrence into an enforcement candidate even when a stale
