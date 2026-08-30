@@ -383,22 +383,26 @@ class Supervisor:
         record = validate_run(record)
         if not hasattr(self, "active_cgroups"):
             self.active_cgroups = set()
+        pointer = name_path(self.names, record["name"])
+        expected_pointer = {"run_id": record["run_id"]}
+        pointer_missing = not pointer.exists() and not pointer.is_symlink()
+        if not pointer_missing:
+            try:
+                current = load_regular_json(pointer)
+            except JsonInputError:
+                raise JsonInputError("workload name index is invalid")
+            if current != expected_pointer:
+                raise JsonInputError("workload name index collision")
+        if pointer_missing:
+            # A reserved name is safe even if the following record write
+            # fails; allowing reuse after a partial start is not.
+            write_atomic(pointer, expected_pointer)
+        self.operations.append("durable-state")
+        write_atomic(run_path(self.runs, record["run_id"]), record)
         if record["state"] in ACTIVE_STATES:
             self.active_cgroups.add(record["cgroup"])
         else:
             self.active_cgroups.discard(record["cgroup"])
-        self.operations.append("durable-state")
-        write_atomic(run_path(self.runs, record["run_id"]), record)
-        pointer = name_path(self.names, record["name"])
-        if record["state"] in ACTIVE_STATES:
-            write_atomic(pointer, {"run_id": record["run_id"]})
-        elif pointer.exists():
-            try:
-                current = load_regular_json(pointer)
-                if current == {"run_id": record["run_id"]}:
-                    pointer.unlink()
-            except JsonInputError:
-                raise JsonInputError("workload name index is invalid")
         if record["state"] not in ACTIVE_STATES and hasattr(self, "launches"):
             provenance_path(self.launches, record["run_id"]).unlink(missing_ok=True)
             self._clear_stage(record["run_id"])
@@ -445,7 +449,7 @@ class Supervisor:
         return record
 
     def _latest_by_name(self, name: str) -> dict[str, Any]:
-        """Resolve a completed run only when its name is no longer active."""
+        """Resolve retained history for an unavailable or completed name."""
         candidates: list[dict[str, Any]] = []
         for path in self.runs.glob("*.json"):
             try:
@@ -457,6 +461,33 @@ class Supervisor:
         if not candidates:
             raise JsonInputError("workload name is unavailable")
         return max(candidates, key=lambda item: int(item["created_monotonic_ns"]))
+
+    def _backfill_name_tombstones(self) -> None:
+        """Reserve names created by releases that removed terminal pointers."""
+        latest: dict[str, dict[str, Any]] = {}
+        for path in self.runs.glob("*.json"):
+            try:
+                record = load_run(self.runs, path.stem)
+            except JsonInputError:
+                continue
+            prior = latest.get(record["name"])
+            if prior is None or int(record["created_monotonic_ns"]) > int(
+                prior["created_monotonic_ns"]
+            ):
+                latest[record["name"]] = record
+        for name, record in latest.items():
+            pointer = name_path(self.names, name)
+            if pointer.exists() or pointer.is_symlink():
+                value = load_regular_json(pointer)
+                run_id = value.get("run_id")
+                if (
+                    set(value) != {"run_id"}
+                    or not isinstance(run_id, str)
+                    or not RUN_ID.fullmatch(run_id)
+                ):
+                    raise JsonInputError("workload name index is invalid")
+                continue
+            write_atomic(pointer, {"run_id": record["run_id"]})
 
     def _receipt_path(self, event_id: str) -> Path:
         return self.receipts / f"{event_id}.json"
@@ -531,6 +562,7 @@ class Supervisor:
             incident_store.compact(self.incidents)
         except (JsonInputError, OSError):
             self.incident_health_healthy = False
+        self._backfill_name_tombstones()
         self._recover()
         self.quarantine_root = self._prepare_quarantine()
         self._scan_synchronously()
@@ -2532,7 +2564,12 @@ class Supervisor:
         if not self._incident_status()["healthy"]:
             raise JsonInputError("local lockdown state is unavailable; root recovery is required")
         with self.start_lock, self.approval_lock:
-            if name_path(self.names, name).exists() or self._active_exists():
+            reserved_name = name_path(self.names, name)
+            if (
+                reserved_name.exists()
+                or reserved_name.is_symlink()
+                or self._active_exists()
+            ):
                 raise JsonInputError(
                     "one protected workload is already active or name is unavailable"
                 )
@@ -2980,11 +3017,7 @@ class Supervisor:
             }
         if action == "start":
             return self._start(args)
-        if action == "status" and set(args) == {"name"}:
-            try:
-                record = self._load(args["name"])
-            except JsonInputError:
-                record = self._latest_by_name(args["name"])
+        def public_run(record: dict[str, Any]) -> dict[str, Any]:
             return {
                 "name": record["name"],
                 "run_id": record["run_id"],
@@ -3000,11 +3033,20 @@ class Supervisor:
                 "incident_lockdown": self._incident_status()["lockdown"],
                 "workload_uid": record["workload_uid"],
             }
+
+        if action == "status" and set(args) == {"name"}:
+            try:
+                record = self._load(args["name"])
+            except JsonInputError:
+                record = self._latest_by_name(args["name"])
+            return public_run(record)
         if action == "list" and not args:
-            runs = [
-                self.handle({"action": "status", "args": {"name": path.stem}})
-                for path in sorted(self.names.glob("*.json"))
-            ]
+            runs = []
+            for path in sorted(self.names.glob("*.json")):
+                try:
+                    runs.append(public_run(self._load(path.stem)))
+                except JsonInputError:
+                    continue
             return {"runs": runs}
         if action in {"approve", "revoke", "exec_policy_create", "exec_policy_revoke"} and not self._incident_status()["healthy"]:
             raise JsonInputError("local lockdown state is unavailable; root recovery is required")

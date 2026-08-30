@@ -817,7 +817,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual("RUNNING", value["state"])
         stored.assert_not_called()
 
-    def test_status_resolves_the_latest_terminal_run_after_name_reuse_is_enabled(self) -> None:
+    def test_status_resolves_retained_terminal_history(self) -> None:
         supervisor = self._instance()
         item = record()
         item["state"] = "COMPLETED_ALLOWED"
@@ -826,7 +826,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual("COMPLETED_ALLOWED", value["state"])
         stored.assert_not_called()
 
-    def test_run_records_are_keyed_by_run_id_and_name_pointer_is_removed_when_terminal(self) -> None:
+    def test_terminal_run_keeps_name_tombstone(self) -> None:
         supervisor = self._instance()
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -838,7 +838,61 @@ class SupervisorTests(unittest.TestCase):
             self.assertTrue((supervisor.names / "demo.json").is_file())
             item["state"] = "TERMINATED"
             supervisor._store(item)
-            self.assertFalse((supervisor.names / "demo.json").exists())
+            self.assertEqual(
+                {"run_id": "a" * 24},
+                __import__("json").loads(
+                    (supervisor.names / "demo.json").read_text(encoding="utf-8")
+                ),
+            )
+
+    def test_terminal_name_tombstone_is_not_listed_as_active(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            item = record()
+            supervisor._store(item)
+            item["state"] = "TERMINATED"
+            supervisor._store(item)
+            self.assertEqual({"runs": []}, supervisor.handle({"action": "list", "args": {}}))
+
+    def test_backfill_reserves_names_from_legacy_terminal_records(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            supervisor.runs.mkdir()
+            supervisor.names.mkdir()
+            item = record()
+            item["state"] = "TERMINATED"
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(
+                __import__("json").dumps(item), encoding="utf-8"
+            )
+            supervisor._backfill_name_tombstones()
+            self.assertTrue((supervisor.names / "demo.json").is_file())
+
+    def test_store_rejects_a_second_run_using_a_reserved_name(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            first = record()
+            supervisor._store(first)
+            first["state"] = "TERMINATED"
+            supervisor._store(first)
+            replacement_id = "c" * 24
+            replacement = {
+                **record(),
+                "cgroup": f"/system.slice/lumi-eggcracker-workload-{replacement_id}.service",
+                "run_id": replacement_id,
+                "unit": f"lumi-eggcracker-workload-{replacement_id}.service",
+            }
+            with self.assertRaisesRegex(JsonInputError, "name index collision"):
+                supervisor._store(replacement)
+            self.assertFalse((supervisor.runs / ("c" * 24 + ".json")).exists())
 
     def test_autonomous_kill_terminal_state_wins_completion_race(self) -> None:
         supervisor = self._instance()
