@@ -810,6 +810,60 @@ class SupervisorTests(unittest.TestCase):
                 "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
             )
 
+    def test_autonomous_kill_marks_owned_run_before_publishing_receipt(self) -> None:
+        supervisor = self._instance()
+        supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
+        target = ProcessIdentity(42, 100)
+        snapshot = MagicMock(identity=target)
+        detected = MagicMock(profile="content.gguf-llama")
+        containment = MagicMock()
+        order: list[str] = []
+
+        with (
+            patch.object(
+                supervisor,
+                "_discovered_run_cgroups",
+                return_value={
+                    "/system.slice/lumi-eggcracker-workload-"
+                    + "a" * 24
+                    + ".service"
+                },
+            ),
+            patch("lumi_eggcracker.supervisor.contain_many", return_value=containment),
+            patch.object(
+                supervisor,
+                "_detection_receipt",
+                return_value={
+                    "event_id": "e" * 24,
+                    "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+                },
+            ),
+            patch.object(
+                supervisor,
+                "_mark_discovered_runs_terminated",
+                side_effect=lambda _cgroups: order.append("mark"),
+            ),
+            patch.object(
+                supervisor,
+                "_store_detection",
+                side_effect=lambda _receipt: order.append("publish"),
+            ),
+            patch.object(supervisor, "_post_containment_response"),
+        ):
+            supervisor._enforce_discovery(
+                snapshot,
+                detected,
+                (),
+                (),
+                1,
+                2,
+                None,
+                "e" * 24,
+                targets={target},
+            )
+
+        self.assertEqual(["mark", "publish"], order)
+
     def test_correlation_requires_live_same_uid_parent_or_sibling_relation(self) -> None:
         supervisor = self._instance()
         root = ProcessIdentity(10, 100)

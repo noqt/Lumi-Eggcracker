@@ -1521,9 +1521,14 @@ class Supervisor:
             receipt["receipt_written_utc"] = (
                 dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
             )
+            # The selected run watcher can observe the emptied source cgroup
+            # as an ordinary completion while autonomous containment is
+            # finishing.  Resolve that race before publishing the detection
+            # receipt: once a kill receipt is visible, every affected owned
+            # run must already have the unambiguous TERMINATED state.
+            self._mark_discovered_runs_terminated(discovered_run_cgroups)
             self._store_detection(receipt)
             self._post_containment_response(receipt)
-            self._mark_discovered_runs_terminated(discovered_run_cgroups)
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
             receipt = self._detection_receipt(
                 event_id=event_id,
