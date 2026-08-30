@@ -2008,9 +2008,13 @@ class Supervisor:
                 execution_boundary=execution_boundary,
             )
             try:
-                self._write_receipt(receipt, event_id)
                 record["state"] = "TERMINATED"
                 self._store(record)
+                # Publish a successful receipt only after the affected run's
+                # terminal state is durable.  External readers must never
+                # observe a kill receipt alongside RUNNING or
+                # COMPLETED_ALLOWED state for the same owned workload.
+                self._write_receipt(receipt, event_id)
             except Exception as error:
                 record["state"] = "CONTAINED_RECEIPT_FAILED"
                 self._store(record)

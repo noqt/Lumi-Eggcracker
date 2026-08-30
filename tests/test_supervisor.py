@@ -702,6 +702,10 @@ class SupervisorTests(unittest.TestCase):
             result = supervisor._contain(record(), "OPERATOR", 10)
         self.assertEqual("TERMINATED", result["result"])
         self.assertEqual("cgroup.kill", supervisor.operations[0])
+        self.assertLess(
+            supervisor.operations.index("durable-state"),
+            supervisor.operations.index("durable-receipt"),
+        )
         self.assertLess(supervisor.operations.index("cgroup.kill"), supervisor.operations.index("durable-receipt"))
         self.assertLess(supervisor.operations.index("durable-receipt"), supervisor.operations.index("cleanup"))
 
