@@ -221,7 +221,7 @@ def read_install_journal(
     return value
 
 
-def validate_recovery_target(path: Path) -> None:
+def validate_recovery_target(path: Path, operator: pwd.struct_passwd) -> None:
     """Reject aliases before removing a target authorised by a valid journal."""
     try:
         metadata = path.lstat()
@@ -229,11 +229,12 @@ def validate_recovery_target(path: Path) -> None:
         return
     directory_targets = {LIB, ETC, STATE, RUNTIME, WATCHDOG_RUNTIME}
     expected_type = stat.S_IFDIR if path in directory_targets else stat.S_IFREG
+    allowed_gids = {0, operator.pw_gid} if path == RUNTIME else {0}
     if (
         stat.S_IFMT(metadata.st_mode) != expected_type
         or path.is_symlink()
         or metadata.st_uid != 0
-        or metadata.st_gid != 0
+        or metadata.st_gid not in allowed_gids
         or (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1)
     ):
         raise RuntimeError(f"interrupted install target has unsafe metadata: {path}")
@@ -275,7 +276,7 @@ def recover_interrupted_install(
 ) -> None:
     journal = read_install_journal(release, operator, artifact_sha256)
     for path in TARGETS:
-        validate_recovery_target(path)
+        validate_recovery_target(path, operator)
     run(["/usr/bin/systemctl", "disable", "--now", "lumi-eggcracker.service"])
     run(
         [
