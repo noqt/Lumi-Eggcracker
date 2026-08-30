@@ -103,10 +103,11 @@ sudo /usr/bin/python3 -I -S scripts/first_kill.py \
 
 The preflight is read-only: it checks the operator, supported host features,
 empty installation targets, required tool availability, and that the local
-annotated published-release tag resolves to its qualified commit. It makes no network
-request and creates no workspace, GPG home, build, installation or service.
-It does not verify the release signature, downloaded assets, functional build,
-installation or containment; those checks happen only in the full run.
+published-release reference is an annotated tag resolving to a commit. It makes
+no network request and creates no workspace, GPG home, build, installation or
+service. It does not verify the tag signature, downloaded assets, functional
+build, installation or containment; the full run verifies the signature and
+requires the signed tag commit to match the release manifest.
 
 ### Probe the containment primitive
 
@@ -245,7 +246,7 @@ candidate; names alone never trigger a kill.
 
 To make a report reproducible, create a local JSON bundle containing host
 compatibility, supervisor health, workload counts and redacted detection
-summaries:
+summaries after Eggcracker is installed:
 
 ```sh
 sudo /usr/bin/python3 -I -S scripts/support_bundle.py \

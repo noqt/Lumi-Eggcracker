@@ -6,6 +6,8 @@
   0.8.1 and 0.9 milestones.
 - Bind the candidate to deterministic qualification, packaged-artifact
   verification and the adaptive campaign evidence plan.
+- Make the public first-kill path default to `v1.0.0` and make the support
+  helper use the installed, root-owned zipapp shipped by the verified bundle.
 - Keep publication, signing, tagging and external deployment as separate
   decisions.
 

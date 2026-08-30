@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+TAG_COMMIT = "a" * 40
 SPEC = importlib.util.spec_from_file_location("first_kill", ROOT / "scripts" / "first_kill.py")
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("cannot load first-kill script")
@@ -20,6 +21,9 @@ SPEC.loader.exec_module(first_kill)
 
 
 class FirstKillTests(unittest.TestCase):
+    def test_default_release_identity_is_the_1_0_candidate(self) -> None:
+        self.assertEqual("v1.0.0", first_kill.DEFAULT_TAG)
+
     def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
         output = io.StringIO()
         with (
@@ -29,7 +33,7 @@ class FirstKillTests(unittest.TestCase):
             mock.patch.object(
                 first_kill,
                 "local_release_identity",
-                return_value=first_kill.DEFAULT_TAG_COMMIT,
+                return_value=TAG_COMMIT,
             ),
             mock.patch.object(first_kill, "prepare_workspace") as prepare_workspace,
             mock.patch.object(first_kill, "release_files") as release_files,
@@ -55,6 +59,8 @@ class FirstKillTests(unittest.TestCase):
             forbidden.assert_not_called()
         summary = json.loads(output.getvalue())
         self.assertEqual("PREFLIGHT_PASSED", summary["result"])
+        self.assertEqual(TAG_COMMIT, summary["tag_commit"])
+        self.assertNotIn("qualified_commit", summary)
         self.assertFalse(summary["changes_made"])
         self.assertNotIn("/checkout", output.getvalue())
 
@@ -89,16 +95,25 @@ class FirstKillTests(unittest.TestCase):
         self.assertNotIn(canary, errors.getvalue())
         self.assertIn("operator account does not exist", errors.getvalue())
 
-    def test_local_release_identity_requires_annotated_pinned_tag(self) -> None:
+    def test_local_release_identity_requires_annotated_tag(self) -> None:
         annotated = mock.Mock(returncode=0, stdout="tag\n")
-        resolved = mock.Mock(returncode=0, stdout=f"{first_kill.DEFAULT_TAG_COMMIT}\n")
+        resolved = mock.Mock(returncode=0, stdout=f"{TAG_COMMIT}\n")
         with mock.patch.object(first_kill, "run", side_effect=[annotated, resolved]):
             result = first_kill.local_release_identity(Path("/checkout"), first_kill.DEFAULT_TAG)
-        self.assertEqual(first_kill.DEFAULT_TAG_COMMIT, result)
+        self.assertEqual(TAG_COMMIT, result)
+
+    def test_local_release_identity_rejects_non_commit_output(self) -> None:
+        annotated = mock.Mock(returncode=0, stdout="tag\n")
+        malformed = mock.Mock(returncode=0, stdout="not-a-commit\n")
+        with (
+            mock.patch.object(first_kill, "run", side_effect=[annotated, malformed]),
+            self.assertRaisesRegex(first_kill.FirstKillError, "does not resolve"),
+        ):
+            first_kill.local_release_identity(Path("/checkout"), first_kill.DEFAULT_TAG)
 
     def test_local_release_identity_rejects_lightweight_tag(self) -> None:
         lightweight = mock.Mock(returncode=0, stdout="commit\n")
-        resolved = mock.Mock(returncode=0, stdout=f"{first_kill.DEFAULT_TAG_COMMIT}\n")
+        resolved = mock.Mock(returncode=0, stdout=f"{TAG_COMMIT}\n")
         with (
             mock.patch.object(first_kill, "run", side_effect=[lightweight, resolved]),
             self.assertRaisesRegex(first_kill.FirstKillError, "not an annotated tag"),

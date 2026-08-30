@@ -33,8 +33,7 @@ except ImportError:  # pragma: no cover - first-kill is a native Linux command
 
 
 REPOSITORY = "noqt/Lumi-Eggcracker"
-DEFAULT_TAG = "v0.5.0"
-DEFAULT_TAG_COMMIT = "eb342808f56cdc213c0861726d5309a146965bef"
+DEFAULT_TAG = "v1.0.0"
 RELEASE_KEY_FINGERPRINT = "53786DEB001459956A2E1B86A3F29F7A27636DC7"
 WORKLOAD_USER = "lumi-eggcracker-workload"
 INSTALL_TARGETS = (
@@ -236,9 +235,12 @@ def local_release_identity(root: Path, tag: str) -> str:
         raise FirstKillError("could not inspect the qualified local release tag") from error
     if kind.returncode or kind.stdout.strip() != "tag":
         raise FirstKillError(f"the local {tag} reference is missing or is not an annotated tag")
-    if resolved.returncode or resolved.stdout.strip() != DEFAULT_TAG_COMMIT:
-        raise FirstKillError(f"the local {tag} tag does not resolve to the qualified commit")
-    return DEFAULT_TAG_COMMIT
+    commit = resolved.stdout.strip()
+    if resolved.returncode or len(commit) != 40 or any(
+        character not in "0123456789abcdef" for character in commit.lower()
+    ):
+        raise FirstKillError(f"the local {tag} tag does not resolve to a commit")
+    return commit
 
 
 def run_preflight(operator_value: str | None, tag: str) -> int:
@@ -258,9 +260,9 @@ def run_preflight(operator_value: str | None, tag: str) -> int:
                     "local_annotated_tag_identity",
                 ],
                 "mode": "preflight-only",
-                "qualified_commit": commit,
                 "result": "PREFLIGHT_PASSED",
                 "tag": tag,
+                "tag_commit": commit,
             },
             indent=2,
             sort_keys=True,
@@ -297,7 +299,7 @@ def verify_tag(root: Path, tag: str, key: Path) -> str:
 def release_files(tag: str, workspace: Path) -> tuple[Path, Path]:
     version = tag.removeprefix("v")
     if not version.replace(".", "").isdigit() or version.count(".") != 2:
-        raise FirstKillError("tag must look like v0.5.0")
+        raise FirstKillError("tag must look like v1.0.0")
     base = f"https://github.com/{REPOSITORY}/releases/download/{tag}"
     sums = workspace / "SHA256SUMS"
     bundle = workspace / f"lumi-eggcracker-{version}-linux.zip"

@@ -1,15 +1,57 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from lumi_eggcracker import support_bundle
 from lumi_eggcracker.jsonio import JsonInputError
 
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_SPEC = importlib.util.spec_from_file_location(
+    "support_bundle_script", ROOT / "scripts" / "support_bundle.py"
+)
+if SCRIPT_SPEC is None or SCRIPT_SPEC.loader is None:
+    raise RuntimeError("cannot load support-bundle script")
+support_bundle_script = importlib.util.module_from_spec(SCRIPT_SPEC)
+SCRIPT_SPEC.loader.exec_module(support_bundle_script)
+
 
 class SupportBundleTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "installed helper is native-Linux behavior")
+    def test_release_helper_delegates_to_installed_zipapp(self) -> None:
+        installed = Path("/usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz")
+        with (
+            mock.patch.object(support_bundle_script.os, "geteuid", return_value=0),
+            mock.patch.object(
+                support_bundle_script,
+                "validated_installed_app",
+                return_value=installed,
+            ),
+            mock.patch.object(
+                support_bundle_script.os,
+                "execv",
+                side_effect=OSError("sentinel"),
+            ) as execute,
+            self.assertRaisesRegex(OSError, "sentinel"),
+        ):
+            support_bundle_script.main(["--output", "/tmp/support.json"])
+        execute.assert_called_once_with(
+            "/usr/bin/python3",
+            [
+                "/usr/bin/python3",
+                "-I",
+                "-S",
+                str(installed),
+                "support-bundle",
+                "--output",
+                "/tmp/support.json",
+            ],
+        )
+
     @staticmethod
     def query(action: str, **_args: object) -> dict[str, object]:
         if action == "doctor":
