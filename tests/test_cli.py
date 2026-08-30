@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 from lumi_eggcracker.cli import main
@@ -61,3 +61,25 @@ class CliTests(unittest.TestCase):
     def test_execution_policy_create_requires_root(self) -> None:
         with patch("lumi_eggcracker.cli.os.geteuid", return_value=1001, create=True):
             self.assertEqual(4, main(["exec-policy", "create", "--name", "demo", "--", "/bin/sh"]))
+
+    def test_duplicate_identifier_options_are_rejected_before_request(self) -> None:
+        policy_a = "a" * 24
+        policy_b = "b" * 24
+        cases = (
+            ["start", "--name", "first", "--name", "second", "--max-pids", "8", "--", "/bin/true"],
+            ["start", "--name", "demo", "--exec-policy", policy_a, "--exec-policy", policy_b, "--max-pids", "8", "--", "/bin/true"],
+            ["kill", "--name", "first", "--name", "second", "--receipt", "/tmp/receipt.json"],
+            ["status", "--name", "first", "--name", "second"],
+            ["approve", "--name", "first", "--name", "second", "--uid", "1001", "--", "/bin/true"],
+            ["revoke", "--name", "first", "--name", "second"],
+            ["exec-policy", "create", "--name", "first", "--name", "second", "--", "/bin/true"],
+            ["exec-policy", "revoke", "--policy-id", policy_a, "--policy-id", policy_b],
+        )
+        for values in cases:
+            with self.subTest(values=values), patch(
+                "lumi_eggcracker.cli.request"
+            ) as request, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    main(values)
+                self.assertEqual(2, raised.exception.code)
+                request.assert_not_called()

@@ -17,39 +17,67 @@ from .support_bundle import main as support_bundle_main
 from .watchdog import main as watchdog_main
 
 
+class _RejectDuplicateIdentifier(argparse.Action):
+    """Accept one identifier option and fail closed on a repeated spelling."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        marker = f"_eggcracker_seen_{self.dest}"
+        if getattr(namespace, marker, False):
+            raise argparse.ArgumentError(
+                self,
+                f"{option_string or self.dest} may only be specified once",
+            )
+        setattr(namespace, marker, True)
+        setattr(namespace, self.dest, values)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="eggcracker")
     commands = parser.add_subparsers(dest="command", required=True)
     start = commands.add_parser("start", help="launch an explicitly selected protected workload")
-    start.add_argument("--name", required=True)
+    start.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     start.add_argument("--max-pids", required=True, type=int)
     start.add_argument("--max-memory-mib", default=2048, type=int)
     start.add_argument("--cpu-quota-percent", default=400, type=int)
-    start.add_argument("--exec-policy", help="root-created sealed-exec policy identifier")
+    start.add_argument(
+        "--exec-policy",
+        action=_RejectDuplicateIdentifier,
+        help="root-created sealed-exec policy identifier",
+    )
     start.add_argument("argv", nargs=argparse.REMAINDER)
     kill = commands.add_parser("kill", help="terminate one protected workload")
-    kill.add_argument("--name", required=True)
+    kill.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     kill.add_argument("--receipt", required=True, type=Path)
     status = commands.add_parser("status", help="show one protected workload")
-    status.add_argument("--name", required=True)
+    status.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     commands.add_parser("list", help="list protected workloads")
     approve = commands.add_parser("approve", help="approve one exact AI runtime invocation")
-    approve.add_argument("--name", required=True)
+    approve.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     approve.add_argument("--uid", required=True, type=int)
     approve.add_argument("--max-pids", default=64, type=int)
     approve.add_argument("--max-memory-mib", default=2048, type=int)
     approve.add_argument("--cpu-quota-percent", default=400, type=int)
     approve.add_argument("argv", nargs=argparse.REMAINDER)
     revoke = commands.add_parser("revoke", help="revoke one exact AI runtime approval")
-    revoke.add_argument("--name", required=True)
+    revoke.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     commands.add_parser("approvals", help="list exact AI runtime approvals")
     exec_policy = commands.add_parser("exec-policy", help="manage root-created executable policies")
     exec_commands = exec_policy.add_subparsers(dest="exec_action", required=True)
     create_policy = exec_commands.add_parser("create", help="create an immutable executable policy")
-    create_policy.add_argument("--name", required=True)
+    create_policy.add_argument(
+        "--name", required=True, action=_RejectDuplicateIdentifier
+    )
     create_policy.add_argument("paths", nargs=argparse.REMAINDER)
     revoke_policy = exec_commands.add_parser("revoke", help="revoke an executable policy")
-    revoke_policy.add_argument("--policy-id", required=True)
+    revoke_policy.add_argument(
+        "--policy-id", required=True, action=_RejectDuplicateIdentifier
+    )
     exec_commands.add_parser("list", help="list executable policies")
     commands.add_parser("detections", help="list autonomous containment summaries")
     commands.add_parser("incidents", help="list bounded local lockdown incidents")
