@@ -192,11 +192,11 @@ class SupervisorTests(unittest.TestCase):
         self.assertTrue(supervisor._managed(snapshot))
         self.assertFalse(supervisor._discovery_excluded(snapshot))
 
-    def test_approved_cgroup_closure_is_limited_to_topology_profiles(self) -> None:
+    def test_topology_closure_requires_live_exact_anchor_in_detection_scope(self) -> None:
         supervisor = self._instance()
         cgroup = "/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service"
         supervisor.active_cgroups = {cgroup}
-        snapshot = ProcessSnapshot(
+        anchor = ProcessSnapshot(
             ProcessIdentity(10, 100),
             2001,
             "/usr/bin/python3",
@@ -206,18 +206,50 @@ class SupervisorTests(unittest.TestCase):
             (),
             (),
         )
-        provenance = {"cgroup": cgroup}
+        child = ProcessSnapshot(
+            ProcessIdentity(11, 101),
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + cgroup,),
+            (),
+            (),
+        )
+        provenance = {"cgroup": cgroup, "pid": 10, "start_time": 100}
+        anchor_candidate = _EvidenceCandidate(anchor, (), (), 1)
+        child_candidate = _EvidenceCandidate(child, (), (), 1)
 
-        self.assertFalse(
-            supervisor._authorizes_protected_scope(
-                snapshot, provenance, profile="content.gguf-llama"
+        with (
+            patch.object(
+                supervisor, "_cached_executable_digest", return_value="a" * 64
+            ),
+            patch("lumi_eggcracker.supervisor.launch_authorizes", return_value=True),
+        ):
+            self.assertFalse(
+                supervisor._authorizes_protected_scope(
+                    child,
+                    provenance,
+                    profile="content.gguf-llama",
+                    scope=(anchor_candidate, child_candidate),
+                )
             )
-        )
-        self.assertTrue(
-            supervisor._authorizes_protected_scope(
-                snapshot, provenance, profile="content.gguf-ollama"
+            self.assertTrue(
+                supervisor._authorizes_protected_scope(
+                    child,
+                    provenance,
+                    profile="content.gguf-ollama",
+                    scope=(anchor_candidate, child_candidate),
+                )
             )
-        )
+            self.assertFalse(
+                supervisor._authorizes_protected_scope(
+                    child,
+                    provenance,
+                    profile="content.gguf-ollama",
+                    scope=(child_candidate,),
+                )
+            )
 
     def test_incident_sweep_runs_after_response_lock_release(self) -> None:
         supervisor = self._instance()

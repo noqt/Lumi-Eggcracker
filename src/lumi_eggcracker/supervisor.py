@@ -743,17 +743,17 @@ class Supervisor:
         provenance: dict[str, Any] | None,
         *,
         profile: str | None = None,
+        scope: tuple[_EvidenceCandidate, ...] = (),
     ) -> bool:
-        """Authorize a qualified topology worker in one approved cgroup.
+        """Authorize a partial topology worker anchored by the exact launch.
 
         A topology launcher commonly execs or forks a worker whose PID/start
-        time was not present at the pre-exec gate.  The root-owned provenance
-        record and exact delegated cgroup are the approval closure for that
-        worker.  Direct profiles deliberately do not receive this cgroup-wide
-        closure: an approved launcher must not shelter a separate direct AI
-        process.  UID and cgroup identity remain mandatory, so the topology
-        exception does not broaden approval to a user, directory, process name
-        or wildcard.
+        time was not present at the pre-exec gate.  A bounded split-topology
+        match may use the root-owned launch provenance only while the exact
+        approved anchor is itself a live member of that same detection scope.
+        An independently complete descendant is evaluated in its own scope and
+        cannot inherit approval merely by sharing the delegated cgroup.  Direct
+        profiles never receive this closure.
         """
         if profile not in {"content.gguf-ollama", "content.safetensors-vllm"}:
             return False
@@ -762,7 +762,36 @@ class Supervisor:
         selected = f"0::{provenance['cgroup']}"
         if provenance["cgroup"] not in getattr(self, "active_cgroups", set()):
             return False
-        return any(line == selected for line in snapshot.cgroups)
+        if not any(line == selected for line in snapshot.cgroups):
+            return False
+        try:
+            anchor_identity = ProcessIdentity(
+                provenance["pid"], provenance["start_time"]
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        anchor = next(
+            (
+                candidate
+                for candidate in scope
+                if candidate.snapshot.identity == anchor_identity
+                and candidate.snapshot.uid == self.policy["workload_uid"]
+                and any(line == selected for line in candidate.snapshot.cgroups)
+            ),
+            None,
+        )
+        if anchor is None:
+            return False
+        try:
+            executable_sha256 = self._cached_executable_digest(anchor.snapshot)
+        except (JsonInputError, OSError):
+            return False
+        return launch_authorizes(
+            anchor.snapshot,
+            executable_sha256,
+            getattr(self, "executable_metadata", {}).get(anchor.snapshot.identity),
+            provenance,
+        )
 
     def _profile_match(
         self,
@@ -1786,6 +1815,7 @@ class Supervisor:
                     candidate.snapshot,
                     scope_provenance,
                     profile=detected.profile,
+                    scope=scope,
                 )
                 # An active local lockdown turns an exact protected
                 # recurrence into an enforcement candidate even when a stale
