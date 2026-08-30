@@ -276,6 +276,13 @@ product-owned unit, socket, account and state file with:
 sudo /usr/bin/python3 -I -S scripts/uninstall.py
 ```
 
+Install, upgrade and uninstall operations are serialized. If power loss or a
+killed process interrupts a first installation or removal, rerun the same exact
+installer candidate and operator, or rerun the same bundled uninstall command.
+Eggcracker validates its root-owned recovery journal before converging to a
+complete installation or complete removal; do not edit or delete that journal
+by hand.
+
 Read [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md),
 and [QUALIFICATION.md](QUALIFICATION.md) before installing on a machine that
 matters.

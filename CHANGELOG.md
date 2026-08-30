@@ -11,6 +11,10 @@
 - Require a detached release-checksum signature from the pinned release key and
   reject duplicate, link, special, oversized and unsafe ZIP members before any
   bundled installer can reach root execution.
+- Serialize install, upgrade and uninstall, and durably recover an interrupted
+  first installation or removal when the exact public command is retried.
+- Reject non-canonical ZIP member spellings and ambiguous trailing or
+  concatenated archive data before privileged installation.
 - Keep publication, signing, tagging and external deployment as separate
   decisions.
 
