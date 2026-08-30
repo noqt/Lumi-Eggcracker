@@ -209,6 +209,27 @@ def _send(connection: socket.socket, value: dict[str, Any]) -> None:
     connection.sendall(struct.pack("!I", len(payload)) + payload)
 
 
+def _bounded_query_items(
+    key: str,
+    values: list[dict[str, Any]],
+    *,
+    maximum: int,
+) -> dict[str, list[dict[str, Any]]]:
+    """Return the newest list prefix that fits the authenticated wire frame."""
+    selected: list[dict[str, Any]] = []
+    for value in values[:maximum]:
+        candidate = {key: [*selected, value]}
+        payload = json.dumps(
+            {"ok": True, "value": candidate},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(payload) > MAX_FRAME:
+            break
+        selected.append(value)
+    return {key: selected}
+
+
 class Supervisor:
     def __init__(self, policy_path: Path) -> None:
         if os.geteuid() != 0:
@@ -2878,7 +2899,12 @@ class Supervisor:
                 return revoke_execution_policy(self.exec_policies, args["policy_id"])
         if action == "incidents" and not args:
             with self.incident_response_lock:
-                return {"incidents": [incident_store.summary(item) for item in self._incident_values()]}
+                values = [incident_store.summary(item) for item in self._incident_values()]
+                return _bounded_query_items(
+                    "incidents",
+                    values,
+                    maximum=incident_store.MAX_INCIDENTS,
+                )
         if action == "incident_show" and set(args) == {"incident_id"}:
             with self.incident_response_lock:
                 values = self._incident_values()
@@ -2954,7 +2980,7 @@ class Supervisor:
                     )
                 except (JsonInputError, KeyError):
                     continue
-            return {"detections": values[:100]}
+            return _bounded_query_items("detections", values, maximum=100)
         if action == "kill" and set(args) == {"name"}:
             return self._contain(self._load(args["name"]), "OPERATOR")
         raise JsonInputError("unsupported supervisor action")

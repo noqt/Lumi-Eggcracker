@@ -23,8 +23,10 @@ from lumi_eggcracker.elfmarkers import (
 from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
 from lumi_eggcracker.supervisor import (
+    MAX_FRAME,
     QUERY_SOCKET,
     Supervisor,
+    _bounded_query_items,
     _EvidenceCandidate,
     _receive,
 )
@@ -83,6 +85,39 @@ class SupervisorTests(unittest.TestCase):
 
         send.assert_called_once_with(
             connection, {"ok": False, "value": "bounded validation failure"}
+        )
+
+    def test_query_history_is_truncated_before_wire_frame_limit(self) -> None:
+        values = [
+            {
+                "detector": {
+                    "profile": "content.safetensors-pytorch",
+                    "evidence": ["e" * 128, "f" * 128, "g" * 128],
+                },
+                "event_id": f"{index:024x}",
+                "result": "TERMINATED",
+                "trigger": {
+                    "kind": "UNAPPROVED_AI_MATCH",
+                    "observed_monotonic_ns": index,
+                },
+                "version": "1.0.0",
+            }
+            for index in range(130)
+        ]
+
+        response = _bounded_query_items("detections", values, maximum=100)
+        payload = json.dumps(
+            {"ok": True, "value": response},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.assertLessEqual(len(payload), MAX_FRAME)
+        self.assertGreater(len(response["detections"]), 0)
+        self.assertLess(len(response["detections"]), 100)
+        self.assertEqual(
+            values[: len(response["detections"])],
+            response["detections"],
         )
 
     def test_recently_contained_identity_is_not_reenforced(self) -> None:
