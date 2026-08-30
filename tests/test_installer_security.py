@@ -87,8 +87,9 @@ class InstallerSecurityTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        for value in (installer, upgrader, uninstaller, verifier):
+        for value in (installer, uninstaller, verifier):
             self.assertIn("/etc/tmpfiles.d/lumi-eggcracker.conf", value)
         self.assertIn("d /run/netns 0755 root root -", installer)
         self.assertIn("ensure_netns_runtime()", installer)
+        self.assertIn("installer.TMPFILES", upgrader)
         self.assertIn("installer.ensure_netns_runtime()", upgrader)
