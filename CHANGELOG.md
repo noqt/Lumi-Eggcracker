@@ -15,6 +15,9 @@
   first installation or removal when the exact public command is retried.
 - Reject non-canonical ZIP member spellings and ambiguous trailing or
   concatenated archive data before privileged installation.
+- Interpret duplicate Safetensors tensor names with the reference loader's
+  final-value semantics, then validate the resulting exact layout, so a model
+  accepted by the pinned loader cannot evade recognition by repeating a key.
 - Keep publication, signing, tagging and external deployment as separate
   decisions.
 

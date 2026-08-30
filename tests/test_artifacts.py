@@ -266,6 +266,19 @@ class ArtifactTests(unittest.TestCase):
             for path in (duplicate_file, invalid_dtype, invalid_range, truncated):
                 self.assertIsNone(validate_path(path))
 
+    def test_safetensors_duplicate_names_follow_reference_loader_last_value(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "duplicate-loader-accepted"
+            header = (
+                b'{"x":{"dtype":"U8","shape":[1],"data_offsets":[0,1]},'
+                b'"x":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}'
+            )
+            path.write_bytes(struct.pack("<Q", len(header)) + header + b"x")
+            evidence = validate_path(path)
+            self.assertIsNotNone(evidence)
+            assert evidence is not None
+            self.assertEqual("safetensors-v1", evidence.evidence_id)
+
     def test_safetensors_allows_scalar_and_zero_dimension_tensors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

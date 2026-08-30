@@ -173,12 +173,11 @@ def validate_gguf_fd(
 
 
 def _json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    value: dict[str, object] = {}
-    for key, item in pairs:
-        if key in value:
-            raise JsonInputError("Safetensors header contains duplicate JSON keys")
-        value[key] = item
-    return value
+    # The reference Safetensors loader accepts duplicate JSON names with the
+    # final value taking precedence.  Mirror that interpretation before
+    # validating the resulting tensor layout; otherwise a loader-accepted
+    # model can evade content recognition merely by repeating a key.
+    return dict(pairs)
 
 
 def validate_safetensors_fd(
