@@ -316,7 +316,42 @@ def socket_ready(operator_gid: int) -> bool:
     )
 
 
-def start_services(operator: str) -> None:
+def transitional_doctor_ready(value: object) -> bool:
+    """Accept only the upgrade journal as the pre-commit health blocker."""
+    if not isinstance(value, dict):
+        return False
+    installation = value.get("installation")
+    discovery = value.get("discovery")
+    execution = value.get("execution_boundary")
+    incidents = value.get("incidents")
+    network = value.get("network")
+    network_primitives = network.get("primitives") if isinstance(network, dict) else None
+    identity = value.get("workload_identity")
+    return (
+        value.get("result") == "UNSUPPORTED"
+        and value.get("autonomous_discovery") is False
+        and value.get("cgroup_v2") is True
+        and value.get("pidfd") is True
+        and isinstance(installation, dict)
+        and installation.get("state") == "RECOVERY_REQUIRED"
+        and installation.get("journal") is True
+        and installation.get("files_match") is False
+        and isinstance(discovery, dict)
+        and discovery.get("healthy") is True
+        and isinstance(execution, dict)
+        and execution.get("supported") is True
+        and isinstance(incidents, dict)
+        and incidents.get("healthy") is True
+        and isinstance(network, dict)
+        and network.get("cleanup_healthy") is True
+        and isinstance(network_primitives, dict)
+        and network_primitives.get("supported") is True
+        and isinstance(identity, dict)
+        and identity.get("healthy") is True
+    )
+
+
+def start_services(operator: str, *, allow_recovery_journal: bool = False) -> None:
     operator_account = pwd.getpwnam(operator)
     installer.ensure_netns_runtime()
     for unit in ("lumi-eggcracker-watchdog.service", "lumi-eggcracker.service"):
@@ -324,13 +359,24 @@ def start_services(operator: str) -> None:
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or f"cannot start {unit}")
     deadline = time.monotonic() + 45
+    last_detail = "control sockets did not become ready"
     while time.monotonic() < deadline:
         if socket_ready(operator_account.pw_gid):
             doctor = run(["/usr/sbin/runuser", "-u", operator, "--", str(installer.BIN), "doctor"])
             if doctor.returncode == 0:
                 return
+            last_detail = doctor.stderr.strip() or doctor.stdout.strip() or last_detail
+            try:
+                doctor_value = json.loads(doctor.stdout)
+            except json.JSONDecodeError:
+                doctor_value = None
+            if allow_recovery_journal and transitional_doctor_ready(doctor_value):
+                return
         time.sleep(0.05)
-    raise RuntimeError("upgraded supervisor did not reach a healthy socket contract")
+    raise RuntimeError(
+        "upgraded supervisor did not reach a healthy socket contract: "
+        + last_detail[:1000]
+    )
 
 
 def recover() -> int:
@@ -343,8 +389,9 @@ def recover() -> int:
     run(["/usr/bin/systemctl", "stop", "lumi-eggcracker-watchdog.service"])
     restore_snapshot(backup, files)
     run(["/usr/bin/systemctl", "daemon-reload"])
-    start_services(str(journal["operator"]))
+    start_services(str(journal["operator"]), allow_recovery_journal=True)
     JOURNAL.unlink(missing_ok=True)
+    start_services(str(journal["operator"]))
     print(json.dumps({"result": "RECOVERED", "version": journal.get("previous_version")}, sort_keys=True))
     return 0
 
@@ -365,6 +412,8 @@ def upgrade(args: argparse.Namespace) -> int:
     if args.artifact.is_symlink() or not args.artifact.is_file() or not re.fullmatch(r"[0-9a-f]{64}", args.expected_sha256):
         raise RuntimeError("upgrade artifact identity is invalid")
     descriptor = os.open(args.artifact, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    backup: Path | None = None
+    files: dict[str, Any] | None = None
     try:
         release = installer.manifest_for(args.artifact, descriptor, args.expected_sha256)
         start_services(operator.pw_name)
@@ -386,10 +435,11 @@ def upgrade(args: argparse.Namespace) -> int:
         result = run(["/usr/bin/systemctl", "daemon-reload"])
         if result.returncode:
             raise RuntimeError(result.stderr.strip() or "systemd daemon-reload failed")
+        start_services(operator.pw_name, allow_recovery_journal=True)
+        JOURNAL.unlink(missing_ok=True)
         start_services(operator.pw_name)
         HISTORY.mkdir(mode=0o700, parents=True, exist_ok=True)
         atomic_bytes(HISTORY / f"{transaction}.json", (json.dumps({"from": previous_version, "migrated_runs": migrated, "phase": "COMPLETED", "to": release["version"], "transaction": transaction}, sort_keys=True) + "\n").encode())
-        JOURNAL.unlink(missing_ok=True)
         shutil.rmtree(backup)
         print(json.dumps({"result": "UPGRADED", "from": previous_version, "to": release["version"], "migrated_runs": migrated}, sort_keys=True))
         return 0
@@ -397,18 +447,24 @@ def upgrade(args: argparse.Namespace) -> int:
         # Leave the journal in place if rollback itself cannot complete.  The
         # explicit --recover path then has a deterministic snapshot to use.
         try:
+            rollback_operator = operator.pw_name
             if JOURNAL.exists():
                 journal = read_json(JOURNAL)
                 backup = Path(str(journal.get("backup", "")))
                 files = journal.get("files")
-                if backup.is_dir() and isinstance(files, dict):
-                    run(["/usr/bin/systemctl", "stop", "lumi-eggcracker.service"])
-                    run(["/usr/bin/systemctl", "stop", "lumi-eggcracker-watchdog.service"])
-                    restore_snapshot(backup, files)
-                    run(["/usr/bin/systemctl", "daemon-reload"])
-                    start_services(str(journal["operator"]))
-                    JOURNAL.unlink(missing_ok=True)
-                    shutil.rmtree(backup)
+                rollback_operator = str(journal["operator"])
+            if backup is not None and backup.is_dir() and isinstance(files, dict):
+                run(["/usr/bin/systemctl", "stop", "lumi-eggcracker.service"])
+                run(["/usr/bin/systemctl", "stop", "lumi-eggcracker-watchdog.service"])
+                restore_snapshot(backup, files)
+                run(["/usr/bin/systemctl", "daemon-reload"])
+                start_services(
+                    rollback_operator,
+                    allow_recovery_journal=JOURNAL.exists(),
+                )
+                JOURNAL.unlink(missing_ok=True)
+                start_services(rollback_operator)
+                shutil.rmtree(backup)
         except (OSError, RuntimeError, KeyError, TypeError, ValueError, subprocess.SubprocessError) as rollback_error:
             print(f"Eggcracker upgrade rollback could not complete: {rollback_error}", file=sys.stderr)
         raise

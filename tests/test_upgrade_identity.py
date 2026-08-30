@@ -88,6 +88,38 @@ class UpgradeIdentityTests(unittest.TestCase):
         installer = (ROOT / "scripts" / "install.py").read_text(encoding="utf-8")
         self.assertIn('"workload_gid": account.pw_gid', installer)
 
+    def test_transitional_health_accepts_only_the_live_upgrade_journal(self) -> None:
+        upgrader = self.load_upgrader()
+        value = {
+            "autonomous_discovery": False,
+            "cgroup_v2": True,
+            "discovery": {"healthy": True},
+            "execution_boundary": {"supported": True},
+            "incidents": {"healthy": True},
+            "installation": {
+                "files_match": False,
+                "journal": True,
+                "state": "RECOVERY_REQUIRED",
+            },
+            "network": {
+                "cleanup_healthy": True,
+                "primitives": {"supported": True},
+            },
+            "pidfd": True,
+            "result": "UNSUPPORTED",
+            "workload_identity": {"healthy": True},
+        }
+        self.assertTrue(upgrader.transitional_doctor_ready(value))
+        value["workload_identity"] = {"healthy": False}
+        self.assertFalse(upgrader.transitional_doctor_ready(value))
+        value["workload_identity"] = {"healthy": True}
+        value["installation"] = {
+            "files_match": True,
+            "journal": False,
+            "state": "HEALTHY",
+        }
+        self.assertFalse(upgrader.transitional_doctor_ready(value))
+
 
 if __name__ == "__main__":
     unittest.main()
