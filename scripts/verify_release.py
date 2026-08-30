@@ -54,8 +54,6 @@ def validated_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     members = archive.infolist()
     if not members or len(members) > MAX_ARCHIVE_MEMBERS:
         raise SystemExit("release archive has an invalid member count")
-    if min(member.header_offset for member in members) != 0:
-        raise SystemExit("release archive contains prepended or concatenated data")
     seen: set[str] = set()
     total = 0
     for member in members:
@@ -90,12 +88,26 @@ def validated_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     return members
 
 
+def require_exact_archive_prefix(path: Path, members: list[zipfile.ZipInfo]) -> None:
+    start = min(member.header_offset for member in members)
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(start)
+    except OSError as error:
+        raise SystemExit("release archive cannot be read") from error
+    allowed = b"#!/usr/bin/env python3\n" if path.suffix == ".pyz" else b""
+    if prefix != allowed:
+        raise SystemExit("release archive contains prepended or concatenated data")
+
+
 def text_from_zip(path: Path) -> str:
     require_exact_zip_end(path)
     with zipfile.ZipFile(path) as archive:
+        members = validated_members(archive)
+        require_exact_archive_prefix(path, members)
         return "\n".join(
             archive.read(member).decode("utf-8", errors="ignore").lower()
-            for member in validated_members(archive)
+            for member in members
             if member.filename.endswith((".py", ".md", ".toml", ".txt"))
         )
 

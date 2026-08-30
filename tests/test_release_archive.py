@@ -27,11 +27,20 @@ class ReleaseArchiveTests(unittest.TestCase):
             with zipfile.ZipFile(original, "w") as archive:
                 archive.writestr("release/install.py", "trusted")
             archive_path.write_bytes(b"DAYBREAK-PREFIX" + original.read_bytes())
-            with (
-                zipfile.ZipFile(archive_path) as archive,
-                self.assertRaisesRegex(SystemExit, "prepended"),
-            ):
-                verify_release.validated_members(archive)
+            with self.assertRaisesRegex(SystemExit, "prepended"):
+                verify_release.text_from_zip(archive_path)
+
+    def test_verifier_accepts_exact_zipapp_interpreter_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            payload = root / "payload.zip"
+            archive_path = root / "candidate.pyz"
+            with zipfile.ZipFile(payload, "w") as archive:
+                archive.writestr("release/install.py", "trusted")
+            archive_path.write_bytes(
+                b"#!/usr/bin/env python3\n" + payload.read_bytes()
+            )
+            self.assertIn("trusted", verify_release.text_from_zip(archive_path))
 
     def test_verifier_rejects_trailing_data(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
