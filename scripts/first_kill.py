@@ -132,13 +132,16 @@ def validated_zip_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     total = 0
     for member in members:
         name = member.filename
-        path = PurePosixPath(name)
+        raw_name = name.removesuffix("/")
+        raw_parts = raw_name.split("/")
+        path = PurePosixPath(raw_name)
         parts = path.parts
         normalized = path.as_posix().rstrip("/")
         if (
             not name
             or "\x00" in name
             or "\\" in name
+            or any(part in ("", ".", "..") for part in raw_parts)
             or path.is_absolute()
             or not normalized
             or any(part in ("", ".", "..") for part in parts)

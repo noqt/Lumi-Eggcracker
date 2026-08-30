@@ -254,6 +254,16 @@ class FirstKillTests(unittest.TestCase):
             with self.assertRaisesRegex(first_kill.FirstKillError, "unsafe path"):
                 first_kill.safe_extract(archive, root / "out")
 
+    def test_safe_extract_rejects_noncanonical_components(self) -> None:
+        for member_name in ("release/./install.py", "release//install.py"):
+            with self.subTest(member_name=member_name), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                archive = root / "noncanonical.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    bundle.writestr(member_name, "untrusted")
+                with self.assertRaisesRegex(first_kill.FirstKillError, "unsafe path"):
+                    first_kill.safe_extract(archive, root / "out")
+
     def test_safe_extract_rejects_duplicate_paths(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

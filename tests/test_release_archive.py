@@ -66,6 +66,18 @@ class ReleaseArchiveTests(unittest.TestCase):
             ):
                 verify_release.validated_members(archive)
 
+    def test_verifier_rejects_noncanonical_components(self) -> None:
+        for member_name in ("release/./install.py", "release//install.py"):
+            with self.subTest(member_name=member_name), tempfile.TemporaryDirectory() as raw:
+                archive_path = Path(raw) / "noncanonical.zip"
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr(member_name, "untrusted")
+                with (
+                    zipfile.ZipFile(archive_path) as archive,
+                    self.assertRaisesRegex(SystemExit, "unsafe path"),
+                ):
+                    verify_release.validated_members(archive)
+
     def test_verifier_rejects_special_members(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             archive_path = Path(raw) / "special.zip"
