@@ -153,6 +153,7 @@ def validate_manifest_structure(manifest: object) -> dict[str, object]:
         or not isinstance(manifest.get("operator_uid"), int)
         or not isinstance(manifest.get("workload_user"), str)
         or not isinstance(manifest.get("workload_group"), str)
+        or not isinstance(manifest.get("workload_gid"), int)
         or not isinstance(manifest.get("workload_uid"), int)
         or not isinstance(manifest.get("created_workload_user"), bool)
         or not isinstance(manifest.get("created_workload_group"), bool)

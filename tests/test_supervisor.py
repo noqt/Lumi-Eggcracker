@@ -40,7 +40,14 @@ def record() -> dict[str, object]:
 class SupervisorTests(unittest.TestCase):
     def _instance(self) -> Supervisor:
         value = object.__new__(Supervisor)
-        value.policy = {"network_mode": "offline", "source_commit": "c" * 40, "workload_uid": 2001}
+        value.policy = {
+            "network_mode": "offline",
+            "operator_gid": 1001,
+            "operator_uid": 1001,
+            "source_commit": "c" * 40,
+            "workload_gid": 2001,
+            "workload_uid": 2001,
+        }
         value.runs = Path(".")
         value.names = Path(".")
         value.receipts = Path(".")
@@ -55,6 +62,47 @@ class SupervisorTests(unittest.TestCase):
         value.content_scan_tick = 0
         value.receipt_persistence_healthy = True
         return value
+
+    def test_live_workload_identity_requires_distinct_exact_uid_gid(self) -> None:
+        supervisor = self._instance()
+        supervisor.policy.update(
+            {
+                "operator_gid": 1000,
+                "operator_uid": 1000,
+                "workload_gid": 988,
+                "workload_uid": 999,
+            }
+        )
+        account = MagicMock(
+            pw_dir="/nonexistent",
+            pw_gid=988,
+            pw_name="lumi-eggcracker-workload",
+            pw_shell="/usr/sbin/nologin",
+            pw_uid=999,
+        )
+        group = MagicMock(gr_name="lumi-eggcracker-workload")
+        with (
+            patch("lumi_eggcracker.supervisor.pwd.getpwnam", return_value=account),
+            patch("lumi_eggcracker.supervisor.grp.getgrgid", return_value=group),
+            patch("lumi_eggcracker.supervisor.os.getgrouplist", return_value=[988]),
+        ):
+            self.assertTrue(supervisor._workload_identity_status()["healthy"])
+            supervisor.policy["workload_gid"] = 999
+            self.assertFalse(supervisor._workload_identity_status()["healthy"])
+
+    def test_gated_process_credentials_reject_foreign_supplementary_group(self) -> None:
+        supervisor = self._instance()
+        supervisor.policy.update({"workload_gid": 988, "workload_uid": 999})
+        process = ProcessIdentity(42, 100)
+        exact = "Uid:\t999\t999\t999\t999\nGid:\t988\t988\t988\t988\nGroups:\t988\n"
+        with patch("lumi_eggcracker.supervisor.Path.read_text", return_value=exact):
+            supervisor._validate_gated_credentials(process)
+        contaminated = exact.replace("Groups:\t988", "Groups:\t988 999")
+        with patch(
+            "lumi_eggcracker.supervisor.Path.read_text",
+            return_value=contaminated,
+        ), self.assertRaisesRegex(JsonInputError, "do not match policy"):
+            supervisor._validate_gated_credentials(process)
 
     def test_oversized_valid_json_integer_is_rejected_without_escaping(self) -> None:
         server, client = socket.socketpair()

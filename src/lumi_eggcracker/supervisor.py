@@ -6,9 +6,11 @@ import argparse
 import array
 import datetime as dt
 import errno
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import select
 import signal
@@ -122,6 +124,7 @@ SOCKET_ACTIONS = {
 }
 STATE_DIR = Path("/var/lib/lumi-eggcracker")
 UNIT_PREFIX = "lumi-eggcracker-workload-"
+WORKLOAD_USER = "lumi-eggcracker-workload"
 GATES_DIR = Path("/run/lumi-eggcracker/gates")
 STAGED_DIR = Path("/run/lumi-eggcracker/staged")
 EXEC_DIR = Path("/run/lumi-eggcracker/exec")
@@ -490,6 +493,7 @@ class Supervisor:
             boundaries.pop(record.get("run_id"), None)
 
     def _prepare(self) -> None:
+        self._require_workload_identity()
         # Workloads need traversal only to their group-readable gate.  The
         # control socket remains a root/operator 0660 inode, so traversal does
         # not grant control-socket access or directory listing.
@@ -2384,10 +2388,74 @@ class Supervisor:
             raise JsonInputError("gated workload process identity vanished")
         return value
 
+    def _workload_identity_status(self) -> dict[str, bool]:
+        """Reconcile policy authority with the live dedicated NSS identity."""
+        try:
+            account = pwd.getpwnam(WORKLOAD_USER)
+            group = grp.getgrgid(account.pw_gid)
+            supplementary = set(os.getgrouplist(account.pw_name, account.pw_gid))
+        except (KeyError, OSError):
+            return {
+                "account_contract": False,
+                "gid_matches": False,
+                "group_contract": False,
+                "healthy": False,
+                "isolated": False,
+                "uid_matches": False,
+            }
+        status = {
+            "account_contract": (
+                account.pw_dir == "/nonexistent"
+                and account.pw_shell in {"/usr/sbin/nologin", "/sbin/nologin"}
+            ),
+            "gid_matches": account.pw_gid == self.policy["workload_gid"],
+            "group_contract": group.gr_name == WORKLOAD_USER,
+            "isolated": (
+                supplementary == {account.pw_gid}
+                and account.pw_uid != self.policy["operator_uid"]
+                and account.pw_gid != self.policy["operator_gid"]
+            ),
+            "uid_matches": account.pw_uid == self.policy["workload_uid"],
+        }
+        status["healthy"] = all(status.values())
+        return status
+
+    def _require_workload_identity(self) -> None:
+        if not self._workload_identity_status()["healthy"]:
+            raise JsonInputError(
+                "live workload identity does not match the protected policy"
+            )
+
+    def _validate_gated_credentials(self, process: ProcessIdentity) -> None:
+        """Prove exact process credentials before releasing the exec gate."""
+        try:
+            lines = Path(f"/proc/{process.pid}/status").read_text(
+                encoding="ascii"
+            ).splitlines()
+            fields = {
+                key: value.split()
+                for line in lines
+                if ":" in line
+                for key, value in [line.split(":", 1)]
+                if key in {"Uid", "Gid", "Groups"}
+            }
+            uids = {int(value) for value in fields["Uid"]}
+            gids = {int(value) for value in fields["Gid"]}
+            supplementary = {int(value) for value in fields["Groups"]}
+        except (FileNotFoundError, KeyError, OSError, UnicodeError, ValueError) as error:
+            raise JsonInputError("cannot verify gated workload credentials") from error
+        if (
+            uids != {self.policy["workload_uid"]}
+            or gids != {self.policy["workload_gid"]}
+            or not supplementary.issubset({self.policy["workload_gid"]})
+        ):
+            raise JsonInputError("gated workload credentials do not match policy")
+
     def _active_exists(self) -> bool:
         return bool(getattr(self, "active_cgroups", set()))
 
     def _start(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._require_workload_identity()
         if set(args) == {"argv", "cpu_quota_percent", "max_memory_mib", "max_pids", "name"}:
             args = {**args, "exec_policy": None}
         if set(args) != {"argv", "cpu_quota_percent", "exec_policy", "max_memory_mib", "max_pids", "name"}:
@@ -2464,6 +2532,7 @@ class Supervisor:
                     except (JsonInputError, OSError):
                         self.boundary_cleanup_healthy = False
                 raise
+            self._require_workload_identity()
             result = self._run(
                 [
                     "/usr/bin/systemd-run",
@@ -2482,6 +2551,7 @@ class Supervisor:
                     "--property=RestrictNamespaces=yes",
                     "--property=CapabilityBoundingSet=",
                     "--property=AmbientCapabilities=",
+                    "--property=SupplementaryGroups=",
                     "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
                     f"--property=TasksMax={maximum}",
                     f"--property=MemoryMax={memory_mib}M",
@@ -2566,8 +2636,9 @@ class Supervisor:
                     "workload_gid": self.policy["workload_gid"],
                     "workload_uid": self.policy["workload_uid"],
                 }
-                self._store(record)
                 gated_process = self._gated_process(identity)
+                self._validate_gated_credentials(gated_process)
+                self._store(record)
                 if approval is not None:
                     create_launch_provenance(
                         self.launches,
@@ -2766,6 +2837,15 @@ class Supervisor:
                 version = "unknown"
             if version != self.policy["version"]:
                 matches = False
+            identity = self._workload_identity_status()
+            if (
+                manifest.get("workload_user") != WORKLOAD_USER
+                or manifest.get("workload_group") != WORKLOAD_USER
+                or manifest.get("workload_uid") != self.policy["workload_uid"]
+                or manifest.get("workload_gid") != self.policy["workload_gid"]
+                or not identity["healthy"]
+            ):
+                matches = False
             return {"state": "HEALTHY" if matches else "DRIFT", "journal": False, "files_match": matches, "manifest_version": version}
         except (JsonInputError, OSError, TypeError, ValueError):
             return {"state": "DRIFT", "journal": False, "files_match": False}
@@ -2797,6 +2877,8 @@ class Supervisor:
             boundary_primitives = primitives_available()
             execution_primitives = seccomp_primitive_available()
             incident_status = self._incident_status()
+            installation = self._installation_health()
+            workload_identity = self._workload_identity_status()
             ready = (
                 available
                 and pidfd_available()
@@ -2806,6 +2888,8 @@ class Supervisor:
                 and execution_primitives["supported"]
                 and scan_healthy
                 and incident_status["healthy"]
+                and installation["state"] == "HEALTHY"
+                and workload_identity["healthy"]
             )
             return {
                 "autonomous_discovery": ready,
@@ -2828,9 +2912,10 @@ class Supervisor:
                     "scan_health_timeout_ms": SCAN_HEALTH_TIMEOUT_NS / 1_000_000,
                 },
                 "pidfd": pidfd_available(),
-                "installation": self._installation_health(),
+                "installation": installation,
                 "result": "PASS" if ready else "UNSUPPORTED",
                 "version": __version__,
+                "workload_identity": workload_identity,
                 "workload_uid": self.policy["workload_uid"],
             }
         if action == "start":

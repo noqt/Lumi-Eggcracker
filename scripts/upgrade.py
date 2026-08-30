@@ -8,6 +8,7 @@ if not _bootstrap_sys.flags.isolated or not _bootstrap_sys.flags.no_site:
     raise SystemExit("privileged upgrader requires /usr/bin/python3 -I -S scripts/upgrade.py")
 
 import argparse
+import grp
 import hashlib
 import json
 import os
@@ -90,6 +91,41 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
+def installed_workload_account(manifest: dict[str, Any]) -> pwd.struct_passwd:
+    workload_user = manifest.get("workload_user")
+    workload_uid = manifest.get("workload_uid")
+    if (
+        not isinstance(workload_user, str)
+        or isinstance(workload_uid, bool)
+        or not isinstance(workload_uid, int)
+        or workload_uid == 0
+    ):
+        raise RuntimeError("installed workload identity is invalid")
+    account = pwd.getpwnam(workload_user)
+    recorded_gid = manifest.get("workload_gid")
+    if (
+        account.pw_uid != workload_uid
+        or account.pw_shell not in {"/usr/sbin/nologin", "/sbin/nologin"}
+        or account.pw_dir != "/nonexistent"
+        or (
+            recorded_gid is not None
+            and (
+                isinstance(recorded_gid, bool)
+                or not isinstance(recorded_gid, int)
+                or recorded_gid != account.pw_gid
+            )
+        )
+    ):
+        raise RuntimeError("installed workload identity no longer meets the contract")
+    workload_group = manifest.get("workload_group")
+    if (
+        not isinstance(workload_group, str)
+        or grp.getgrgid(account.pw_gid).gr_name != workload_group
+    ):
+        raise RuntimeError("installed workload group no longer meets the contract")
+    return account
+
+
 def validate_existing(manifest: dict[str, Any], operator_name: str) -> pwd.struct_passwd:
     if manifest.get("schema_version") not in {"lumi-eggcracker.install.v4", "lumi-eggcracker.install.v5"}:
         raise RuntimeError("existing install manifest schema is unsupported")
@@ -105,11 +141,14 @@ def validate_existing(manifest: dict[str, Any], operator_name: str) -> pwd.struc
         path = Path(raw_path)
         if path.is_symlink() or not path.is_file() or not isinstance(expected, str) or digest(path) != expected:
             raise RuntimeError(f"existing installed file drifted: {path}")
-    if manifest.get("workload_uid") == 0 or not isinstance(manifest.get("workload_user"), str):
-        raise RuntimeError("installed workload identity is invalid")
-    account = pwd.getpwnam(manifest["workload_user"])
-    if account.pw_uid != manifest["workload_uid"] or account.pw_shell not in {"/usr/sbin/nologin", "/sbin/nologin"} or account.pw_dir != "/nonexistent":
-        raise RuntimeError("installed workload identity no longer meets the contract")
+    account = installed_workload_account(manifest)
+    supplementary = set(os.getgrouplist(account.pw_name, account.pw_gid))
+    if (
+        account.pw_uid == operator.pw_uid
+        or account.pw_gid == operator.pw_gid
+        or supplementary != {account.pw_gid}
+    ):
+        raise RuntimeError("installed workload identity is not isolated from the operator")
     return operator
 
 
@@ -205,7 +244,7 @@ def migrate_runs() -> int:
 
 
 def new_policy(release: dict[str, Any], operator: pwd.struct_passwd, manifest: dict[str, Any]) -> dict[str, Any]:
-    workload_uid = int(manifest["workload_uid"])
+    account = installed_workload_account(manifest)
     return {
         "admin_socket_path": str(installer.ADMIN_SOCKET),
         "catalogue_path": str(installer.ETC / "detector_catalogue.json"),
@@ -221,8 +260,8 @@ def new_policy(release: dict[str, Any], operator: pwd.struct_passwd, manifest: d
         "unit_prefix": "lumi-eggcracker-workload-",
         "version": release["version"],
         "watchdog_socket_path": str(installer.HEARTBEAT_SOCKET),
-        "workload_gid": int(manifest.get("workload_gid", workload_uid)),
-        "workload_uid": workload_uid,
+        "workload_gid": account.pw_gid,
+        "workload_uid": account.pw_uid,
     }
 
 
@@ -246,6 +285,8 @@ def replace_install(release: dict[str, Any], operator: pwd.struct_passwd, manife
         "operator_uid": operator.pw_uid,
         "schema_version": "lumi-eggcracker.install.v5",
         "targets": [str(path) for path in installer.TARGETS],
+        "version": release["version"],
+        "workload_gid": policy["workload_gid"],
         "workload_group": manifest.get("workload_group", installer.WORKLOAD_NAME),
         "workload_uid": manifest["workload_uid"],
         "workload_user": manifest["workload_user"],
