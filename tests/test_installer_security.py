@@ -86,6 +86,9 @@ class InstallerSecurityTests(unittest.TestCase):
             lifecycle = (ROOT / "scripts" / name).read_text(encoding="utf-8")
             self.assertIn("acquire_lifecycle_lock", lifecycle)
             self.assertIn("release_lifecycle_lock", lifecycle)
+        uninstaller = UNINSTALLER.read_text(encoding="utf-8")
+        self.assertIn("UNINSTALL_JOURNAL_SCHEMA", uninstaller)
+        self.assertIn("recover_uninstall", uninstaller)
 
     def test_install_tracks_cold_boot_network_namespace_runtime(self) -> None:
         installer = INSTALLER.read_text(encoding="utf-8")

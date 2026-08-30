@@ -32,6 +32,7 @@ PATHS = (
     Path("/var/lib/lumi-eggcracker"), Path("/run/lumi-eggcracker"),
     Path("/run/lumi-eggcracker-watchdog"),
     Path("/var/lib/lumi-eggcracker-install-journal.json"),
+    Path("/var/lib/lumi-eggcracker-uninstall-journal.json"),
     Path("/run/lock/lumi-eggcracker-lifecycle.lock"),
 )
 
