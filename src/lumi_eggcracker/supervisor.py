@@ -6,11 +6,9 @@ import argparse
 import array
 import datetime as dt
 import errno
-import grp
 import hashlib
 import json
 import os
-import pwd
 import re
 import select
 import signal
@@ -23,6 +21,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import grp
+    import pwd
+except ModuleNotFoundError:  # pragma: no cover - release runtime is Linux
+    grp = None  # type: ignore[assignment]
+    pwd = None  # type: ignore[assignment]
 
 from . import __version__
 from . import incidents as incident_store
@@ -2390,6 +2395,15 @@ class Supervisor:
 
     def _workload_identity_status(self) -> dict[str, bool]:
         """Reconcile policy authority with the live dedicated NSS identity."""
+        if grp is None or pwd is None:
+            return {
+                "account_contract": False,
+                "gid_matches": False,
+                "group_contract": False,
+                "healthy": False,
+                "isolated": False,
+                "uid_matches": False,
+            }
         try:
             account = pwd.getpwnam(WORKLOAD_USER)
             group = grp.getgrgid(account.pw_gid)
