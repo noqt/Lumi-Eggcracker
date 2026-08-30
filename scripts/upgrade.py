@@ -386,9 +386,13 @@ def main() -> int:
     update.add_argument("--expected-sha256", required=True)
     action.add_parser("recover")
     args = parser.parse_args()
-    if args.action == "recover":
-        return recover()
-    return upgrade(args)
+    lifecycle_lock = installer.acquire_lifecycle_lock()
+    try:
+        if args.action == "recover":
+            return recover()
+        return upgrade(args)
+    finally:
+        installer.release_lifecycle_lock(lifecycle_lock)
 
 
 if __name__ == "__main__":

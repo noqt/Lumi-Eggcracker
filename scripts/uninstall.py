@@ -29,6 +29,11 @@ import subprocess
 import time
 from pathlib import Path
 
+_SCRIPT_ROOT = Path(__file__).resolve().parent
+if str(_SCRIPT_ROOT) not in _bootstrap_sys.path:
+    _bootstrap_sys.path.insert(0, str(_SCRIPT_ROOT))
+import install as installer
+
 LIB = Path("/usr/local/lib/lumi-eggcracker")
 BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
@@ -160,13 +165,7 @@ def empty_stopped_service_cgroup(path: Path) -> None:
     raise SystemExit(f"stopped service cgroup remained populated: {path}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Remove a manifest-verified Lumi Eggcracker installation"
-    )
-    parser.parse_args(argv)
-    if os.geteuid() != 0:
-        raise SystemExit("uninstaller must run as root")
+def uninstall() -> int:
     manifest_path = STATE / "install-manifest.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise SystemExit("installed manifest is missing")
@@ -228,6 +227,20 @@ def main(argv: list[str] | None = None) -> int:
         raise
     print(json.dumps({"result": "UNINSTALLED"}, sort_keys=True))
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Remove a manifest-verified Lumi Eggcracker installation"
+    )
+    parser.parse_args(argv)
+    if os.geteuid() != 0:
+        raise SystemExit("uninstaller must run as root")
+    lifecycle_lock = installer.acquire_lifecycle_lock()
+    try:
+        return uninstall()
+    finally:
+        installer.release_lifecycle_lock(lifecycle_lock)
 
 
 if __name__ == "__main__":

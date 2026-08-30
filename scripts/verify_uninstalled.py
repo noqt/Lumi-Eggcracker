@@ -31,6 +31,8 @@ PATHS = (
     Path("/etc/tmpfiles.d/lumi-eggcracker.conf"),
     Path("/var/lib/lumi-eggcracker"), Path("/run/lumi-eggcracker"),
     Path("/run/lumi-eggcracker-watchdog"),
+    Path("/var/lib/lumi-eggcracker-install-journal.json"),
+    Path("/run/lock/lumi-eggcracker-lifecycle.lock"),
 )
 
 

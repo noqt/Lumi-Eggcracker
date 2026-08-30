@@ -78,6 +78,14 @@ class InstallerSecurityTests(unittest.TestCase):
         self.assertIn("/proc/self/fd/{artifact_descriptor}", installer)
         self.assertIn("read_stable_regular", installer)
         self.assertIn("artifact_source_commit", installer)
+        self.assertIn("INSTALL_JOURNAL_SCHEMA", installer)
+        self.assertIn("recover_interrupted_install", installer)
+        self.assertIn("acquire_lifecycle_lock", installer)
+        self.assertIn("release_lifecycle_lock", installer)
+        for name in ("upgrade.py", "uninstall.py"):
+            lifecycle = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+            self.assertIn("acquire_lifecycle_lock", lifecycle)
+            self.assertIn("release_lifecycle_lock", lifecycle)
 
     def test_install_tracks_cold_boot_network_namespace_runtime(self) -> None:
         installer = INSTALLER.read_text(encoding="utf-8")
