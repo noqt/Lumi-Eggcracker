@@ -7,6 +7,11 @@ AI profiles, direct cgroup-v2 containment, offline selected-workload and
 execution boundaries, watchdog recovery, and root-controlled exact relaunch
 lockdown.
 
+Root approvals now bind the selected PID, memory and CPU limits as part of the
+exact launch specification. Changing one of those limits cannot inherit an
+approval; older approval records remain administratively visible and revocable
+but fail closed until root recreates them with the intended limits.
+
 The public first-kill helper defaults to `v1.0.0`. The packaged support helper
 delegates to the installed root-owned zipapp, so the documented command works
 from the verified Linux release bundle without importing a mutable checkout.

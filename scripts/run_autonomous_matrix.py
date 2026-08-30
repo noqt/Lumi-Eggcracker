@@ -255,7 +255,11 @@ def main() -> int:
                 run_name = f"approved-{secrets.token_hex(6)}"
                 call(
                     operator,
-                    ["approve", "--name", approval_name, "--uid", str(uid), "--", *argv],
+                    [
+                        "approve", "--name", approval_name, "--uid", str(uid),
+                        "--max-pids", "64", "--max-memory-mib", "4096",
+                        "--cpu-quota-percent", "1200", "--", *argv,
+                    ],
                 )
                 before = set(DETECTIONS.glob("*.json"))
                 started = False

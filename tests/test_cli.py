@@ -32,7 +32,15 @@ class CliTests(unittest.TestCase):
     def test_approve_forwards_only_exact_command_arguments(self) -> None:
         with patch("lumi_eggcracker.cli.os.geteuid", return_value=0, create=True), patch("lumi_eggcracker.cli.request", return_value={"result": "APPROVED"}) as request:
             self.assertEqual(0, main(["approve", "--name", "qwen", "--uid", "1001", "--", "/opt/llama-cli", "-m", "/models/qwen.gguf"]))
-        request.assert_called_once_with("approve", name="qwen", uid=1001, argv=["/opt/llama-cli", "-m", "/models/qwen.gguf"])
+        request.assert_called_once_with(
+            "approve",
+            name="qwen",
+            uid=1001,
+            max_pids=64,
+            max_memory_mib=2048,
+            cpu_quota_percent=400,
+            argv=["/opt/llama-cli", "-m", "/models/qwen.gguf"],
+        )
 
     def test_start_includes_resource_limits(self) -> None:
         with patch("lumi_eggcracker.cli.request", return_value={"result": "STARTED"}) as request:

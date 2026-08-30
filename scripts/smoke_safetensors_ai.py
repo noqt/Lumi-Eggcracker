@@ -217,7 +217,13 @@ def one(
                 raise RuntimeError("Safetensors receipt leaked local paths")
             output.unlink(missing_ok=True)
             clear_new_incident(before_incidents)
-            approval = control(["approve", "--name", name, "--uid", str(user_uid), "--", *argv])
+            approval = control(
+                [
+                    "approve", "--name", name, "--uid", str(user_uid),
+                    "--max-pids", "64", "--max-memory-mib", "4096",
+                    "--cpu-quota-percent", "1200", "--", *argv,
+                ]
+            )
             if approval.get("result") != "APPROVED":
                 raise RuntimeError("exact Safetensors approval failed")
             approved_source = wrapper.read_bytes()

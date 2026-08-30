@@ -2546,6 +2546,9 @@ class Supervisor:
                     uid=self.policy["workload_uid"],
                     argv=argv,
                     approvals=load_approvals(self.approvals),
+                    max_pids=maximum,
+                    max_memory_mib=memory_mib,
+                    cpu_quota_percent=cpu_quota,
                 )
             except JsonInputError:
                 approval = None
@@ -3005,7 +3008,14 @@ class Supervisor:
             return {"runs": runs}
         if action in {"approve", "revoke", "exec_policy_create", "exec_policy_revoke"} and not self._incident_status()["healthy"]:
             raise JsonInputError("local lockdown state is unavailable; root recovery is required")
-        if action == "approve" and set(args) == {"argv", "name", "uid"}:
+        if action == "approve" and set(args) == {
+            "argv",
+            "cpu_quota_percent",
+            "max_memory_mib",
+            "max_pids",
+            "name",
+            "uid",
+        }:
             with self.approval_lock:
                 value = create_approval(
                     self.approvals,
@@ -3013,6 +3023,9 @@ class Supervisor:
                     uid=args["uid"],
                     argv=args["argv"],
                     administrator_uid=0,
+                    max_pids=args["max_pids"],
+                    max_memory_mib=args["max_memory_mib"],
+                    cpu_quota_percent=args["cpu_quota_percent"],
                 )
             return {"approval": public_approval(value), "result": "APPROVED"}
         if action == "revoke" and set(args) == {"name"}:

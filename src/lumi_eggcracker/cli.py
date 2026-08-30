@@ -36,6 +36,9 @@ def _parser() -> argparse.ArgumentParser:
     approve = commands.add_parser("approve", help="approve one exact AI runtime invocation")
     approve.add_argument("--name", required=True)
     approve.add_argument("--uid", required=True, type=int)
+    approve.add_argument("--max-pids", default=64, type=int)
+    approve.add_argument("--max-memory-mib", default=2048, type=int)
+    approve.add_argument("--cpu-quota-percent", default=400, type=int)
     approve.add_argument("argv", nargs=argparse.REMAINDER)
     revoke = commands.add_parser("revoke", help="revoke one exact AI runtime approval")
     revoke.add_argument("--name", required=True)
@@ -111,7 +114,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "approve":
             if os.geteuid() != 0:
                 raise JsonInputError("approve requires root administrative authority; use sudo")
-            value = request("approve", name=args.name, uid=args.uid, argv=_command(args.argv))
+            value = request(
+                "approve",
+                name=args.name,
+                uid=args.uid,
+                max_pids=args.max_pids,
+                max_memory_mib=args.max_memory_mib,
+                cpu_quota_percent=args.cpu_quota_percent,
+                argv=_command(args.argv),
+            )
         elif args.command == "revoke":
             if os.geteuid() != 0:
                 raise JsonInputError("revoke requires root administrative authority; use sudo")

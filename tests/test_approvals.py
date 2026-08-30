@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import tempfile
@@ -9,10 +10,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from lumi_eggcracker.approvals import (
+    LEGACY_SCHEMA,
     _root_controlled_reference,
     create,
     load_all,
     match_launch,
+    public,
     revoke,
     stage_launch,
 )
@@ -89,8 +92,19 @@ class ApprovalTests(unittest.TestCase):
                         approvals=values,
                     )
                 )
+                self.assertIsNone(
+                    match_launch(
+                        uid=1001,
+                        argv=argv,
+                        approvals=values,
+                        max_pids=65,
+                    )
+                )
             self.assertNotIn("/models/qwen.gguf", record.values())
             self.assertEqual(argv_digest(argv), record["argv_sha256"])
+            self.assertEqual(64, record["max_pids"])
+            self.assertEqual(2048, record["max_memory_mib"])
+            self.assertEqual(400, record["cpu_quota_percent"])
 
     def test_revoke_removes_exact_record(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -127,6 +141,59 @@ class ApprovalTests(unittest.TestCase):
                 )
             self.assertEqual("REVOKED", revoke(root, "qwen")["result"])
             self.assertEqual([], load_all(root))
+
+    def test_legacy_approval_is_visible_and_revocable_but_never_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "approvals"
+            binary = Path(raw) / "runner"
+            binary.write_bytes(b"x")
+            binary.chmod(0o755)
+            argv = [str(binary), "-m", "/models/qwen.gguf"]
+            with (
+                patch(
+                    "lumi_eggcracker.approvals._classify",
+                    return_value=(
+                        "NATIVE_LLAMA",
+                        [
+                            {
+                                "argument_index": 2,
+                                "device": 1,
+                                "inode": 1,
+                                "kind": "MODEL_ARTIFACT",
+                                "sha256": "a" * 64,
+                                "size": 1,
+                            }
+                        ],
+                    ),
+                ),
+                patch(
+                    "lumi_eggcracker.approvals._root_controlled_reference",
+                    return_value=True,
+                ),
+            ):
+                record = create(
+                    root,
+                    name="legacy",
+                    uid=1001,
+                    argv=argv,
+                    administrator_uid=0,
+                )
+            record["schema_version"] = LEGACY_SCHEMA
+            for key in ("cpu_quota_percent", "max_memory_mib", "max_pids"):
+                record.pop(key)
+            (root / "legacy.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+            values = load_all(root)
+            with patch(
+                "lumi_eggcracker.approvals._root_controlled_reference",
+                return_value=True,
+            ):
+                self.assertIsNone(
+                    match_launch(uid=1001, argv=argv, approvals=values)
+                )
+            self.assertIsNone(public(values[0])["resource_limits"])
+            self.assertEqual("REVOKED", revoke(root, "legacy")["result"])
 
     def test_python_script_is_staged_from_bound_bytes_and_drift_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

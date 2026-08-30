@@ -224,7 +224,8 @@ with a redacted support bundle; route security-sensitive findings through
 - records a bounded local lockdown after an autonomous, network-boundary or
   execution-boundary kill, revokes only the exact affected approval, and
   suppresses an exact protected relaunch until root clears it;
-- supports exact root approvals for protected launches, plus operator-triggered
+- supports exact root approvals bound to the protected launch's command,
+  workload identity and PID, memory and CPU limits, plus operator-triggered
   kills and status, list, doctor, detections, incidents and version queries.
 
 The product is intentionally a kill switch, not an alerting dashboard. It
