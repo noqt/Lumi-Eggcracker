@@ -52,6 +52,7 @@ MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 256
 MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_ZIP_COMMENT_BYTES = 65_535
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 DEFAULT_AI_SMOKE_WORKSPACE = Path("/opt/lumi-eggcracker-ai-smoke")
 QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
@@ -125,6 +126,8 @@ def validated_zip_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     members = bundle.infolist()
     if not members or len(members) > MAX_ARCHIVE_MEMBERS:
         raise FirstKillError("release bundle has an invalid member count")
+    if min(member.header_offset for member in members) != 0:
+        raise FirstKillError("release bundle contains prepended or concatenated data")
     seen: set[str] = set()
     total = 0
     for member in members:
@@ -159,7 +162,29 @@ def validated_zip_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     return members
 
 
+def has_exact_zip_end(path: Path) -> bool:
+    try:
+        size = path.stat().st_size
+        window_size = min(size, MAX_ZIP_COMMENT_BYTES + 22)
+        with path.open("rb") as handle:
+            handle.seek(size - window_size)
+            tail = handle.read(window_size)
+    except OSError:
+        return False
+    marker = b"PK\x05\x06"
+    position = tail.find(marker)
+    while position >= 0:
+        if position + 22 <= len(tail):
+            comment_size = int.from_bytes(tail[position + 20 : position + 22], "little")
+            if position + 22 + comment_size == len(tail):
+                return True
+        position = tail.find(marker, position + 1)
+    return False
+
+
 def safe_extract(archive: Path, destination: Path) -> None:
+    if not has_exact_zip_end(archive):
+        raise FirstKillError("release bundle is truncated or has trailing data")
     try:
         with zipfile.ZipFile(archive) as bundle:
             members = validated_zip_members(bundle)

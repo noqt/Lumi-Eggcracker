@@ -19,6 +19,30 @@ SPEC.loader.exec_module(verify_release)
 
 
 class ReleaseArchiveTests(unittest.TestCase):
+    def test_verifier_rejects_prepended_data(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            original = root / "original.zip"
+            archive_path = root / "prepended.zip"
+            with zipfile.ZipFile(original, "w") as archive:
+                archive.writestr("release/install.py", "trusted")
+            archive_path.write_bytes(b"DAYBREAK-PREFIX" + original.read_bytes())
+            with (
+                zipfile.ZipFile(archive_path) as archive,
+                self.assertRaisesRegex(SystemExit, "prepended"),
+            ):
+                verify_release.validated_members(archive)
+
+    def test_verifier_rejects_trailing_data(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            archive_path = Path(raw) / "appended.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("release/install.py", "trusted")
+            with archive_path.open("ab") as handle:
+                handle.write(b"DAYBREAK-TRAILING-DATA")
+            with self.assertRaisesRegex(SystemExit, "trailing data"):
+                verify_release.require_exact_zip_end(archive_path)
+
     def test_verifier_rejects_duplicate_members(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             archive_path = Path(raw) / "duplicate.zip"

@@ -27,12 +27,35 @@ FORBIDDEN = (
 MAX_ARCHIVE_MEMBERS = 256
 MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_ZIP_COMMENT_BYTES = 65_535
+
+
+def require_exact_zip_end(path: Path) -> None:
+    try:
+        size = path.stat().st_size
+        window_size = min(size, MAX_ZIP_COMMENT_BYTES + 22)
+        with path.open("rb") as handle:
+            handle.seek(size - window_size)
+            tail = handle.read(window_size)
+    except OSError as error:
+        raise SystemExit("release archive cannot be read") from error
+    marker = b"PK\x05\x06"
+    position = tail.find(marker)
+    while position >= 0:
+        if position + 22 <= len(tail):
+            comment_size = int.from_bytes(tail[position + 20 : position + 22], "little")
+            if position + 22 + comment_size == len(tail):
+                return
+        position = tail.find(marker, position + 1)
+    raise SystemExit("release archive is truncated or has trailing data")
 
 
 def validated_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
     members = archive.infolist()
     if not members or len(members) > MAX_ARCHIVE_MEMBERS:
         raise SystemExit("release archive has an invalid member count")
+    if min(member.header_offset for member in members) != 0:
+        raise SystemExit("release archive contains prepended or concatenated data")
     seen: set[str] = set()
     total = 0
     for member in members:
@@ -68,6 +91,7 @@ def validated_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
 
 
 def text_from_zip(path: Path) -> str:
+    require_exact_zip_end(path)
     with zipfile.ZipFile(path) as archive:
         return "\n".join(
             archive.read(member).decode("utf-8", errors="ignore").lower()

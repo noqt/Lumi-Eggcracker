@@ -278,6 +278,28 @@ class FirstKillTests(unittest.TestCase):
             with self.assertRaisesRegex(first_kill.FirstKillError, "link or special"):
                 first_kill.safe_extract(archive, root / "out")
 
+    def test_safe_extract_rejects_trailing_data(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = root / "appended.zip"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("release/install.py", "trusted")
+            with archive.open("ab") as handle:
+                handle.write(b"DAYBREAK-TRAILING-DATA")
+            with self.assertRaisesRegex(first_kill.FirstKillError, "trailing data"):
+                first_kill.safe_extract(archive, root / "out")
+
+    def test_safe_extract_rejects_prepended_data(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            original = root / "original.zip"
+            archive = root / "prepended.zip"
+            with zipfile.ZipFile(original, "w") as bundle:
+                bundle.writestr("release/install.py", "trusted")
+            archive.write_bytes(b"DAYBREAK-PREFIX" + original.read_bytes())
+            with self.assertRaisesRegex(first_kill.FirstKillError, "prepended"):
+                first_kill.safe_extract(archive, root / "out")
+
     def test_checksum_signature_requires_valid_pinned_key_signature(self) -> None:
         imported = mock.Mock(returncode=0, stdout="", stderr="")
         shown = mock.Mock(
