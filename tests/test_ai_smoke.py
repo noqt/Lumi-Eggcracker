@@ -73,6 +73,35 @@ class AiSmokeTests(unittest.TestCase):
             ):
                 autonomous_matrix.stop_selected("operator", "approved-test")
 
+    def test_autonomous_incident_cleanup_waits_for_post_receipt_response(self) -> None:
+        empty = {"incidents": []}
+        active = {
+            "incidents": [
+                {"incident_id": "event-late", "state": "ACTIVE"},
+            ]
+        }
+        cleared = {
+            "incidents": [
+                {"incident_id": "event-late", "state": "CLEARED"},
+            ]
+        }
+        with (
+            mock.patch.object(
+                autonomous_matrix,
+                "root_call",
+                side_effect=[empty, active, {}, cleared],
+            ) as control,
+            mock.patch.object(autonomous_matrix.time, "sleep"),
+        ):
+            count = autonomous_matrix.clear_new_incidents(
+                set(),
+                expected_event_id="event-late",
+                timeout=10,
+                settle_seconds=0,
+            )
+        self.assertEqual(1, count)
+        control.assert_any_call(["incident", "clear", "event-late"])
+
     def test_manifest_assets_must_match_their_recorded_digests(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

@@ -55,18 +55,57 @@ def incident_ids() -> set[str]:
     }
 
 
-def clear_new_incidents(previous: set[str]) -> int:
-    cleared = 0
-    for item in root_call(["incidents"]).get("incidents", []):
-        if (
-            isinstance(item, dict)
+def clear_new_incidents(
+    previous: set[str],
+    *,
+    expected_event_id: str,
+    timeout: float = 8.0,
+    settle_seconds: float = 1.0,
+) -> int:
+    """Wait for post-receipt response persistence, then clear this phase.
+
+    The containment receipt is intentionally durable before local active
+    response.  Polling once immediately after the final receipt can therefore
+    miss the incident and let its lockdown race the following approved phase.
+    """
+    if not expected_event_id or expected_event_id in previous:
+        raise ValueError("expected event identity is invalid")
+    deadline = time.monotonic() + timeout
+    observed_response = False
+    quiet_since: float | None = None
+    cleared: set[str] = set()
+    while time.monotonic() < deadline:
+        incidents = root_call(["incidents"]).get("incidents", [])
+        if not isinstance(incidents, list):
+            raise TypeError("invalid Eggcracker incident response")
+        current_ids = {
+            item["incident_id"]
+            for item in incidents
+            if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+        }
+        new_active = {
+            item["incident_id"]
+            for item in incidents
+            if isinstance(item, dict)
             and item.get("state") == "ACTIVE"
             and isinstance(item.get("incident_id"), str)
             and item["incident_id"] not in previous
-        ):
-            root_call(["incident", "clear", item["incident_id"]])
-            cleared += 1
-    return cleared
+        }
+        observed_response = observed_response or expected_event_id in current_ids or bool(
+            new_active
+        )
+        if new_active:
+            for incident_id in sorted(new_active):
+                root_call(["incident", "clear", incident_id])
+                cleared.add(incident_id)
+            quiet_since = None
+        elif observed_response:
+            now = time.monotonic()
+            quiet_since = now if quiet_since is None else quiet_since
+            if now - quiet_since >= settle_seconds:
+                return len(cleared)
+        time.sleep(0.01)
+    raise RuntimeError("autonomous incident response did not settle before approval")
 
 
 def wait_for_armed_doctor(operator: str, *, timeout: float = 45) -> dict[str, Any]:
@@ -182,6 +221,7 @@ def main() -> int:
         try:
             wait_for_armed_doctor(operator)
             before_incidents = incident_ids()
+            last_event_id = ""
             for index in range(args.discoveries):
                 canary = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
                 process: subprocess.Popen[bytes] | None = None
@@ -196,6 +236,7 @@ def main() -> int:
                     starts.append((receipt["containment"]["first_stop_monotonic_ns"] - started) / 1_000_000)
                     empties.append(float(receipt["containment"]["trigger_to_empty_ms"]))
                     results["discoveries"].append(receipt["event_id"])
+                    last_event_id = str(receipt["event_id"])
                     results["canary_survival"] += 1
                 finally:
                     if process is not None:
@@ -205,7 +246,10 @@ def main() -> int:
             # incident.  Root-clear only this run's incident before the
             # independent approved-survival phase; protected relaunch blocking
             # remains covered by the dedicated incident/lockdown tests.
-            clear_new_incidents(before_incidents)
+            clear_new_incidents(
+                before_incidents,
+                expected_event_id=last_event_id,
+            )
             for index in range(args.approved):
                 approval_name = f"allow-{secrets.token_hex(6)}"
                 run_name = f"approved-{secrets.token_hex(6)}"
