@@ -106,8 +106,12 @@ empty installation targets, required tool availability, and that the local
 published-release reference is an annotated tag resolving to a commit. It makes
 no network request and creates no workspace, GPG home, build, installation or
 service. It does not verify the tag signature, downloaded assets, functional
-build, installation or containment; the full run verifies the signature and
-requires the signed tag commit to match the release manifest.
+build, installation or containment. The full run verifies both the annotated
+tag signature and the detached `SHA256SUMS.asc` signature with the pinned
+release-key fingerprint, requires the downloaded bundle to match that signed
+checksum list, and requires the signed tag commit to match the release
+manifest. It rejects duplicate, link, special and unsafe archive members before
+extraction.
 
 ### Probe the containment primitive
 
@@ -190,10 +194,11 @@ sudo /usr/bin/python3 -I -S scripts/first_kill.py \
   --accept-third-party-downloads
 ```
 
-The command checks host compatibility, downloads and verifies the signed
-release assets, installs the root-controlled supervisor, downloads the pinned
-demo model only after the explicit acceptance flag, launches the real model,
-prints the kill receipt, and offers clean removal. Use `--remove` for a
+The command checks host compatibility, authenticates the tag and detached
+release checksums, verifies the exact downloaded bundle, installs the
+root-controlled supervisor, downloads the pinned demo model only after the
+explicit acceptance flag, launches the real model, prints the kill receipt,
+and offers clean removal. Use `--remove` for a
 non-interactive removal or `--keep` to inspect the installation after the
 demonstration. Share a passing, refused, or confusing supported-path run through
 the [redacted result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=first_kill_result.yml).
@@ -259,10 +264,13 @@ file before attaching it to an issue or discussion.
 
 ## Install and remove
 
-The first-kill command is the recommended campaign path. For a controlled
-installation, use the signed Linux bundle and its `SHA256SUMS`, then run the
-bundled installer as root with a non-root operator. Remove every product-owned
-unit, socket, account and state file with:
+The first-kill command is the recommended campaign path. A release is complete
+only when it carries `SHA256SUMS`, its detached `SHA256SUMS.asc` signature and
+`eggcracker-release-key.asc`; the pinned fingerprint is
+`53786DEB001459956A2E1B86A3F29F7A27636DC7`. For a controlled manual
+installation, verify that signature and the Linux bundle checksum before
+running the bundled installer as root with a non-root operator. Remove every
+product-owned unit, socket, account and state file with:
 
 ```sh
 sudo /usr/bin/python3 -I -S scripts/uninstall.py

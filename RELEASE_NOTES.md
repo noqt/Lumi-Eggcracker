@@ -10,6 +10,10 @@ lockdown.
 The public first-kill helper defaults to `v1.0.0`. The packaged support helper
 delegates to the installed root-owned zipapp, so the documented command works
 from the verified Linux release bundle without importing a mutable checkout.
+The bootstrap now also requires a detached `SHA256SUMS.asc` signature from the
+pinned release key and rejects duplicate, link, special, oversized and unsafe
+ZIP members. A replaced release bundle plus self-recomputed unsigned checksums
+can therefore no longer reach root execution.
 
 The candidate is not tagged, signed or published. Its release decision is
 bound to the exact commit, artifact hashes, disposable Ubuntu qualification

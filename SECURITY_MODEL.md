@@ -23,6 +23,14 @@ remote workloads or a privileged process with a pre-connected external socket.
 
 Heartbeat emission is tied to recent successful discovery completion and durable post-containment detection receipts, not merely to a live worker thread. A blocked or repeatedly failing scan, or any failure to persist a detection receipt after containment, therefore makes `doctor` report `UNSUPPORTED`, stops heartbeats and lets the independent watchdog apply its bounded fail-closed recovery. Receipt-storage health remains latched false until a root operator repairs storage and restarts the supervisor. Model descriptors and executable runtime mappings are inspected in bounded stripes, and the stripe generation is reserved in root-owned state before scanning. Every executable mapping line within the bounded 8 MiB procfs read is eligible for those stripes; the observer does not silently truncate the mapping table at a line-count prefix. A process table beyond that byte bound explicitly fails discovery health rather than silently omitting its suffix. Runtime evidence is accepted only from the running executable or an executable mapping backed by a structurally loadable ELF whose complete SHA-256 matches the qualified release pin; build IDs and symbol names are prefilters, not trust anchors. An ordinary open ELF descriptor or read-only data mapping is not runtime evidence. A deleted executable mapping may use a retained descriptor only when its kernel mount/inode identity matches that mapping. A supervisor restart advances the stripe generation instead of returning every still-live process to the first descriptor window.
 
+The public first-kill path authenticates two separate release bindings with the
+pinned release key: the annotated Git tag fixes the source commit, while the
+detached `SHA256SUMS.asc` signature fixes the published binary assets. The
+downloaded Linux bundle must match the signed checksum and its manifest/source
+identity must match the signed tag before any bundled installer is run.
+Duplicate, link, special, oversized and unsafe archive members are rejected
+before extraction. An unsigned checksum file is not release authority.
+
 This is not a general sandbox, universal AI detector, host intrusion detector,
 malware detector, host-wide network isolator, credential isolator or EDR
 replacement. An unapproved workload can evade recognition by using an

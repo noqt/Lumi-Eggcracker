@@ -6,10 +6,11 @@ import argparse
 import hashlib
 import json
 import re
+import stat
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 FORBIDDEN = (
     "/mnt/" + "f/",
@@ -23,14 +24,55 @@ FORBIDDEN = (
     "skylark" + " sentinel",
     "skylark" + "-sentinel",
 )
+MAX_ARCHIVE_MEMBERS = 256
+MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
+
+
+def validated_members(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+    members = archive.infolist()
+    if not members or len(members) > MAX_ARCHIVE_MEMBERS:
+        raise SystemExit("release archive has an invalid member count")
+    seen: set[str] = set()
+    total = 0
+    for member in members:
+        name = member.filename
+        path = PurePosixPath(name)
+        parts = path.parts
+        normalized = path.as_posix().rstrip("/")
+        if (
+            not name
+            or "\x00" in name
+            or "\\" in name
+            or path.is_absolute()
+            or not normalized
+            or any(part in ("", ".", "..") for part in parts)
+            or (len(parts[0]) >= 2 and parts[0][1] == ":")
+        ):
+            raise SystemExit("release archive contains an unsafe path")
+        if normalized in seen:
+            raise SystemExit("release archive contains a duplicate path")
+        seen.add(normalized)
+        mode = (member.external_attr >> 16) & 0xFFFF
+        file_type = stat.S_IFMT(mode)
+        if member.flag_bits & 0x1 or file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+            raise SystemExit("release archive contains a link or special member")
+        if member.is_dir() != (file_type == stat.S_IFDIR) and file_type != 0:
+            raise SystemExit("release archive member type is inconsistent")
+        if member.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            raise SystemExit("release archive member exceeds the verification limit")
+        total += member.file_size
+        if total > MAX_ARCHIVE_TOTAL_BYTES:
+            raise SystemExit("release archive exceeds the verification limit")
+    return members
 
 
 def text_from_zip(path: Path) -> str:
     with zipfile.ZipFile(path) as archive:
         return "\n".join(
-            archive.read(name).decode("utf-8", errors="ignore").lower()
-            for name in archive.namelist()
-            if name.endswith((".py", ".md", ".toml", ".txt"))
+            archive.read(member).decode("utf-8", errors="ignore").lower()
+            for member in validated_members(archive)
+            if member.filename.endswith((".py", ".md", ".toml", ".txt"))
         )
 
 
@@ -50,10 +92,14 @@ def checksums(path: Path) -> dict[str, str]:
 
 def artifact_source_commit(path: Path) -> str:
     with zipfile.ZipFile(path) as archive:
-        try:
-            raw = archive.read("lumi_eggcracker/build_info.py")
-        except KeyError as error:
-            raise SystemExit("artifact source identity is missing") from error
+        matches = [
+            member
+            for member in validated_members(archive)
+            if member.filename == "lumi_eggcracker/build_info.py"
+        ]
+        if len(matches) != 1:
+            raise SystemExit("artifact source identity is missing")
+        raw = archive.read(matches[0])
     match = re.fullmatch(b'SOURCE_COMMIT = "([0-9a-f]{40})"\r?\n', raw)
     if match is None:
         raise SystemExit("artifact source identity is invalid")
@@ -148,7 +194,8 @@ def main() -> int:
         )
     }
     with zipfile.ZipFile(args.release_bundle) as archive:
-        if set(archive.namelist()) != expected:
+        members = validated_members(archive)
+        if {member.filename for member in members} != expected:
             raise SystemExit("release bundle contents are inconsistent")
         if (
             digest_bytes(archive.read(prefix + args.artifact.name)) != manifest["sha256"]

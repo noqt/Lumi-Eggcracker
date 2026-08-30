@@ -8,6 +8,9 @@
   verification and the adaptive campaign evidence plan.
 - Make the public first-kill path default to `v1.0.0` and make the support
   helper use the installed, root-owned zipapp shipped by the verified bundle.
+- Require a detached release-checksum signature from the pinned release key and
+  reject duplicate, link, special, oversized and unsafe ZIP members before any
+  bundled installer can reach root execution.
 - Keep publication, signing, tagging and external deployment as separate
   decisions.
 

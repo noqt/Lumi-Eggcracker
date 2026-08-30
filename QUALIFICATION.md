@@ -63,7 +63,19 @@ Five release-blocking Priority-0 campaigns are mandatory:
 5. privileged installer attacks: hostile Python import hooks, symlinked inputs,
    expected-digest/manifest/version/source drift, traversal archive, partial
    prior installation, pre-existing-install refusal and a pathname replacement
-   after the installer binds its artifact descriptor.
+   after the installer binds its artifact descriptor. The public bootstrap must
+   also reject an absent or invalid detached checksum signature, self-recomputed
+   unsigned checksums, duplicate/normalized-duplicate members, archive links or
+   special members and a bundle whose authenticated asset identity disagrees
+   with the signed tag source identity.
+
+Before publication, sign the final detached checksum list with the private key
+corresponding to fingerprint
+`53786DEB001459956A2E1B86A3F29F7A27636DC7`, publish `SHA256SUMS.asc` beside
+`SHA256SUMS`, the Linux bundle and `eggcracker-release-key.asc`, and rerun the
+public first-kill asset-authentication path against those exact uploaded bytes.
+CI build artifacts without that detached signature are build outputs, not a
+releasable distribution.
 
 The control-plane parser must also reject, without replacing the supervisor,
 a valid sub-32-KiB JSON request containing an integer beyond the supported

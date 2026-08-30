@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import platform
+import re
 import secrets
 import shutil
 import signal
@@ -23,7 +24,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
@@ -48,6 +49,9 @@ INSTALL_TARGETS = (
     Path("/etc/tmpfiles.d/lumi-eggcracker.conf"),
 )
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 256
+MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 DEFAULT_AI_SMOKE_WORKSPACE = Path("/opt/lumi-eggcracker-ai-smoke")
 QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
@@ -104,18 +108,61 @@ def parse_checksums(path: Path) -> dict[str, str]:
         raise FirstKillError("release SHA256SUMS is unreadable") from error
     for line in lines:
         fields = line.split(maxsplit=1)
-        if len(fields) != 2 or len(fields[0]) != 64:
+        if len(fields) != 2 or len(fields[0]) != 64 or any(
+            character not in "0123456789abcdefABCDEF" for character in fields[0]
+        ):
             raise FirstKillError("release SHA256SUMS contains an invalid line")
-        values[fields[1].removeprefix("*")] = fields[0].lower()
+        name = fields[1].removeprefix("*")
+        if not name or name in values:
+            raise FirstKillError("release SHA256SUMS contains a duplicate or empty name")
+        values[name] = fields[0].lower()
     if not values:
         raise FirstKillError("release SHA256SUMS is empty")
     return values
 
 
+def validated_zip_members(bundle: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+    members = bundle.infolist()
+    if not members or len(members) > MAX_ARCHIVE_MEMBERS:
+        raise FirstKillError("release bundle has an invalid member count")
+    seen: set[str] = set()
+    total = 0
+    for member in members:
+        name = member.filename
+        path = PurePosixPath(name)
+        parts = path.parts
+        normalized = path.as_posix().rstrip("/")
+        if (
+            not name
+            or "\x00" in name
+            or "\\" in name
+            or path.is_absolute()
+            or not normalized
+            or any(part in ("", ".", "..") for part in parts)
+            or (len(parts[0]) >= 2 and parts[0][1] == ":")
+        ):
+            raise FirstKillError("release bundle contains an unsafe path")
+        if normalized in seen:
+            raise FirstKillError("release bundle contains a duplicate path")
+        seen.add(normalized)
+        mode = (member.external_attr >> 16) & 0xFFFF
+        file_type = stat.S_IFMT(mode)
+        if member.flag_bits & 0x1 or file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+            raise FirstKillError("release bundle contains a link or special member")
+        if member.is_dir() != (file_type == stat.S_IFDIR) and file_type != 0:
+            raise FirstKillError("release bundle member type is inconsistent")
+        if member.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            raise FirstKillError("release bundle member exceeds the extraction limit")
+        total += member.file_size
+        if total > MAX_ARCHIVE_TOTAL_BYTES:
+            raise FirstKillError("release bundle exceeds the extraction limit")
+    return members
+
+
 def safe_extract(archive: Path, destination: Path) -> None:
     try:
         with zipfile.ZipFile(archive) as bundle:
-            members = bundle.infolist()
+            members = validated_zip_members(bundle)
             for member in members:
                 candidate = (destination / member.filename).resolve()
                 if not candidate.is_relative_to(destination.resolve()):
@@ -157,6 +204,22 @@ def require_regular(path: Path, description: str) -> None:
         raise FirstKillError(f"{description} is missing: {path}") from error
     if path.is_symlink() or not stat.S_ISREG(metadata.st_mode):
         raise FirstKillError(f"{description} must be a regular file: {path}")
+
+
+def require_root_directory(path: Path, description: str, *, private: bool) -> None:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise FirstKillError(f"{description} is missing: {path}") from error
+    forbidden_mode = 0o077 if private else 0o022
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0
+        or stat.S_IMODE(metadata.st_mode) & forbidden_mode
+    ):
+        access = "root-private" if private else "root-owned and not writable by group/other"
+        raise FirstKillError(f"{description} must be a {access} directory: {path}")
 
 
 def operator_name(explicit: str | None) -> str:
@@ -271,49 +334,129 @@ def run_preflight(operator_value: str | None, tag: str) -> int:
     return 0
 
 
+def import_release_key(gpg_home: Path, key: Path) -> None:
+    imported = run(
+        ["/usr/bin/gpg", "--homedir", str(gpg_home), "--batch", "--import", str(key)],
+        check=False,
+    )
+    if imported.returncode:
+        raise FirstKillError(imported.stderr.strip() or "release public key import failed")
+    shown = run(
+        [
+            "/usr/bin/gpg",
+            "--homedir",
+            str(gpg_home),
+            "--batch",
+            "--with-colons",
+            "--show-keys",
+            str(key),
+        ]
+    )
+    primary_fingerprints: list[str] = []
+    expect_primary_fingerprint = False
+    for line in shown.stdout.splitlines():
+        fields = line.split(":")
+        if fields[0] == "pub":
+            expect_primary_fingerprint = True
+        elif fields[0] == "fpr" and expect_primary_fingerprint:
+            primary_fingerprints.append(fields[9].upper())
+            expect_primary_fingerprint = False
+    if primary_fingerprints != [RELEASE_KEY_FINGERPRINT]:
+        raise FirstKillError(
+            "downloaded release key does not contain exactly the published primary key"
+        )
+
+
+def require_pinned_valid_signature(
+    result: subprocess.CompletedProcess[str], description: str
+) -> None:
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise FirstKillError(f"{description} verification failed: {detail}")
+    fingerprints: set[str] = set()
+    marker = "[GNUPG:] VALIDSIG "
+    for line in (result.stdout + "\n" + result.stderr).splitlines():
+        position = line.find(marker)
+        if position < 0:
+            continue
+        for value in line[position + len(marker) :].split():
+            if re.fullmatch(r"[0-9A-Fa-f]{40}", value):
+                fingerprints.add(value.upper())
+    if RELEASE_KEY_FINGERPRINT not in fingerprints:
+        raise FirstKillError(f"{description} was not signed by the pinned release key")
+
+
 def verify_tag(root: Path, tag: str, key: Path) -> str:
     gpg_home = Path(tempfile.mkdtemp(prefix="eggcracker-gpg-"))
     os.chmod(gpg_home, 0o700)
     try:
-        imported = run(["/usr/bin/gpg", "--homedir", str(gpg_home), "--batch", "--import", str(key)])
-        if imported.returncode:
-            raise FirstKillError(imported.stderr.strip() or "release public key import failed")
-        shown = run(
-            ["/usr/bin/gpg", "--homedir", str(gpg_home), "--batch", "--with-colons", "--show-keys", str(key)]
-        )
-        fingerprints = [line.split(":")[9].upper() for line in shown.stdout.splitlines() if line.startswith("fpr:")]
-        if RELEASE_KEY_FINGERPRINT not in fingerprints:
-            raise FirstKillError("downloaded release key fingerprint does not match the published fingerprint")
+        import_release_key(gpg_home, key)
         env = os.environ.copy()
         env["GNUPGHOME"] = str(gpg_home)
-        verified = run(["/usr/bin/git", "-C", str(root), "tag", "-v", tag], env=env, check=False)
-        if verified.returncode:
-            detail = (verified.stderr or verified.stdout).strip()
-            raise FirstKillError(f"signed tag verification failed: {detail}")
+        verified = run(
+            ["/usr/bin/git", "-C", str(root), "verify-tag", "--raw", tag],
+            env=env,
+            check=False,
+        )
+        require_pinned_valid_signature(verified, "signed tag")
         commit = run(["/usr/bin/git", "-C", str(root), "rev-parse", f"{tag}^{{}}"])
         return commit.stdout.strip()
     finally:
         shutil.rmtree(gpg_home, ignore_errors=True)
 
 
-def release_files(tag: str, workspace: Path) -> tuple[Path, Path]:
+def verify_checksum_signature(key: Path, sums: Path, signature: Path) -> None:
+    gpg_home = Path(tempfile.mkdtemp(prefix="eggcracker-gpg-"))
+    os.chmod(gpg_home, 0o700)
+    try:
+        import_release_key(gpg_home, key)
+        verified = run(
+            [
+                "/usr/bin/gpg",
+                "--homedir",
+                str(gpg_home),
+                "--batch",
+                "--status-fd",
+                "1",
+                "--verify",
+                str(signature),
+                str(sums),
+            ],
+            check=False,
+        )
+        require_pinned_valid_signature(verified, "release checksum signature")
+    finally:
+        shutil.rmtree(gpg_home, ignore_errors=True)
+
+
+def verify_bundle_checksum(bundle: Path, sums: Path) -> None:
+    expected = parse_checksums(sums)
+    if expected.get(bundle.name) != digest(bundle):
+        raise FirstKillError("downloaded Linux bundle does not match signed SHA256SUMS")
+
+
+def release_files(tag: str, workspace: Path) -> tuple[Path, Path, Path, Path]:
     version = tag.removeprefix("v")
     if not version.replace(".", "").isdigit() or version.count(".") != 2:
         raise FirstKillError("tag must look like v1.0.0")
     base = f"https://github.com/{REPOSITORY}/releases/download/{tag}"
     sums = workspace / "SHA256SUMS"
+    signature = workspace / "SHA256SUMS.asc"
     bundle = workspace / f"lumi-eggcracker-{version}-linux.zip"
     key = workspace / "eggcracker-release-key.asc"
     download(f"{base}/SHA256SUMS", sums, maximum=64 * 1024)
-    expected = parse_checksums(sums)
+    download(f"{base}/SHA256SUMS.asc", signature, maximum=64 * 1024)
     download(f"{base}/{bundle.name}", bundle, maximum=8 * 1024 * 1024)
     download(f"{base}/{key.name}", key, maximum=64 * 1024)
-    if expected.get(bundle.name) != digest(bundle):
-        raise FirstKillError("downloaded Linux bundle does not match release SHA256SUMS")
-    require_regular(key, "release public key")
+    for path, description in (
+        (sums, "release SHA256SUMS"),
+        (signature, "release checksum signature"),
+        (key, "release public key"),
+    ):
+        require_regular(path, description)
     if b"BEGIN PGP PRIVATE KEY BLOCK" in key.read_bytes():
         raise FirstKillError("release key asset unexpectedly contains private key material")
-    return bundle, key
+    return bundle, key, sums, signature
 
 
 def extracted_release(bundle: Path, workspace: Path) -> Path:
@@ -579,7 +722,14 @@ def prepare_workspace(path: Path) -> Path:
     if path.exists():
         if path.is_symlink() or not path.is_dir():
             raise FirstKillError("--workspace must be a non-symlink directory")
-        allowed = {"ai-smoke", "release", "SHA256SUMS", "eggcracker-release-key.asc"}
+        require_root_directory(path, "--workspace", private=True)
+        allowed = {
+            "ai-smoke",
+            "release",
+            "SHA256SUMS",
+            "SHA256SUMS.asc",
+            "eggcracker-release-key.asc",
+        }
         unexpected = [
             item.name
             for item in path.iterdir()
@@ -599,6 +749,7 @@ def prepare_workspace(path: Path) -> Path:
     else:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path, 0o700)
+    require_root_directory(path, "--workspace", private=True)
     return path
 
 
@@ -680,9 +831,13 @@ def main(argv: list[str] | None = None) -> int:
         ai_workspace_preexisting = ai_workspace.exists()
         if ai_workspace.is_symlink() or (ai_workspace.exists() and not ai_workspace.is_dir()):
             raise FirstKillError("--ai-workspace must be a non-symlink directory")
+        if ai_workspace_preexisting:
+            require_root_directory(ai_workspace, "--ai-workspace", private=False)
         say(f"downloading and checking signed {args.tag} release assets")
-        bundle, key = release_files(args.tag, workspace)
+        bundle, key, sums, signature = release_files(args.tag, workspace)
         commit = verify_tag(root, args.tag, key)
+        verify_checksum_signature(key, sums, signature)
+        verify_bundle_checksum(bundle, sums)
         release_root = extracted_release(bundle, workspace)
         release = manifest(release_root)
         if release.get("source_commit") != commit:
