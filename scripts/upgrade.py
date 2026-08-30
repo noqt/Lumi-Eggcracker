@@ -143,16 +143,21 @@ def drain(operator: str, transaction: str) -> None:
 def snapshot_files(manifest: dict[str, Any], backup: Path) -> dict[str, Any]:
     files: dict[str, Any] = {}
     paths = {Path(path) for path in manifest["files"]}
-    paths.update({installer.BIN, installer.LIB / "lumi-eggcracker.pyz", installer.ETC / "detector_catalogue.json", installer.ETC / "policy.json", installer.UNIT, installer.WATCHDOG_UNIT, STATE / "install-manifest.json"})
+    paths.update({installer.BIN, installer.LIB / "lumi-eggcracker.pyz", installer.ETC / "detector_catalogue.json", installer.ETC / "policy.json", installer.TMPFILES, installer.UNIT, installer.WATCHDOG_UNIT, STATE / "install-manifest.json"})
     target = backup / "files"
     target.mkdir(mode=0o700, parents=True)
     for index, path in enumerate(sorted(paths, key=str)):
-        if path.is_symlink() or not path.is_file():
+        if path.is_symlink():
+            raise RuntimeError(f"upgrade snapshot target is a symlink: {path}")
+        if not path.exists():
+            files[str(path)] = {"absent": True}
             continue
+        if not path.is_file():
+            raise RuntimeError(f"upgrade snapshot target is not a file: {path}")
         stored = target / f"{index:03d}.bin"
         shutil.copyfile(path, stored)
         metadata = path.stat()
-        files[str(path)] = {"stored": stored.name, "mode": stat.S_IMODE(metadata.st_mode), "uid": metadata.st_uid, "gid": metadata.st_gid}
+        files[str(path)] = {"absent": False, "stored": stored.name, "mode": stat.S_IMODE(metadata.st_mode), "uid": metadata.st_uid, "gid": metadata.st_gid}
     if RUNS.is_dir() and not RUNS.is_symlink():
         shutil.copytree(RUNS, backup / "runs")
     return files
@@ -161,6 +166,11 @@ def snapshot_files(manifest: dict[str, Any], backup: Path) -> dict[str, Any]:
 def restore_snapshot(backup: Path, files: dict[str, Any]) -> None:
     for raw_path, metadata in files.items():
         path = Path(raw_path)
+        if metadata.get("absent") is True:
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise RuntimeError(f"upgrade rollback target changed type: {path}")
+            path.unlink(missing_ok=True)
+            continue
         stored = backup / "files" / str(metadata["stored"])
         if not stored.is_file() or path.is_symlink():
             raise RuntimeError(f"upgrade backup is incomplete for {path}")
@@ -225,12 +235,13 @@ def replace_install(release: dict[str, Any], operator: pwd.struct_passwd, manife
     atomic_bytes(installer.ETC / "detector_catalogue.json", catalogue, 0o644)
     policy = new_policy(release, operator, manifest)
     atomic_bytes(installer.ETC / "policy.json", (json.dumps(policy, sort_keys=True) + "\n").encode())
+    atomic_bytes(installer.TMPFILES, installer.tmpfiles(), 0o644)
     atomic_bytes(installer.UNIT, installer._SERVICE_RELEASE.replace(b"Requires=lumi-eggcracker-watchdog.service\n\n", b"Requires=lumi-eggcracker-watchdog.service\nStartLimitIntervalSec=0\n\n"), 0o644)
     atomic_bytes(installer.WATCHDOG_UNIT, installer.watchdog_service().replace(b"Before=lumi-eggcracker.service\n\n", b"Before=lumi-eggcracker.service\nStartLimitIntervalSec=0\n\n"), 0o644)
     updated = {
         "created_workload_group": bool(manifest.get("created_workload_group")),
         "created_workload_user": bool(manifest.get("created_workload_user")),
-        "files": {str(path): digest(path) for path in (installer.BIN, installer.ETC / "detector_catalogue.json", installer.ETC / "policy.json", installer.LIB / "lumi-eggcracker.pyz", installer.UNIT, installer.WATCHDOG_UNIT)},
+        "files": {str(path): digest(path) for path in (installer.BIN, installer.ETC / "detector_catalogue.json", installer.ETC / "policy.json", installer.LIB / "lumi-eggcracker.pyz", installer.TMPFILES, installer.UNIT, installer.WATCHDOG_UNIT)},
         "operator": operator.pw_name,
         "operator_uid": operator.pw_uid,
         "schema_version": "lumi-eggcracker.install.v5",
@@ -266,6 +277,7 @@ def socket_ready(operator_gid: int) -> bool:
 
 def start_services(operator: str) -> None:
     operator_account = pwd.getpwnam(operator)
+    installer.ensure_netns_runtime()
     for unit in ("lumi-eggcracker-watchdog.service", "lumi-eggcracker.service"):
         result = run(["/usr/bin/systemctl", "enable", "--now", unit])
         if result.returncode:
@@ -314,6 +326,7 @@ def upgrade(args: argparse.Namespace) -> int:
     descriptor = os.open(args.artifact, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     try:
         release = installer.manifest_for(args.artifact, descriptor, args.expected_sha256)
+        start_services(operator.pw_name)
         transaction = secrets.token_hex(8)
         backup = BACKUPS / transaction
         backup.mkdir(mode=0o700, parents=True)

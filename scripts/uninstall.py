@@ -34,6 +34,7 @@ BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
 UNIT = Path("/etc/systemd/system/lumi-eggcracker.service")
 WATCHDOG_UNIT = Path("/etc/systemd/system/lumi-eggcracker-watchdog.service")
+TMPFILES = Path("/etc/tmpfiles.d/lumi-eggcracker.conf")
 STATE = Path("/var/lib/lumi-eggcracker")
 RUNTIME = Path("/run/lumi-eggcracker")
 WATCHDOG_RUNTIME = Path("/run/lumi-eggcracker-watchdog")
@@ -193,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("refusing uninstall because cgroups remained populated after stop")
         reset_failed(SUPERVISOR)
         reset_failed(WATCHDOG)
-        for path in (UNIT, WATCHDOG_UNIT, BIN, LIB, ETC, STATE, RUNTIME, WATCHDOG_RUNTIME):
+        for path in (UNIT, WATCHDOG_UNIT, TMPFILES, BIN, LIB, ETC, STATE, RUNTIME, WATCHDOG_RUNTIME):
             if path.exists() and not path.is_symlink():
                 shutil.rmtree(path) if path.is_dir() else path.unlink()
         if manifest.get("created_workload_user"):

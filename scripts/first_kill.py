@@ -46,6 +46,7 @@ INSTALL_TARGETS = (
     Path("/run/lumi-eggcracker-watchdog"),
     Path("/etc/systemd/system/lumi-eggcracker.service"),
     Path("/etc/systemd/system/lumi-eggcracker-watchdog.service"),
+    Path("/etc/tmpfiles.d/lumi-eggcracker.conf"),
 )
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")

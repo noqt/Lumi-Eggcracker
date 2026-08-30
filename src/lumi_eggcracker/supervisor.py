@@ -2744,6 +2744,7 @@ class Supervisor:
                 "/etc/lumi-eggcracker/policy.json",
                 "/etc/systemd/system/lumi-eggcracker.service",
                 "/etc/systemd/system/lumi-eggcracker-watchdog.service",
+                "/etc/tmpfiles.d/lumi-eggcracker.conf",
             }
             if not isinstance(files, dict) or set(files) != expected_paths:
                 return {"state": "DRIFT", "journal": False, "files_match": False}

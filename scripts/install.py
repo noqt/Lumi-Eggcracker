@@ -41,15 +41,27 @@ BIN = Path("/usr/local/bin/eggcracker")
 ETC = Path("/etc/lumi-eggcracker")
 UNIT = Path("/etc/systemd/system/lumi-eggcracker.service")
 WATCHDOG_UNIT = Path("/etc/systemd/system/lumi-eggcracker-watchdog.service")
+TMPFILES = Path("/etc/tmpfiles.d/lumi-eggcracker.conf")
 STATE = Path("/var/lib/lumi-eggcracker")
 RUNTIME = Path("/run/lumi-eggcracker")
+NETNS_RUNTIME = Path("/run/netns")
 QUERY_SOCKET = RUNTIME / "query.sock"
 OPERATOR_SOCKET = RUNTIME / "operator.sock"
 ADMIN_SOCKET = RUNTIME / "admin.sock"
 WATCHDOG_RUNTIME = Path("/run/lumi-eggcracker-watchdog")
 HEARTBEAT_SOCKET = WATCHDOG_RUNTIME / "heartbeat.sock"
 WORKLOAD_NAME = "lumi-eggcracker-workload"
-TARGETS = (LIB, BIN, ETC, UNIT, WATCHDOG_UNIT, STATE, RUNTIME, WATCHDOG_RUNTIME)
+TARGETS = (
+    LIB,
+    BIN,
+    ETC,
+    UNIT,
+    WATCHDOG_UNIT,
+    TMPFILES,
+    STATE,
+    RUNTIME,
+    WATCHDOG_RUNTIME,
+)
 INSTALLER_VERSION = "1.0.0"
 MAX_RELEASE_MANIFEST_BYTES = 32 * 1024
 
@@ -228,6 +240,30 @@ def watchdog_service() -> bytes:
     return b"""[Unit]\nDescription=Lumi Eggcracker fail-closed watchdog\nBefore=lumi-eggcracker.service\n\n[Service]\nType=simple\nExecStart=/usr/bin/python3 -I -S /usr/local/lib/lumi-eggcracker/lumi-eggcracker.pyz _watchdog --policy /etc/lumi-eggcracker/policy.json\nRestart=always\nRestartSec=0.1\nRuntimeDirectory=lumi-eggcracker-watchdog\nRuntimeDirectoryMode=0700\nUMask=0077\nNoNewPrivileges=yes\nMemoryMin=16M\nMemoryMax=64M\nCPUWeight=10000\nIOWeight=1000\nTasksMax=32\nLimitNOFILE=4096\nOOMScoreAdjust=-1000\nProtectSystem=strict\nReadWritePaths=/var/lib/lumi-eggcracker /run/lumi-eggcracker-watchdog\nProtectHome=yes\nPrivateTmp=yes\nPrivateDevices=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectKernelLogs=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\nRestrictRealtime=yes\nRestrictAddressFamilies=AF_UNIX\nSystemCallArchitectures=native\n\n[Install]\nWantedBy=multi-user.target\n"""
 
 
+def tmpfiles() -> bytes:
+    """Provision the standard volatile network-namespace mount directory."""
+    return b"d /run/netns 0755 root root -\n"
+
+
+def ensure_netns_runtime() -> None:
+    """Create or validate /run/netns without taking ownership of its contents."""
+    try:
+        metadata = NETNS_RUNTIME.lstat()
+    except FileNotFoundError:
+        NETNS_RUNTIME.mkdir(mode=0o755)
+        os.chown(NETNS_RUNTIME, 0, 0)
+        os.chmod(NETNS_RUNTIME, 0o755)
+        metadata = NETNS_RUNTIME.lstat()
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise RuntimeError("/run/netns must be a root-owned non-writable directory")
+
+
 def autonomous_primitives_available() -> bool:
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         return False
@@ -380,7 +416,10 @@ def main() -> int:
         created.append(UNIT)
         write_new(WATCHDOG_UNIT, watchdog_service().replace(b"Before=lumi-eggcracker.service\n\n", b"Before=lumi-eggcracker.service\nStartLimitIntervalSec=0\n\n"), 0o644)
         created.append(WATCHDOG_UNIT)
-        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(UNIT): digest(UNIT), str(WATCHDOG_UNIT): digest(WATCHDOG_UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v5", "targets": [str(path) for path in TARGETS], "version": release["version"], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
+        write_new(TMPFILES, tmpfiles(), 0o644)
+        created.append(TMPFILES)
+        ensure_netns_runtime()
+        manifest = {"created_workload_group": created_group, "created_workload_user": created_user, "files": {str(BIN): digest(BIN), str(catalogue_path): digest(catalogue_path), str(ETC / "policy.json"): digest(ETC / "policy.json"), str(LIB / "lumi-eggcracker.pyz"): digest(LIB / "lumi-eggcracker.pyz"), str(TMPFILES): digest(TMPFILES), str(UNIT): digest(UNIT), str(WATCHDOG_UNIT): digest(WATCHDOG_UNIT)}, "operator": operator.pw_name, "operator_uid": operator.pw_uid, "schema_version": "lumi-eggcracker.install.v5", "targets": [str(path) for path in TARGETS], "version": release["version"], "workload_group": group.gr_name, "workload_uid": account.pw_uid, "workload_user": account.pw_name}
         write_new(STATE / "install-manifest.json", (json.dumps(manifest, sort_keys=True) + "\n").encode(), 0o600)
         checked = run(["/usr/bin/systemctl", "daemon-reload"])
         started_watchdog = run(["/usr/bin/systemctl", "enable", "--now", "lumi-eggcracker-watchdog.service"])

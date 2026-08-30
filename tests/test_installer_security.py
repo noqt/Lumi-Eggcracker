@@ -78,3 +78,17 @@ class InstallerSecurityTests(unittest.TestCase):
         self.assertIn("/proc/self/fd/{artifact_descriptor}", installer)
         self.assertIn("read_stable_regular", installer)
         self.assertIn("artifact_source_commit", installer)
+
+    def test_install_tracks_cold_boot_network_namespace_runtime(self) -> None:
+        installer = INSTALLER.read_text(encoding="utf-8")
+        upgrader = (ROOT / "scripts" / "upgrade.py").read_text(encoding="utf-8")
+        uninstaller = UNINSTALLER.read_text(encoding="utf-8")
+        verifier = (ROOT / "scripts" / "verify_uninstalled.py").read_text(
+            encoding="utf-8"
+        )
+
+        for value in (installer, upgrader, uninstaller, verifier):
+            self.assertIn("/etc/tmpfiles.d/lumi-eggcracker.conf", value)
+        self.assertIn("d /run/netns 0755 root root -", installer)
+        self.assertIn("ensure_netns_runtime()", installer)
+        self.assertIn("installer.ensure_netns_runtime()", upgrader)
