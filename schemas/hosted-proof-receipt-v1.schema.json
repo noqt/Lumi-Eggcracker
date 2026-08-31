@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/schemas/hosted-proof-receipt-v1.schema.json",
   "title": "Lumi Eggcracker hosted-proof receipt v1",
-  "description": "Public contract for the current hosted containment proof's success and safe-refusal receipts.",
+  "description": "Public contract for the current hosted containment proof's success and redacted refusal-or-failure receipts.",
   "oneOf": [
     {
       "title": "Successful containment proof",
@@ -79,7 +79,7 @@
         "trigger_to_empty_ms": {
           "type": "number",
           "minimum": 0,
-          "maximum": 120000
+          "maximum": 20000
         },
         "workload_detection_performed": {
           "const": false

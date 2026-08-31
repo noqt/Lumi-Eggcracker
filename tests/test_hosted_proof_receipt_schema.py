@@ -27,6 +27,14 @@ def workflow_failure_codes() -> set[str]:
     return values
 
 
+def workflow_latency_maximum_ms() -> int:
+    workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
+    match = re.search(r"or latency > ([0-9_]+)", workflow)
+    if match is None:
+        raise AssertionError("hosted workflow latency bound is missing")
+    return int(match.group(1).replace("_", ""))
+
+
 def success_receipt() -> dict[str, object]:
     return {
         "canary_survived": True,
@@ -74,6 +82,11 @@ class HostedProofReceiptSchemaTests(unittest.TestCase):
         self.assertEqual(probe.SUCCESS_KEYS, properties)
         self.assertFalse(self.success["additionalProperties"])
         self.validator.validate(success_receipt())
+
+    def test_success_latency_bound_matches_probe_and_hosted_workflow(self) -> None:
+        maximum = self.success["properties"]["trigger_to_empty_ms"]["maximum"]
+        self.assertEqual(probe.TOTAL_TIMEOUT_SECONDS * 1000, maximum)
+        self.assertEqual(workflow_latency_maximum_ms(), maximum)
 
     def test_success_constants_match_current_probe(self) -> None:
         constants = {
@@ -123,8 +136,9 @@ class HostedProofReceiptSchemaTests(unittest.TestCase):
     def test_wrong_constants_and_types_are_rejected(self) -> None:
         wrong_result = {**success_receipt(), "result": "FAILED"}
         wrong_latency = {**success_receipt(), "trigger_to_empty_ms": "1.25"}
+        excessive_latency = {**success_receipt(), "trigger_to_empty_ms": 20_000.001}
         wrong_failure_result = {**probe.failure_receipt("ROOT_REQUIRED"), "result": "TERMINATED"}
-        for receipt in (wrong_result, wrong_latency, wrong_failure_result):
+        for receipt in (wrong_result, wrong_latency, excessive_latency, wrong_failure_result):
             with self.subTest(receipt=receipt), self.assertRaises(ValidationError):
                 self.validator.validate(receipt)
 

@@ -274,7 +274,7 @@ jobs:
                       type(latency) not in {int, float}
                       or not math.isfinite(latency)
                       or latency < 0
-                      or latency > 120_000
+                      or latency > 20_000
                   ):
                       unexpected()
                   print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
