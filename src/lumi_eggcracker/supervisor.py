@@ -458,6 +458,20 @@ class Supervisor:
         for _, path in removable[:remove_count]:
             path.unlink(missing_ok=True)
 
+    def _stored_boundary_cleanup_healthy(self) -> bool:
+        """Reject clean health while a terminal run still owns namespace mounts."""
+        try:
+            for path in self.runs.glob("*.json"):
+                record = load_run(self.runs, path.stem)
+                if record["state"] in ACTIVE_STATES or record.get("boundary") is None:
+                    continue
+                boundary = OfflineBoundary.from_record(record["boundary"])
+                if boundary.namespace_mounts_present():
+                    return False
+        except (JsonInputError, OSError):
+            return False
+        return True
+
     def _load(self, name: str) -> dict[str, Any]:
         pointer = load_regular_json(name_path(self.names, name))
         if set(pointer) != {"run_id"}:
@@ -1108,6 +1122,21 @@ class Supervisor:
                     latest["state"] = "CONTAINMENT_FAILED"
                     self._store(latest)
 
+    def _cleanup_discovered_run_boundaries(
+        self, records: tuple[dict[str, Any], ...]
+    ) -> None:
+        """Reclaim exact owned boundaries after autonomous containment is durable."""
+        for record in records:
+            if record.get("boundary") is None:
+                continue
+            try:
+                self._teardown_boundary(record)
+            except (JsonInputError, OSError):
+                # Containment and its receipt remain authoritative. Keep the
+                # retained run identity for restart recovery and fail health
+                # until exact identity-checked cleanup succeeds.
+                self.boundary_cleanup_healthy = False
+
     def _discovery_containment_targets(
         self,
         group: tuple[_EvidenceCandidate, ...],
@@ -1641,6 +1670,7 @@ class Supervisor:
                 discovered_run_cgroups
             )
             self._store_detection(receipt)
+            self._cleanup_discovered_run_boundaries(terminated_runs)
             incident_record = (
                 terminated_runs[0] if len(terminated_runs) == 1 else None
             )
@@ -3080,12 +3110,16 @@ class Supervisor:
                 in Path("/sys/fs/cgroup/cgroup.controllers").read_text(encoding="ascii").split()
             )
             now_ns = time.monotonic_ns()
+            boundary_cleanup_healthy = (
+                getattr(self, "boundary_cleanup_healthy", True)
+                and self._stored_boundary_cleanup_healthy()
+            )
             scan_healthy = (
                 self.last_scan_completed_ns > 0
                 and now_ns - self.last_scan_completed_ns <= SCAN_HEALTH_TIMEOUT_NS
                 and self.discovery_failures < MAX_DISCOVERY_FAILURES
                 and self.receipt_persistence_healthy
-                and getattr(self, "boundary_cleanup_healthy", True)
+                and boundary_cleanup_healthy
                 and self.discovery_thread is not None
                 and self.discovery_thread.is_alive()
             )
@@ -3112,7 +3146,7 @@ class Supervisor:
                 "network": {
                     "mode": policy_network_mode(self.policy),
                     "primitives": boundary_primitives,
-                    "cleanup_healthy": getattr(self, "boundary_cleanup_healthy", True),
+                    "cleanup_healthy": boundary_cleanup_healthy,
                 },
                 "catalogue": public_catalogue(self.catalogue),
                 "cgroup_v2": available,

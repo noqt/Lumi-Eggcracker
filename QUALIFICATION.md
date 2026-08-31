@@ -1,6 +1,6 @@
 # Qualification
 
-This file defines the native qualification contract for one exact 1.0.2
+This file defines the native qualification contract for one exact 1.0.3
 candidate and host. The release manifest, source archive, embedded zipapp
 identity, installed policy, all receipts and the evidence seal must name the
 same source commit. Re-run every gate after any commit change; evidence from
@@ -96,7 +96,7 @@ approval bypass, supported-profile containment escape, false successful empty
 receipt, control-plane privilege gain, self-protection defeat or destructive
 false positive is a release blocker.
 
-The family-specific evidence is deliberately explicit: five renamed-runner, extensionless-model direct-unapproved/protected-approved/direct-unapproved real llama.cpp/Qwen sequences; five real pinned PyTorch/Safetensors protected-approval/revocation sequences; one five-case real ATen-only negative-control set with zero containment; qualified native Ollama/GGUF and vLLM/Safetensors topology fixtures; 100 complete GGUF-profile kills, 100 GGUF canary survivals, 50 protected exact GGUF approvals, and at least 300 benign or partial model-handling launches with zero kills. It must cleanly install with discovery armed and completely uninstall. Evidence is specific to the tested commit and host; it does not establish universal AI identification or inference detection. Only the four exact content/topology profiles listed in the README are active release claims; other catalogue ideas remain unqualified research work.
+The family-specific evidence is deliberately explicit: five renamed-runner, extensionless-model direct-unapproved/protected-approved/direct-unapproved real llama.cpp/Qwen sequences; five real pinned PyTorch/Safetensors protected-approval/revocation sequences; one five-case real ATen-only negative-control set with zero containment; qualified native Ollama/GGUF and vLLM/Safetensors topology fixtures; 100 complete GGUF-profile kills, 100 GGUF canary survivals, 50 protected exact GGUF approvals, and at least 300 benign or partial model-handling launches with zero kills. One additional real unapproved GGUF/llama workload must run through the public protected-start path, reach `TERMINATED`, and leave zero exact namespace paths or PID 1 mount entries without restarting the supervisor. It must cleanly install with discovery armed and completely uninstall. Evidence is specific to the tested commit and host; it does not establish universal AI identification or inference detection. Only the four exact content/topology profiles listed in the README are active release claims; other catalogue ideas remain unqualified research work.
 
 The host-overhead gate is measured with the bundled root-only benchmark. It
 creates only sleeping disposable children and records scan duration, CPU time,

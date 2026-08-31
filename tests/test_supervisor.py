@@ -1067,6 +1067,96 @@ class SupervisorTests(unittest.TestCase):
                 "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
             )
 
+    def test_autonomous_kill_reclaims_owned_boundary_after_receipt_publish(self) -> None:
+        supervisor = self._instance()
+        supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
+        target = ProcessIdentity(42, 100)
+        snapshot = MagicMock(identity=target)
+        detected = MagicMock(profile="content.gguf-llama")
+        terminated_record = record()
+        terminated_record["state"] = "TERMINATED"
+        terminated_record["boundary"] = {"recorded": True}
+        order: list[str] = []
+
+        with (
+            patch.object(
+                supervisor,
+                "_discovered_run_cgroups",
+                return_value={str(terminated_record["cgroup"])},
+            ),
+            patch("lumi_eggcracker.supervisor.contain_many", return_value=MagicMock()),
+            patch.object(
+                supervisor,
+                "_detection_receipt",
+                return_value={
+                    "event_id": "e" * 24,
+                    "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+                },
+            ),
+            patch.object(
+                supervisor,
+                "_mark_discovered_runs_terminated",
+                return_value=(terminated_record,),
+            ),
+            patch.object(
+                supervisor,
+                "_store_detection",
+                side_effect=lambda _receipt: order.append("publish"),
+            ),
+            patch.object(
+                supervisor,
+                "_teardown_boundary",
+                side_effect=lambda _record: order.append("teardown"),
+            ) as teardown,
+            patch.object(supervisor, "_post_containment_response"),
+        ):
+            supervisor._enforce_discovery(
+                snapshot,
+                detected,
+                (),
+                (),
+                1,
+                2,
+                None,
+                "e" * 24,
+                targets={target},
+            )
+
+        self.assertEqual(["publish", "teardown"], order)
+        teardown.assert_called_once_with(terminated_record)
+
+    def test_autonomous_boundary_cleanup_failure_fails_health_not_kill(self) -> None:
+        supervisor = self._instance()
+        supervisor.boundary_cleanup_healthy = True
+        item = record()
+        item["state"] = "TERMINATED"
+        item["boundary"] = {"recorded": True}
+        with patch.object(
+            supervisor,
+            "_teardown_boundary",
+            side_effect=JsonInputError("boundary identity drifted"),
+        ):
+            supervisor._cleanup_discovered_run_boundaries((item,))
+        self.assertFalse(supervisor.boundary_cleanup_healthy)
+
+    def test_health_rejects_terminal_run_with_namespace_mounts(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        item["state"] = "TERMINATED"
+        item["boundary"] = {"recorded": True}
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [Path("a" * 24 + ".json")]
+        boundary = MagicMock()
+        boundary.namespace_mounts_present.return_value = True
+        with (
+            patch("lumi_eggcracker.supervisor.load_run", return_value=item),
+            patch(
+                "lumi_eggcracker.supervisor.OfflineBoundary.from_record",
+                return_value=boundary,
+            ),
+        ):
+            self.assertFalse(supervisor._stored_boundary_cleanup_healthy())
+
     def test_autonomous_kill_marks_owned_run_before_publishing_receipt(self) -> None:
         supervisor = self._instance()
         supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")

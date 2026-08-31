@@ -24,7 +24,7 @@ SPEC.loader.exec_module(first_kill)
 
 class FirstKillTests(unittest.TestCase):
     def test_default_release_identity_is_the_1_0_candidate(self) -> None:
-        self.assertEqual("v1.0.2", first_kill.DEFAULT_TAG)
+        self.assertEqual("v1.0.3", first_kill.DEFAULT_TAG)
 
     def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
         output = io.StringIO()

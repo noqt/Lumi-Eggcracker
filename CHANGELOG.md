@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.3 (release candidate)
+
+- Reclaim an Eggcracker-owned workload's exact offline namespace pair after an
+  autonomous detector kill, after containment and receipt publication but
+  without waiting for a supervisor restart.
+- Fail `doctor` closed when a terminal run still retains either recorded
+  namespace mount, while preserving the successful containment result and the
+  identity needed for safe restart recovery.
+- Support an in-place upgrade from the local 1.0.2 candidate and bind the repair
+  to fresh native and adaptive qualification evidence before release.
+
 ## 1.0.2 (release candidate)
 
 - Add opt-in fail-closed approval admission for protected starts: when

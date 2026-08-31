@@ -19,6 +19,7 @@ from smoke_content_ai import assets, command
 CLI = "/usr/local/bin/eggcracker"
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 RUNS = Path("/var/lib/lumi-eggcracker/runs")
+NETNS = Path("/run/netns")
 
 
 def run(argv: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
@@ -158,6 +159,63 @@ def approved_outcome(state: object) -> bool:
     return state in {"RUNNING", "COMPLETED_ALLOWED"}
 
 
+def supervisor_pid() -> int:
+    value = run(
+        [
+            "/usr/bin/systemctl",
+            "show",
+            "--property=MainPID",
+            "--value",
+            "lumi-eggcracker.service",
+        ]
+    ).stdout.strip()
+    if not value.isdecimal() or int(value) < 2:
+        raise RuntimeError("supervisor main PID is unavailable")
+    return int(value)
+
+
+def wait_selected_state(
+    operator: str, name: str, expected: str, *, timeout: float = 8.0
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        try:
+            latest = call(operator, ["status", "--name", name])
+        except RuntimeError:
+            time.sleep(0.01)
+            continue
+        if latest.get("state") == expected:
+            return latest
+        time.sleep(0.01)
+    raise RuntimeError(f"protected workload did not reach {expected}: {latest}")
+
+
+def wait_owned_namespace_cleanup(run_id: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    if len(run_id) != 24 or any(character not in "0123456789abcdef" for character in run_id):
+        raise ValueError("owned run identity is invalid")
+    names = (
+        f"lumi-eggcracker-w-{run_id}",
+        f"lumi-eggcracker-s-{run_id}",
+    )
+    paths = tuple(NETNS / name for name in names)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        mountinfo = Path("/proc/1/mountinfo").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        existing = [
+            str(path) for path in paths if path.exists() or path.is_symlink()
+        ]
+        mounted = [name for name in names if name in mountinfo]
+        if not existing and not mounted:
+            return {"mount_entries": 0, "namespace_paths": 0}
+        time.sleep(0.01)
+    raise RuntimeError(
+        f"autonomous owned-run cleanup retained namespaces: paths={existing}, mounts={mounted}"
+    )
+
+
 def launch(user: str, argv: list[str]) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         ["/usr/sbin/runuser", "-u", user, "--", *argv],
@@ -212,7 +270,14 @@ def main() -> int:
     if account.pw_uid != int(install["workload_uid"]) or account.pw_uid == pwd.getpwnam(operator).pw_uid:
         raise RuntimeError("installed workload identity is not isolated from the operator")
     uid = account.pw_uid
-    results: dict[str, Any] = {"approved": [], "benign": 0, "canary_survival": 0, "discoveries": [], "result": "FAIL"}
+    results: dict[str, Any] = {
+        "approved": [],
+        "benign": 0,
+        "canary_survival": 0,
+        "discoveries": [],
+        "owned_autonomous_cleanup": None,
+        "result": "FAIL",
+    }
     starts: list[float] = []
     empties: list[float] = []
     try:
@@ -250,6 +315,55 @@ def main() -> int:
                 before_incidents,
                 expected_event_id=last_event_id,
             )
+            # Recreate the C8 failure mode inside an Eggcracker-owned offline
+            # workload. Autonomous containment must terminate the run and
+            # reclaim both exact namespace mounts without relying on a
+            # supervisor restart.
+            wait_for_armed_doctor(operator)
+            owned_before_incidents = incident_ids()
+            owned_before_detections = set(DETECTIONS.glob("*.json"))
+            owned_name = f"owned-unapproved-{secrets.token_hex(6)}"
+            pid_before = supervisor_pid()
+            owned = call(
+                operator,
+                [
+                    "start",
+                    "--name",
+                    owned_name,
+                    "--max-pids",
+                    "64",
+                    "--max-memory-mib",
+                    "4096",
+                    "--cpu-quota-percent",
+                    "1200",
+                    "--",
+                    *argv,
+                ],
+            )
+            owned_run_id = str(owned.get("run_id", ""))
+            owned_receipt = new_receipt(owned_before_detections)
+            wait_selected_state(operator, owned_name, "TERMINATED")
+            namespace_cleanup = wait_owned_namespace_cleanup(owned_run_id)
+            pid_after = supervisor_pid()
+            if (
+                owned_receipt.get("detector", {}).get("profile")
+                != "content.gguf-llama"
+                or pid_before != pid_after
+                or call(operator, ["doctor"]).get("result") != "PASS"
+            ):
+                raise RuntimeError(
+                    "owned autonomous containment required restart or failed health"
+                )
+            clear_new_incidents(
+                owned_before_incidents,
+                expected_event_id=str(owned_receipt.get("event_id", "")),
+            )
+            results["owned_autonomous_cleanup"] = {
+                **namespace_cleanup,
+                "profile": "content.gguf-llama",
+                "state": "TERMINATED",
+                "supervisor_restarted": False,
+            }
             for index in range(args.approved):
                 approval_name = f"allow-{secrets.token_hex(6)}"
                 run_name = f"approved-{secrets.token_hex(6)}"
