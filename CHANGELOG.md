@@ -10,6 +10,9 @@
   administration.
 - Preserve the failed Daybreak revocation-race preflight as negative evidence
   and require the repaired native matrix before release.
+- Serialize autonomous containment with owned-run completion so a cgroup made
+  empty by detector enforcement cannot be transiently reported as an allowed
+  benign completion before its terminal kill state is durable.
 
 ## 1.0.0 (release candidate)
 

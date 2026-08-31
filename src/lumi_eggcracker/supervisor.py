@@ -309,6 +309,7 @@ class Supervisor:
         self.discovery_lock = threading.Lock()
         self.discovery_active: set[ProcessIdentity] = set()
         self.discovery_done: dict[ProcessIdentity, int] = {}
+        self.discovery_containing_cgroups: set[str] = set()
         self.discovery_thread: threading.Thread | None = None
         self.active_cgroups: set[str] = set()
         self.digest_cache: dict[tuple[int, int, int, int, int], str] = {}
@@ -1063,6 +1064,27 @@ class Supervisor:
                     latest["state"] = "TERMINATED"
                     self._store(latest)
 
+    def _mark_discovered_runs_containment_failed(self, cgroups: set[str]) -> None:
+        """Prevent a failed detector kill from being relabelled benign."""
+        if not cgroups:
+            return
+        for path in self.runs.glob("*.json"):
+            try:
+                current = load_run(self.runs, path.stem)
+            except JsonInputError:
+                continue
+            if current["cgroup"] not in cgroups:
+                continue
+            lock = self._new_lock(current["run_id"])
+            with lock:
+                try:
+                    latest = load_run(self.runs, current["run_id"])
+                except JsonInputError:
+                    latest = current
+                if latest["state"] in ACTIVE_STATES:
+                    latest["state"] = "CONTAINMENT_FAILED"
+                    self._store(latest)
+
     def _discovery_containment_targets(
         self,
         group: tuple[_EvidenceCandidate, ...],
@@ -1555,6 +1577,8 @@ class Supervisor:
         containment_started = False
         managed_targets = targets or {snapshot.identity}
         discovered_run_cgroups = self._discovered_run_cgroups(snapshot, correlated)
+        with self.discovery_lock:
+            self.discovery_containing_cgroups.update(discovered_run_cgroups)
         try:
             if self.quarantine_root is None:
                 raise JsonInputError("quarantine root is unavailable")
@@ -1594,6 +1618,13 @@ class Supervisor:
             self._store_detection(receipt)
             self._post_containment_response(receipt)
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
+            if containment_started:
+                try:
+                    self._mark_discovered_runs_containment_failed(
+                        discovered_run_cgroups
+                    )
+                except (JsonInputError, OSError):
+                    pass
             receipt = self._detection_receipt(
                 event_id=event_id,
                 snapshot=snapshot,
@@ -1621,6 +1652,9 @@ class Supervisor:
             if pidfd is not None and not containment_started:
                 os.close(pidfd)
             with self.discovery_lock:
+                self.discovery_containing_cgroups.difference_update(
+                    discovered_run_cgroups
+                )
                 self.discovery_active.difference_update(managed_targets)
                 now = time.monotonic_ns()
                 for identity in managed_targets:
@@ -2137,15 +2171,24 @@ class Supervisor:
     def _mark_completed(self, record: dict[str, Any]) -> bool:
         lock = self._new_lock(record["run_id"])
         with lock:
-            try:
-                current = load_run(self.runs, record["run_id"])
-            except JsonInputError:
-                current = record
-            if current["state"] not in ACTIVE_STATES:
-                return False
-            current["state"] = "COMPLETED_ALLOWED"
-            record.update(current)
-            self._store(current)
+            # Serialize the benign terminal transition with the detector's
+            # in-memory pre-containment barrier.  This adds no durable work
+            # before enforcement and prevents cgroup.empty from racing a
+            # successful autonomous kill into a transient allowed state.
+            with self.discovery_lock:
+                try:
+                    current = load_run(self.runs, record["run_id"])
+                except JsonInputError:
+                    current = record
+                if (
+                    current["cgroup"]
+                    in getattr(self, "discovery_containing_cgroups", set())
+                    or current["state"] not in ACTIVE_STATES
+                ):
+                    return False
+                current["state"] = "COMPLETED_ALLOWED"
+                record.update(current)
+                self._store(current)
             try:
                 self._teardown_boundary(current)
             except (JsonInputError, OSError):

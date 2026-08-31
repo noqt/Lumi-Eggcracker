@@ -58,6 +58,7 @@ class SupervisorTests(unittest.TestCase):
         value.operations = []
         value.discovery_active = set()
         value.discovery_done = {}
+        value.discovery_containing_cgroups = set()
         value.discovery_lock = threading.Lock()
         value.content_scan_tick = 0
         value.receipt_persistence_healthy = True
@@ -965,6 +966,69 @@ class SupervisorTests(unittest.TestCase):
             )
 
         self.assertEqual(["mark", "publish"], order)
+
+    def test_autonomous_kill_barrier_blocks_transient_allowed_completion(self) -> None:
+        supervisor = self._instance()
+        supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
+        target = ProcessIdentity(42, 100)
+        snapshot = MagicMock(identity=target)
+        detected = MagicMock(profile="content.gguf-llama")
+        containment = MagicMock()
+        completion_results: list[bool] = []
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            item = record()
+            supervisor._store(item)
+
+            def contain_while_watcher_observes_empty(*_args: object, **_kwargs: object) -> object:
+                completion_results.append(supervisor._mark_completed(item.copy()))
+                self.assertEqual(
+                    "RUNNING",
+                    load_run(supervisor.runs, str(item["run_id"]))["state"],
+                )
+                return containment
+
+            with (
+                patch.object(
+                    supervisor,
+                    "_discovered_run_cgroups",
+                    return_value={str(item["cgroup"])},
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.contain_many",
+                    side_effect=contain_while_watcher_observes_empty,
+                ),
+                patch.object(
+                    supervisor,
+                    "_detection_receipt",
+                    return_value={
+                        "event_id": "e" * 24,
+                        "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+                    },
+                ),
+                patch.object(supervisor, "_store_detection"),
+                patch.object(supervisor, "_post_containment_response"),
+            ):
+                supervisor._enforce_discovery(
+                    snapshot,
+                    detected,
+                    (),
+                    (),
+                    1,
+                    2,
+                    None,
+                    "e" * 24,
+                    targets={target},
+                )
+
+            self.assertEqual([False], completion_results)
+            self.assertEqual(
+                "TERMINATED",
+                load_run(supervisor.runs, str(item["run_id"]))["state"],
+            )
 
     def test_correlation_requires_live_same_uid_parent_or_sibling_relation(self) -> None:
         supervisor = self._instance()
