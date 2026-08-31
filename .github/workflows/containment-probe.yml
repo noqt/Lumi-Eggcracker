@@ -274,7 +274,7 @@ jobs:
                       type(latency) not in {int, float}
                       or not math.isfinite(latency)
                       or latency < 0
-                      or latency > 120_000
+                      or latency > 20_000
                   ):
                       unexpected()
                   print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
@@ -308,7 +308,7 @@ jobs:
         run: |
           {
             printf '## Share what happened\n\n'
-            printf 'Passed, refused safely, or hit friction? '
+            printf 'Passed, returned a redacted failure, or hit friction? '
             printf '[Send the result to Lumi Eggcracker](%s).\n\n' "$RESULT_FORM_URL"
             printf 'The short form asks for this public run and the outcome:\n\n'
             printf '`%s`\n' "$WORKFLOW_RUN_URL"

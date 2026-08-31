@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/schemas/hosted-proof-receipt-v1.schema.json",
+  "title": "Lumi Eggcracker hosted-proof receipt v1",
+  "description": "Public contract for the current hosted containment proof's success and redacted refusal-or-failure receipts.",
+  "oneOf": [
+    {
+      "title": "Successful containment proof",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canary_survived",
+        "changes_made",
+        "cleanup_complete",
+        "descendant_cgroups_checked",
+        "installation_performed",
+        "journal_history_may_persist",
+        "mode",
+        "network_requests_made",
+        "primitive",
+        "result",
+        "root_populated",
+        "source_commit",
+        "source_tree_sha256",
+        "target_processes",
+        "target_survivors",
+        "trigger_to_empty_ms",
+        "workload_detection_performed"
+      ],
+      "properties": {
+        "canary_survived": {
+          "const": true
+        },
+        "changes_made": {
+          "const": true
+        },
+        "cleanup_complete": {
+          "const": true
+        },
+        "descendant_cgroups_checked": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "installation_performed": {
+          "const": false
+        },
+        "journal_history_may_persist": {
+          "const": true
+        },
+        "mode": {
+          "const": "containment-primitive-probe"
+        },
+        "network_requests_made": {
+          "const": false
+        },
+        "primitive": {
+          "const": "pidfd-stop+cgroup.kill"
+        },
+        "result": {
+          "const": "TERMINATED"
+        },
+        "root_populated": {
+          "const": 0
+        },
+        "source_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "source_tree_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "target_processes": {
+          "const": 2
+        },
+        "target_survivors": {
+          "const": 0
+        },
+        "trigger_to_empty_ms": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20000
+        },
+        "workload_detection_performed": {
+          "const": false
+        }
+      }
+    },
+    {
+      "title": "Redacted probe refusal or failure",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "reason_code",
+        "result"
+      ],
+      "properties": {
+        "mode": {
+          "const": "containment-primitive-probe"
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "ACTIVE_INSTALLATION_REFUSED",
+            "BOOT_IDENTITY_DRIFT",
+            "CANARY_DIED",
+            "CANARY_IDENTITY_UNAVAILABLE",
+            "CANARY_INSIDE_TARGET_OWNER",
+            "CGROUP_CONTROL_SHORT_WRITE",
+            "CGROUP_IDENTITY_INVALID",
+            "CGROUP_IDENTITY_UNAVAILABLE",
+            "CGROUP_PROCESS_LIST_INVALID",
+            "CGROUP_PROCESS_READ_FAILED",
+            "CGROUP_V2_UNAVAILABLE",
+            "CLEANUP_INCOMPLETE",
+            "CONTAINER_UNSUPPORTED",
+            "CONTROL_GROUP_DRIFT",
+            "CONTROL_GROUP_INVALID",
+            "DISPOSABLE_HOST_ACK_REQUIRED",
+            "EMPTY_PROOF_TIMEOUT",
+            "EMPTY_PROOF_UNAVAILABLE",
+            "HELD_PIDFD_CLEANUP_FAILED",
+            "HOST_COMMAND_FAILED",
+            "HOST_IDENTITY_UNAVAILABLE",
+            "INTERRUPTED",
+            "INVOCATION_ID_DRIFT",
+            "INVOCATION_ID_INVALID",
+            "NATIVE_LINUX_REQUIRED",
+            "OWNER_CGROUP_IDENTITY_DRIFT",
+            "OWNER_TASK_CONTROLS_MISSING",
+            "OWNER_TASK_LIMIT_INVALID",
+            "OWNER_TASK_LIMIT_UNAVAILABLE",
+            "PIDFD_LIVENESS_FAILED",
+            "PIDFD_UNAVAILABLE",
+            "PIDS_CONTROLLER_UNAVAILABLE",
+            "PROBE_INCOMPLETE",
+            "PROBE_STAGE_FAILED",
+            "PROCESS_CGROUP_INVALID",
+            "PROCESS_CGROUP_UNAVAILABLE",
+            "PROCESS_IDENTITY_DRIFT",
+            "RECEIPT_SCHEMA_INVALID",
+            "REQUIRED_COMMAND_MISSING",
+            "ROOT_REQUIRED",
+            "SOURCE_COMMIT_INVALID",
+            "SOURCE_COMMIT_UNAVAILABLE",
+            "SOURCE_GIT_IDENTITY_REQUIRED",
+            "SOURCE_IDENTITY_DRIFT",
+            "SOURCE_IDENTITY_INVALID",
+            "SOURCE_REFERENCE_INVALID",
+            "SOURCE_TREE_UNAVAILABLE",
+            "SYSTEMD_PID1_REQUIRED",
+            "TARGET_CGROUP_CONTROLS_MISSING",
+            "TARGET_CGROUP_CREATE_FAILED",
+            "TARGET_CGROUP_EVENTS_INVALID",
+            "TARGET_CGROUP_IDENTITY_DRIFT",
+            "TARGET_OUTSIDE_CAPTURED_CGROUP",
+            "TARGET_READINESS_TIMEOUT",
+            "UBUNTU_2404_REQUIRED",
+            "UNIT_COLLISION",
+            "UNIT_IDENTITY_UNAVAILABLE",
+            "UNIT_NAME_INVALID",
+            "UNIT_START_FAILED",
+            "UNIT_STATE_UNAVAILABLE",
+            "WSL_UNSUPPORTED"
+          ]
+        },
+        "result": {
+          "const": "FAILED"
+        }
+      }
+    }
+  ]
+}
