@@ -13,6 +13,7 @@ HOST = "github.com"
 UPSTREAM = "noqt/Lumi-Eggcracker"
 REPOSITORY_NAME = "Lumi-Eggcracker"
 WORKFLOW = "containment-probe.yml"
+REVIEWED_WORKFLOW_BLOB = "7f3526bcd3aad11c70fe20cf997881908b0b64ad"
 ACKNOWLEDGEMENT = "i_understand_this_kills_a_test_tree=true"
 RUN_URL = re.compile(r"^https://github\.com/[^/]+/[^/]+/actions/runs/[0-9]+$")
 
@@ -112,6 +113,23 @@ def start_hosted_proof(
     is_fork, parent, branch = _parse_metadata(metadata.stdout)
     if not is_fork or parent.casefold() != UPSTREAM.casefold():
         raise HostedProofError(f"Refusing to use {repository}: it is not a fork of {UPSTREAM}.")
+
+    workflow_identity = _call(
+        runner,
+        "api",
+        "--hostname",
+        HOST,
+        f"repos/{repository}/contents/.github/workflows/{WORKFLOW}?ref={branch}",
+        "--jq",
+        ".sha",
+    )
+    if (
+        workflow_identity.returncode != 0
+        or workflow_identity.stdout.strip() != REVIEWED_WORKFLOW_BLOB
+    ):
+        raise HostedProofError(
+            "Refusing to dispatch: the fork workflow does not match the reviewed workflow."
+        )
 
     repository_selector = f"{HOST}/{repository}"
     enabled = _call(

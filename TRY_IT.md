@@ -24,9 +24,10 @@ python3 scripts/start_hosted_proof.py \
 
 The acknowledgement is mandatory. The helper refuses a same-named repository
 that is not a fork of `noqt/Lumi-Eggcracker` and never executes through a shell.
-It never requests or prints a token; authenticated `gh` handles its own
-credentials. The helper prints the workflow-run URL when GitHub returns one.
-This starts the same disposable hosted proof described above; it does not
+It also refuses to dispatch if the fork's workflow differs from the reviewed
+workflow. It never requests or prints a token; authenticated `gh` handles its
+own credentials. The helper prints the workflow-run URL when GitHub returns
+one. This starts the same disposable hosted proof described above; it does not
 install Eggcracker or test workload recognition.
 
 The proof creates a harmless two-process test tree, kills it with Eggcracker's

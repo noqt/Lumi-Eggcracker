@@ -42,6 +42,7 @@ class HostedProofTests(unittest.TestCase):
                 result(("auth",)),
                 result(("identity",), stdout="operator\n"),
                 result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n"),
                 result(("enable",)),
                 result(("dispatch",), stdout=f"{url}\n"),
             ]
@@ -72,6 +73,7 @@ class HostedProofTests(unittest.TestCase):
                 result(("metadata",), returncode=1),
                 result(("fork",)),
                 result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\ttrunk\n"),
+                result(("workflow-identity",), stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n"),
                 result(("enable",)),
                 result(("dispatch",)),
             ]
@@ -107,12 +109,28 @@ class HostedProofTests(unittest.TestCase):
             start_hosted_proof(acknowledged=True, runner=runner)
         self.assertEqual(3, len(runner.commands))
 
+    def test_diverged_fork_workflow_is_refused_before_enable_or_dispatch(self) -> None:
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmodified-default\n"),
+                result(("workflow-identity",), stdout="0123456789abcdef0123456789abcdef01234567\n"),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "does not match"):
+            start_hosted_proof(acknowledged=True, runner=runner)
+        self.assertEqual(4, len(runner.commands))
+        self.assertEqual("api", runner.commands[-1][1])
+
     def test_already_active_workflow_is_safe_after_enable_error(self) -> None:
         runner = FakeRunner(
             [
                 result(("auth",)),
                 result(("identity",), stdout="operator\n"),
                 result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n"),
                 result(("enable",), returncode=1),
                 result(("state",), stdout="active\n"),
                 result(("dispatch",)),
@@ -128,6 +146,7 @@ class HostedProofTests(unittest.TestCase):
                 result(("auth",)),
                 result(("identity",), stdout="operator\n"),
                 result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n"),
                 result(("enable",), returncode=1),
                 result(("state",), stdout="disabled_manually\n"),
             ]
