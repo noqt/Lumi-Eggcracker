@@ -20,6 +20,18 @@ python3 "$proof_dir/scripts/start_hosted_proof.py" \
   --i-understand-this-kills-a-test-tree
 ```
 
+On Windows PowerShell, use the equivalent block:
+
+```powershell
+$proofDir = Join-Path ([IO.Path]::GetTempPath()) (
+  "Lumi-Eggcracker-" + [guid]::NewGuid().ToString("N")
+)
+gh repo clone noqt/Lumi-Eggcracker $proofDir -- --depth=1
+if ($LASTEXITCODE -ne 0) { throw "Clone failed" }
+python (Join-Path $proofDir "scripts\start_hosted_proof.py") `
+  --i-understand-this-kills-a-test-tree
+```
+
 The helper prints the exact workflow-run URL when GitHub returns it directly or
 the helper can uniquely correlate it to this dispatch. Open that URL to watch
 the proof and read its bounded result.
