@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Design-partner report or question
-    url: https://github.com/noqt/Lumi-Eggcracker/discussions
-    about: Share a local-AI workflow, first-kill result, product question, or supported-profile proposal.
+  - name: Current hosted-proof help
+    url: https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a
+    about: Ask about an actual run; share only observed behaviour, safe refusals, friction, defects, limitations, or public evidence.
   - name: Private security report
     url: https://github.com/noqt/Lumi-Eggcracker/security/advisories/new
     about: Report approval, containment, privilege, installer, receipt, or destructive-false-positive vulnerabilities privately.
