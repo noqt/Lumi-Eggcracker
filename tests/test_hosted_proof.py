@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import ast
+import hashlib
+import re
 import subprocess
 import unittest
 from collections.abc import Sequence
+from pathlib import Path
 
-from lumi_eggcracker.hosted_proof import HostedProofError, start_hosted_proof
+from lumi_eggcracker.hosted_proof import (
+    REVIEWED_WORKFLOW_BLOB,
+    HostedProofError,
+    start_hosted_proof,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW = ROOT / ".github" / "workflows" / "containment-probe.yml"
+BOUND_PROBE_SOURCES = (
+    Path("scripts/containment_probe.py"),
+    Path("src/lumi_eggcracker/__init__.py"),
+    Path("src/lumi_eggcracker/adoption.py"),
+    Path("src/lumi_eggcracker/containment.py"),
+    Path("src/lumi_eggcracker/containment_probe.py"),
+    Path("src/lumi_eggcracker/discovery.py"),
+    Path("src/lumi_eggcracker/jsonio.py"),
+)
 
 
 def result(
@@ -29,6 +49,76 @@ class FakeRunner:
 
 
 class HostedProofTests(unittest.TestCase):
+    def test_reviewed_workflow_blob_matches_current_workflow(self) -> None:
+        raw = WORKFLOW.read_bytes()
+        framed = f"blob {len(raw)}\0".encode("ascii") + raw
+        self.assertEqual(
+            hashlib.sha1(framed, usedforsecurity=False).hexdigest(),
+            REVIEWED_WORKFLOW_BLOB,
+        )
+
+    def test_workflow_qualified_digest_matches_current_probe_sources(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        expected = re.findall(r"QUALIFIED_SOURCE_SHA256: ([0-9a-f]{64})", workflow)
+        self.assertEqual(1, len(expected))
+
+        digest = hashlib.sha256()
+        for relative in BOUND_PROBE_SOURCES:
+            raw = (ROOT / relative).read_bytes()
+            name = relative.as_posix().encode("ascii")
+            digest.update(len(name).to_bytes(4, "big"))
+            digest.update(name)
+            digest.update(len(raw).to_bytes(8, "big"))
+            digest.update(raw)
+        self.assertEqual(expected[0], digest.hexdigest())
+
+    def test_qualified_source_set_covers_local_runtime_imports(self) -> None:
+        bound_modules = {
+            "lumi_eggcracker"
+            if relative.name == "__init__.py"
+            else ".".join(relative.with_suffix("").parts[1:])
+            for relative in BOUND_PROBE_SOURCES
+            if relative.parts[0] == "src"
+        }
+
+        imported_modules: set[str] = set()
+        for relative in BOUND_PROBE_SOURCES:
+            tree = ast.parse((ROOT / relative).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported_modules.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level and node.module:
+                        imported_modules.add(f"lumi_eggcracker.{node.module}")
+                    elif node.level:
+                        imported_modules.update(
+                            f"lumi_eggcracker.{alias.name}" for alias in node.names
+                        )
+                    elif node.module:
+                        imported_modules.add(node.module)
+
+        local_imports = {
+            module
+            for module in imported_modules
+            if module == "lumi_eggcracker" or module.startswith("lumi_eggcracker.")
+        }
+        self.assertLessEqual(local_imports, bound_modules)
+
+    def test_workflow_does_not_pin_unrelated_source_trees(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("QUALIFIED_SRC_TREE", workflow)
+        self.assertNotIn("QUALIFIED_SCRIPTS_TREE", workflow)
+
+    def test_workflow_rejects_import_shadowing_before_path_insertion(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        guard = workflow.index("refuse SOURCE_IMPORT_PATH_UNQUALIFIED")
+        path_insertion = workflow.index('sys.path.insert(0, str(Path.cwd() / "src"))')
+        self.assertLess(guard, path_insertion)
+        self.assertIn("len(entries) != 1", workflow)
+        self.assertIn("entries[0] != expected", workflow)
+        self.assertIn("entries[0].is_symlink()", workflow)
+        self.assertIn("not entries[0].is_dir()", workflow)
+
     def test_acknowledgement_is_required_before_any_github_call(self) -> None:
         runner = FakeRunner([])
         with self.assertRaisesRegex(HostedProofError, "acknowledgement"):
@@ -42,7 +132,7 @@ class HostedProofTests(unittest.TestCase):
                 result(("auth",)),
                 result(("identity",), stdout="operator\n"),
                 result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
-                result(("workflow-identity",), stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n"),
+                result(("workflow-identity",), stdout="d96a286b5ee811845262fedef42aba96cedeb955\n"),
                 result(("enable",)),
                 result(("dispatch",), stdout=f"{url}\n"),
             ]
@@ -73,7 +163,7 @@ class HostedProofTests(unittest.TestCase):
                 result(("metadata",), returncode=1),
                 result(("fork",)),
                 result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\ttrunk\n"),
-                result(("workflow-identity",), stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n"),
+                result(("workflow-identity",), stdout="d96a286b5ee811845262fedef42aba96cedeb955\n"),
                 result(("enable",)),
                 result(("dispatch",)),
             ]
@@ -136,7 +226,7 @@ class HostedProofTests(unittest.TestCase):
                 ),
                 result(
                     ("workflow-identity",),
-                    stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n",
+                    stdout="d96a286b5ee811845262fedef42aba96cedeb955\n",
                 ),
                 result(("enable",)),
                 result(("dispatch",)),
@@ -169,7 +259,7 @@ class HostedProofTests(unittest.TestCase):
                 result(("auth",)),
                 result(("identity",), stdout="operator\n"),
                 result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
-                result(("workflow-identity",), stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n"),
+                result(("workflow-identity",), stdout="d96a286b5ee811845262fedef42aba96cedeb955\n"),
                 result(("enable",), returncode=1),
                 result(("state",), stdout="active\n"),
                 result(("dispatch",)),
@@ -185,7 +275,7 @@ class HostedProofTests(unittest.TestCase):
                 result(("auth",)),
                 result(("identity",), stdout="operator\n"),
                 result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
-                result(("workflow-identity",), stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n"),
+                result(("workflow-identity",), stdout="d96a286b5ee811845262fedef42aba96cedeb955\n"),
                 result(("enable",), returncode=1),
                 result(("state",), stdout="disabled_manually\n"),
             ]

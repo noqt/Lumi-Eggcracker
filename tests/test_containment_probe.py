@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -360,6 +362,43 @@ class ContainmentProbeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             self.assertTrue(Path(raw).is_dir())
         self.assertTrue(probe.PROBE_RE.fullmatch(f"lumi-eggcracker-probe-{'f' * 32}.service"))
+
+    def test_script_wrapper_refuses_top_level_import_shadowing(self) -> None:
+        repository = Path(probe.__file__).resolve().parents[2]
+        wrapper_source = repository / "scripts" / "containment_probe.py"
+        for unexpected in ("hashlib.py", "subprocess"):
+            with self.subTest(unexpected=unexpected), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                scripts = root / "scripts"
+                package = root / "src" / "lumi_eggcracker"
+                scripts.mkdir()
+                package.mkdir(parents=True)
+                wrapper = scripts / "containment_probe.py"
+                wrapper.write_bytes(wrapper_source.read_bytes())
+                (package / "__init__.py").write_text("", encoding="utf-8")
+                (package / "containment_probe.py").write_text(
+                    "def main():\n    return 0\n", encoding="utf-8"
+                )
+                unexpected_path = root / "src" / unexpected
+                if unexpected_path.suffix:
+                    unexpected_path.write_text("raise RuntimeError('executed')\n", encoding="utf-8")
+                else:
+                    unexpected_path.mkdir()
+                    (unexpected_path / "__init__.py").write_text(
+                        "raise RuntimeError('executed')\n", encoding="utf-8"
+                    )
+
+                completed = subprocess.run(
+                    [sys.executable, "-I", "-S", str(wrapper)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+
+                self.assertNotEqual(0, completed.returncode)
+                self.assertEqual("", completed.stdout)
+                self.assertEqual("SOURCE_IMPORT_PATH_UNQUALIFIED\n", completed.stderr)
 
 
 if __name__ == "__main__":
