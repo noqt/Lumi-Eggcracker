@@ -10,6 +10,23 @@ permissions:
   contents: read
 
 jobs:
+  hosted-proof-windows:
+    name: hosted-proof-windows
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Test the cross-platform hosted-proof helper
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -p test_hosted_proof.py -v
+
   test-and-package:
     runs-on: ubuntu-24.04
     strategy:
