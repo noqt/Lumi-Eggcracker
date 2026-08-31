@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/schemas/hosted-proof-receipt-v1.schema.json",
+  "title": "Lumi Eggcracker hosted-proof receipt v1",
+  "description": "Public contract for the current hosted containment proof's success and safe-refusal receipts.",
+  "oneOf": [
+    {
+      "title": "Successful containment proof",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canary_survived",
+        "changes_made",
+        "cleanup_complete",
+        "descendant_cgroups_checked",
+        "installation_performed",
+        "journal_history_may_persist",
+        "mode",
+        "network_requests_made",
+        "primitive",
+        "result",
+        "root_populated",
+        "source_commit",
+        "source_tree_sha256",
+        "target_processes",
+        "target_survivors",
+        "trigger_to_empty_ms",
+        "workload_detection_performed"
+      ],
+      "properties": {
+        "canary_survived": {
+          "const": true
+        },
+        "changes_made": {
+          "const": true
+        },
+        "cleanup_complete": {
+          "const": true
+        },
+        "descendant_cgroups_checked": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "installation_performed": {
+          "const": false
+        },
+        "journal_history_may_persist": {
+          "const": true
+        },
+        "mode": {
+          "const": "containment-primitive-probe"
+        },
+        "network_requests_made": {
+          "const": false
+        },
+        "primitive": {
+          "const": "pidfd-stop+cgroup.kill"
+        },
+        "result": {
+          "const": "TERMINATED"
+        },
+        "root_populated": {
+          "const": 0
+        },
+        "source_commit": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "source_tree_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "target_processes": {
+          "const": 2
+        },
+        "target_survivors": {
+          "const": 0
+        },
+        "trigger_to_empty_ms": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 120000
+        },
+        "workload_detection_performed": {
+          "const": false
+        }
+      }
+    },
+    {
+      "title": "Safe refusal",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "reason_code",
+        "result"
+      ],
+      "properties": {
+        "mode": {
+          "const": "containment-primitive-probe"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        },
+        "result": {
+          "const": "FAILED"
+        }
+      }
+    }
+  ]
+}
