@@ -35,7 +35,14 @@ JOURNAL = STATE / "upgrade-journal.json"
 BACKUPS = STATE / "upgrade-backups"
 HISTORY = STATE / "upgrade-history"
 ACTIVE_STATES = {"STARTING", "RUNNING"}
-SUPPORTED_SOURCES = {"0.5.0", "0.8.0", "0.8.1", "0.9.0", installer.INSTALLER_VERSION}
+SUPPORTED_SOURCES = {
+    "0.5.0",
+    "0.8.0",
+    "0.8.1",
+    "0.9.0",
+    "1.0.0",
+    installer.INSTALLER_VERSION,
+}
 
 
 def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
