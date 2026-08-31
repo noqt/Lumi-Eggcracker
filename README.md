@@ -248,7 +248,7 @@ The source is [Apache-2.0](LICENSE). Run the unit suite with Python 3.11+ and
 use a disposable native Ubuntu host for cgroup and real-model integration
 tests. The project keeps recognition separate from deterministic containment
 so a new detector cannot silently weaken the kill proof. Read
-[CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change.
+[CONTRIBUTING.md](CONTRIBUTING.md) before submitting a run-grounded fix.
 
 Questions about an actual supported-path run belong in
 [Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a);

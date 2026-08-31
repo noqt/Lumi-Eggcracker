@@ -15,8 +15,10 @@ new containment claims.
   privilege issue, unsafe installer behaviour or other security-sensitive
   finding. Do not publish exploit details first.
 
-Before a large change, open a Discussion describing the user problem, the
-smallest supported scope and how a false positive will be prevented.
+Keep public Q&A to questions and observed feedback from an actual
+supported-path run. Coordinate any large code change through separately
+authorised maintainer review; do not use public support routes for
+product-direction proposals.
 
 ## Local checks
 
