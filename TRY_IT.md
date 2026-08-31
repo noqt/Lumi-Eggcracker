@@ -14,8 +14,20 @@ don't need Linux, a GPU, a model download or a local installation.
 
 If you already use the authenticated [GitHub CLI](https://cli.github.com/), a
 fail-closed helper can create or reuse only your exact Lumi Eggcracker fork,
-enable the reviewed workflow and dispatch it. From a current public source
-checkout, run:
+enable the reviewed workflow and dispatch it. On macOS or Linux, copy and paste
+this block to make a temporary shallow checkout and start the helper without
+navigating the repository or Actions UI:
+
+```sh
+proof_dir="$(mktemp -d)/Lumi-Eggcracker" &&
+gh repo clone noqt/Lumi-Eggcracker "$proof_dir" -- --depth=1 &&
+python3 "$proof_dir/scripts/start_hosted_proof.py" \
+  --i-understand-this-kills-a-test-tree
+```
+
+The temporary source checkout remains at the printed operating-system temp
+location after the run. If you already have a current public source checkout,
+run the helper directly instead:
 
 ```sh
 python3 scripts/start_hosted_proof.py \
@@ -23,7 +35,9 @@ python3 scripts/start_hosted_proof.py \
 ```
 
 The acknowledgement is mandatory. The helper refuses a same-named repository
-that is not a fork of `noqt/Lumi-Eggcracker` and never executes through a shell.
+that is not a fork of `noqt/Lumi-Eggcracker`. The helper itself never executes
+through a shell; the copy-paste setup above uses your shell only to create the
+temporary public-source checkout and start the helper.
 It also refuses to dispatch if the fork's workflow differs from the reviewed
 workflow. It never requests or prints a token; authenticated `gh` handles its
 own credentials. The helper prints the workflow-run URL when GitHub returns
