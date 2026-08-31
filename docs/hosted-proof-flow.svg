@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="720" height="1050" viewBox="0 0 720 1050" role="img" aria-labelledby="title desc">
   <title id="title">Try the Lumi Eggcracker hosted proof in four steps</title>
-  <desc id="desc">Make a public fork, run the disposable GitHub proof, see a bounded pass or safe stop, and share what happened.</desc>
+  <desc id="desc">Make a public fork, run the disposable GitHub proof, see a bounded pass or redacted failure, and share what happened.</desc>
   <defs>
     <linearGradient id="background" x1="0" x2="1" y1="0" y2="1">
       <stop offset="0" stop-color="#0d1117"/>
@@ -66,7 +66,7 @@
     <text class="step" x="48" y="56">4</text>
     <text class="card-title" x="88" y="57">Share what happened</text>
     <text class="card-copy" x="88" y="100">
-      <tspan x="88" dy="0">A pass, a safe stop, or a snag helps.</tspan>
+      <tspan x="88" dy="0">A pass, a redacted failure, or a snag helps.</tspan>
       <tspan x="88" dy="32">Use the short public result form.</tspan>
     </text>
   </g>

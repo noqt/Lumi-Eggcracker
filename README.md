@@ -157,7 +157,7 @@ still applies: this exercises only the synthetic pidfd-stop plus cgroup-v2 kill
 primitive. It does not install Eggcracker, download a model, recognise a
 workload, qualify another host, or establish product-wide effectiveness or
 safety. A public non-NOQT run is evidence only after its source digest and
-workflow blob match the reviewed upstream versions. Share a pass, safe refusal,
+workflow blob match the reviewed upstream versions. Share a pass, redacted failure,
 or reproducible friction report through the
 [redacted hosted-proof result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
 NOQT will acknowledge a complete public hosted-proof report within two
