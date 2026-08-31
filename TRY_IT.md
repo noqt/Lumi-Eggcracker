@@ -50,13 +50,15 @@ run prints a JSON receipt with `"result":"TERMINATED"`,
 `"target_survivors":0` and `"canary_survived":true`, followed by
 `FORK_PROBE_RESULT=PASS`.
 
-Automations can validate that current PASS receipt, or a redacted safe-refusal
-receipt, against the versioned [hosted-proof receipt v1 schema](schemas/hosted-proof-receipt-v1.schema.json).
-The schema covers only this proof's current output; it does not claim that the
-host is suitable for production or that Eggcracker detected a real workload.
+Automations can validate that current PASS receipt, or a redacted refusal or
+failure receipt, against the versioned [hosted-proof receipt v1 schema](schemas/hosted-proof-receipt-v1.schema.json).
+Schema validation checks structure only. It does not authenticate the run,
+source commit or tree, workflow or host, and it does not claim that the host is
+suitable for production or that Eggcracker detected a real workload. The v1
+file remains compatible; an incompatible contract uses a new versioned path.
 
-If it passes, refuses safely or gives you confusing friction, [send the public
-run](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
+If it passes, returns a redacted failure or gives you confusing friction,
+[send the public run](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
 The short form asks for the workflow URL and what happened. That is useful
 evidence either way.
 
