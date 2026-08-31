@@ -6,7 +6,7 @@
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
 · [Run the first kill](#run-the-first-kill)
-· [Design-partner Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions)
+· [Current-run Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
 
 ## The kill switch outside the sandbox
@@ -36,9 +36,9 @@ harmless synthetic process tree and shows whether the kill mechanism worked.
 > On a disposable native Ubuntu host, the first-kill path verifies the signed
 > v0.5.0 Release, launches a pinned real Qwen workload, and shows whether
 > Eggcracker terminates the complete process tree while an unrelated canary
-> survives. We are opening three design-partner places for people who will run
-> it, challenge the two supported profiles, and report friction or a
-> reproducible miss. There is no telemetry, paid plan or sales call.
+> survives. Run the supported disposable path and report the observed pass,
+> redacted failure, friction, or reproducible miss from that exact run. There
+> is no telemetry, paid plan or sales call.
 
 **Start with the read-only host check.** It makes no network request and creates
 no workspace, build, installation or service. [Check compatibility
@@ -250,9 +250,10 @@ tests. The project keeps recognition separate from deterministic containment
 so a new detector cannot silently weaken the kill proof. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) before proposing a change.
 
-Questions and design-partner reports belong in
-[Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions); reproducible
-non-security defects belong in [Issues](https://github.com/noqt/Lumi-Eggcracker/issues).
+Questions about an actual supported-path run belong in
+[Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a);
+reproducible non-security defects belong in
+[Issues](https://github.com/noqt/Lumi-Eggcracker/issues).
 Report security vulnerabilities privately through the
 [repository security channel](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new).
 Do not post credentials, private model files, raw process arguments or exploit
