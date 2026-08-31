@@ -13,7 +13,7 @@ HOST = "github.com"
 UPSTREAM = "noqt/Lumi-Eggcracker"
 REPOSITORY_NAME = "Lumi-Eggcracker"
 WORKFLOW = "containment-probe.yml"
-REVIEWED_WORKFLOW_BLOB = "7f3526bcd3aad11c70fe20cf997881908b0b64ad"
+REVIEWED_WORKFLOW_BLOB = "d96a286b5ee811845262fedef42aba96cedeb955"
 ACKNOWLEDGEMENT = "i_understand_this_kills_a_test_tree=true"
 RUN_URL = re.compile(r"^https://github\.com/[^/]+/[^/]+/actions/runs/[0-9]+$")
 

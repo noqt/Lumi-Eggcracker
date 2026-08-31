@@ -20,9 +20,7 @@ jobs:
       ACKNOWLEDGED: ${{ inputs.i_understand_this_kills_a_test_tree }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
-      QUALIFIED_SOURCE_SHA256: 22d175cae00b639b11cd4ab95bdcb7e0bfcde133d58b294ce3ae297b653fae4b
-      QUALIFIED_SRC_TREE: 53ff50e09e9ec152546c25cb3c99d55c965b05e4
-      QUALIFIED_SCRIPTS_TREE: b35c22c332c6579c395a5e953e229581e80c3b59
+      QUALIFIED_SOURCE_SHA256: fb8abb79cf0c99697d9eb8ab5724ad9fb220ace31b97cff92c4fa270aedf64ad
     steps:
       - name: Check out the dispatched default branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -58,11 +56,6 @@ jobs:
             || refuse SOURCE_STATUS_UNAVAILABLE
           test -z "$executable_status" || refuse SOURCE_EXECUTABLE_PATH_DIRTY
 
-          src_tree="$(git rev-parse "$GITHUB_SHA:src")" || refuse SOURCE_TREE_UNAVAILABLE
-          scripts_tree="$(git rev-parse "$GITHUB_SHA:scripts")" || refuse SOURCE_TREE_UNAVAILABLE
-          test "$src_tree" = "$QUALIFIED_SRC_TREE" || refuse SOURCE_TREE_UNQUALIFIED
-          test "$scripts_tree" = "$QUALIFIED_SCRIPTS_TREE" || refuse SOURCE_TREE_UNQUALIFIED
-
           committed_workflow_blob="$(git rev-parse "$GITHUB_SHA:.github/workflows/containment-probe.yml")" \
             || refuse WORKFLOW_IDENTITY_UNAVAILABLE
           working_workflow_blob="$(git hash-object .github/workflows/containment-probe.yml)" \
@@ -96,6 +89,25 @@ jobs:
           do
             test ! -e "$target" && test ! -L "$target" || refuse ACTIVE_INSTALLATION_REFUSED
           done
+
+          /usr/bin/python3 -I -S - <<'PY' \
+            || refuse SOURCE_IMPORT_PATH_UNQUALIFIED
+          from pathlib import Path
+
+          source_root = Path.cwd() / "src"
+          try:
+              entries = tuple(source_root.iterdir())
+          except OSError:
+              raise SystemExit(1) from None
+          expected = source_root / "lumi_eggcracker"
+          if (
+              len(entries) != 1
+              or entries[0] != expected
+              or entries[0].is_symlink()
+              or not entries[0].is_dir()
+          ):
+              raise SystemExit(1)
+          PY
 
           source_identity="$(/usr/bin/python3 -I -S - <<'PY'
           import sys
