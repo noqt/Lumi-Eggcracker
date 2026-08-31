@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1 (release candidate)
+
+- Treat root-owned launch provenance as proof of prior admission, not a
+  perpetual authorization: revoking the exact approval generation makes a
+  still-running supported AI workload eligible for autonomous containment.
+- Reject same-named replacement approvals as authority for an already-running
+  launch and serialize the detector's approval snapshot with root approval
+  administration.
+- Preserve the failed Daybreak revocation-race preflight as negative evidence
+  and require the repaired native matrix before release.
+
 ## 1.0.0 (release candidate)
 
 - Freeze the integrated four-profile native CPU product after the 0.7, 0.8,

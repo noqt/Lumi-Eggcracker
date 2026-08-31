@@ -75,10 +75,10 @@ from .execution_policy import load_all as load_execution_policies
 from .execution_policy import public as public_execution_policy
 from .execution_policy import revoke as revoke_execution_policy
 from .jsonio import JsonInputError, load_regular_json
+from .launches import approval_is_active, provenance_path
 from .launches import authorizes as launch_authorizes
 from .launches import create as create_launch_provenance
 from .launches import load_all as load_launch_provenance
-from .launches import provenance_path
 from .observation import ObservationStore
 from .offline_boundary import (
     BoundaryObserver,
@@ -1772,16 +1772,31 @@ class Supervisor:
             # loading it at scan start can race a concurrent protected start
             # and falsely kill an invocation admitted during that same scan.
             try:
-                provenances = load_launch_provenance(self.launches)
-            except JsonInputError:
-                # Corrupt or incomplete provenance never authorizes a matching
-                # workload.  Post-exec procfs argv is intentionally not used.
+                # Revocation and the authorization snapshot are serialized on
+                # the same lock.  After a root revoke response completes, no
+                # later scan can authorize the workload from stale launch
+                # provenance alone.
+                with self.approval_lock:
+                    provenances = load_launch_provenance(self.launches)
+                    current_approvals = load_approvals(self.approvals)
+            except (JsonInputError, OSError):
+                # Corrupt or incomplete provenance/approval state never
+                # authorizes a matching workload.  Post-exec procfs argv is
+                # intentionally not used.
                 provenances = []
+                current_approvals = []
+            active_provenances = [
+                value
+                for value in provenances
+                if approval_is_active(value, current_approvals)
+            ]
             provenance_by_identity = {
                 ProcessIdentity(item["pid"], item["start_time"]): item
-                for item in provenances
+                for item in active_provenances
             }
-            provenance_by_cgroup = {item["cgroup"]: item for item in provenances}
+            provenance_by_cgroup = {
+                item["cgroup"]: item for item in active_provenances
+            }
             trigger_candidate = witness[0]
             aggregate_content: list[ArtifactEvidence] = []
             aggregate_runtimes: list[RuntimeEvidence] = []

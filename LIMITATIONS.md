@@ -1,6 +1,6 @@
 # Limitations
 
-Lumi Eggcracker 1.0.0 autonomously acts on a complete match from its four active,
+Lumi Eggcracker 1.0.1 autonomously acts on a complete match from its four active,
 publicly qualified native content profiles and on a prohibited egress event from every
 explicitly selected workload. Its content path supports a regular GGUF v2/v3
 artifact combined with the exact SHA-256-pinned qualified llama.cpp ELF, or a
@@ -22,7 +22,7 @@ workloads.
 The qualification contract is published in `QUALIFICATION.md`. Qualification
 is exact-commit and host bound. The release manifest, installed policy, native
 receipts and portable evidence seal must agree; a prior 0.5.0, 0.6.0 or 0.9.0
-result or CI pass does not qualify a 1.0.0 package or another host.
+result or CI pass does not qualify a 1.0.1 package or another host.
 
 Ollama and vLLM are active only for the exact native CPU topology fixtures and
 launcher identities in the candidate catalogue. Name-only profiles for TGI,
@@ -38,7 +38,7 @@ The product does not kill generic Python, Node.js, Java, shell, GPU-intensive or
 memory-intensive processes based on those generic properties. It does not
 require or claim proof of inference: an unapproved converter, inspector,
 evaluator or trainer satisfying both evidence groups is an intended kill.
-Selected workloads are offline-only in 1.0.0. Loopback is allowed; all
+Selected workloads are offline-only in 1.0.1. Loopback is allowed; all
 non-loopback IPv4/IPv6 output is kernel-denied in a transient run namespace and
 trips whole-tree containment. This is not general host network isolation,
 allowlisting, DNS policy, proxying, filesystem isolation, credential isolation,

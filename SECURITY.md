@@ -22,7 +22,7 @@ can use the repository's [bug form](https://github.com/noqt/Lumi-Eggcracker/issu
 
 ## Supported scope
 
-Security handling covers the published release line and the current 1.0.0
+Security handling covers the published release line and the current 1.0.1
 release-candidate branch only for the exact candidate identity under review.
 Historical tags may be useful for comparison but do not receive new
 qualification claims.
