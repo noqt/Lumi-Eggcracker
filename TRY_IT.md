@@ -10,6 +10,26 @@ don't need Linux, a GPU, a model download or a local installation.
 3. Open **Containment probe (manual disposable runner)**, choose **Run
    workflow**, tick the acknowledgement and run it on the default branch.
 
+### Use the guided GitHub CLI path
+
+If you already use the authenticated [GitHub CLI](https://cli.github.com/), a
+fail-closed helper can create or reuse only your exact Lumi Eggcracker fork,
+enable the reviewed workflow and dispatch it. From a current public source
+checkout, run:
+
+```sh
+python3 scripts/start_hosted_proof.py \
+  --i-understand-this-kills-a-test-tree
+```
+
+The acknowledgement is mandatory. The helper refuses a same-named repository
+that is not a fork of `noqt/Lumi-Eggcracker` and never executes through a shell.
+It also refuses to dispatch if the fork's workflow differs from the reviewed
+workflow. It never requests or prints a token; authenticated `gh` handles its
+own credentials. The helper prints the workflow-run URL when GitHub returns
+one. This starts the same disposable hosted proof described above; it does not
+install Eggcracker or test workload recognition.
+
 The proof creates a harmless two-process test tree, kills it with Eggcracker's
 containment mechanism and checks that an unrelated canary survives. A passing
 run prints a JSON receipt with `"result":"TERMINATED"`,
