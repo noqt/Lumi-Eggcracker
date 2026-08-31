@@ -306,7 +306,16 @@ def open_process_fd(
     """
     if isinstance(number, bool) or not isinstance(number, int) or number < 0:
         raise JsonInputError("target descriptor number is invalid")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    # A target can deliberately expose a FIFO, device, or another descriptor
+    # whose open would wait for external activity.  Discovery must never let
+    # an untrusted workload block the supervisor before the descriptor has
+    # been validated as a regular file.  O_NONBLOCK is inert for ordinary
+    # files and lets the caller reject non-regular descriptors after fstat.
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     path = proc / str(value.pid) / "fd" / str(number)
     try:
         descriptor = os.open(path, flags)
