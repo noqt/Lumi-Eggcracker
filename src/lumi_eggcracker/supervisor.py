@@ -407,7 +407,7 @@ class Supervisor:
         if record["state"] not in ACTIVE_STATES and hasattr(self, "launches"):
             provenance_path(self.launches, record["run_id"]).unlink(missing_ok=True)
             self._clear_stage(record["run_id"])
-        self._prune_terminal_records()
+        self._prune_terminal_records(protected_run_id=record["run_id"])
 
     @staticmethod
     def _clear_stage(run_id: str) -> None:
@@ -428,7 +428,7 @@ class Supervisor:
             child.unlink()
         root.rmdir()
 
-    def _prune_terminal_records(self) -> None:
+    def _prune_terminal_records(self, *, protected_run_id: str | None = None) -> None:
         records: list[tuple[int, Path]] = []
         for path in self.runs.glob("*.json"):
             try:
@@ -437,7 +437,13 @@ class Supervisor:
                 continue
             if value["state"] not in ACTIVE_STATES:
                 records.append((int(value["created_monotonic_ns"]), path))
-        for _, path in sorted(records, reverse=True)[MAX_TERMINAL_RECORDS:]:
+        remove_count = max(0, len(records) - MAX_TERMINAL_RECORDS)
+        removable = [
+            value
+            for value in sorted(records)
+            if value[1].stem != protected_run_id
+        ]
+        for _, path in removable[:remove_count]:
             path.unlink(missing_ok=True)
 
     def _load(self, name: str) -> dict[str, Any]:

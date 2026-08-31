@@ -895,6 +895,35 @@ class SupervisorTests(unittest.TestCase):
                 supervisor._store(replacement)
             self.assertFalse((supervisor.runs / ("c" * 24 + ".json")).exists())
 
+    def test_terminal_pruning_never_removes_the_record_just_persisted(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            historical = {
+                **record(),
+                "cgroup": "/system.slice/lumi-eggcracker-workload-"
+                + "b" * 24
+                + ".service",
+                "created_monotonic_ns": 10_000,
+                "name": "historical",
+                "run_id": "b" * 24,
+                "state": "TERMINATED",
+                "unit": "lumi-eggcracker-workload-" + "b" * 24 + ".service",
+            }
+            current = {
+                **record(),
+                "created_monotonic_ns": 1,
+                "state": "TERMINATED",
+            }
+            with patch("lumi_eggcracker.supervisor.MAX_TERMINAL_RECORDS", 1):
+                supervisor._store(historical)
+                supervisor._store(current)
+
+            self.assertTrue((supervisor.runs / ("a" * 24 + ".json")).is_file())
+            self.assertFalse((supervisor.runs / ("b" * 24 + ".json")).exists())
+
     def test_autonomous_kill_terminal_state_wins_completion_race(self) -> None:
         supervisor = self._instance()
         with tempfile.TemporaryDirectory() as raw:

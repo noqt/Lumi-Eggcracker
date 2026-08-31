@@ -16,6 +16,9 @@
 - Link a successful autonomous incident to the exact owned workload record
   after containment, allowing recovery tooling to identify the selected run
   without replacing the authoritative quarantine kill receipt.
+- Never prune the terminal run record in the transaction that just persisted
+  it, avoiding cross-boot monotonic-clock ordering from erasing the newest kill
+  status under a full retained history.
 
 ## 1.0.0 (release candidate)
 
