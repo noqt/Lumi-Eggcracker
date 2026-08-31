@@ -61,11 +61,12 @@ class UpgradeIdentityTests(unittest.TestCase):
             ("operator", "x", 1000, 1000, "", "/home/operator", "/bin/sh")
         )
 
-    def test_1_0_2_accepts_both_prior_1_0_candidates_as_upgrade_sources(self) -> None:
+    def test_current_candidate_accepts_prior_1_0_candidates_as_upgrade_sources(self) -> None:
         upgrader = self.load_upgrader()
         self.assertIn("1.0.0", upgrader.SUPPORTED_SOURCES)
         self.assertIn("1.0.1", upgrader.SUPPORTED_SOURCES)
         self.assertIn("1.0.2", upgrader.SUPPORTED_SOURCES)
+        self.assertIn("1.0.3", upgrader.SUPPORTED_SOURCES)
 
     def test_legacy_manifest_resolves_live_gid_instead_of_using_uid(self) -> None:
         upgrader = self.load_upgrader()

@@ -59,6 +59,7 @@ class SupervisorTests(unittest.TestCase):
         value.discovery_active = set()
         value.discovery_done = {}
         value.discovery_containing_cgroups = set()
+        value.owned_containment_cgroups = set()
         value.discovery_lock = threading.Lock()
         value.content_scan_tick = 0
         value.receipt_persistence_healthy = True
@@ -798,6 +799,34 @@ class SupervisorTests(unittest.TestCase):
         self.assertLess(supervisor.operations.index("cgroup.kill"), supervisor.operations.index("durable-receipt"))
         self.assertLess(supervisor.operations.index("durable-receipt"), supervisor.operations.index("cleanup"))
 
+    def test_owned_containment_claim_covers_kill_and_empty_proof(self) -> None:
+        supervisor = self._instance()
+        item = record()
+
+        def kill_claimed(_path: Path) -> tuple[int, int]:
+            self.assertIn(item["cgroup"], supervisor.owned_containment_cgroups)
+            return 11, 12
+
+        def verify_claimed(_identity: object) -> tuple[int, EmptyProof]:
+            self.assertIn(item["cgroup"], supervisor.owned_containment_cgroups)
+            return 13, EmptyProof(True, 1, 0, [])
+
+        with (
+            patch("lumi_eggcracker.supervisor.validate_identity", return_value=Path("/owned")),
+            patch("lumi_eggcracker.supervisor.kill_path", side_effect=kill_claimed),
+            patch("lumi_eggcracker.supervisor.verify_empty", side_effect=verify_claimed),
+            patch.object(supervisor, "_cleanup", return_value={}),
+            patch(
+                "lumi_eggcracker.supervisor.make_receipt",
+                return_value={"result": "TERMINATED"},
+            ),
+            patch("lumi_eggcracker.supervisor.write_atomic"),
+            patch.object(supervisor, "_store"),
+        ):
+            supervisor._contain(item, "OPERATOR", 10)
+
+        self.assertNotIn(item["cgroup"], supervisor.owned_containment_cgroups)
+
     def test_receipt_persistence_fault_is_terminal_but_never_reports_success(self) -> None:
         supervisor = self._instance()
         item = record()
@@ -1220,6 +1249,42 @@ class SupervisorTests(unittest.TestCase):
         response_receipt = respond.call_args.args[0]
         self.assertEqual("e" * 24, response_receipt["event_id"])
         self.assertIs(terminated_record, respond.call_args.kwargs["record"])
+
+    def test_owned_containment_claim_suppresses_redundant_autonomous_kill(self) -> None:
+        supervisor = self._instance()
+        supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
+        target = ProcessIdentity(42, 100)
+        snapshot = MagicMock(identity=target)
+        detected = MagicMock(profile="content.gguf-llama")
+        cgroup = "/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service"
+        supervisor.owned_containment_cgroups.add(cgroup)
+        supervisor.discovery_active.add(target)
+
+        with (
+            patch.object(
+                supervisor,
+                "_discovered_run_cgroups",
+                return_value={cgroup},
+            ),
+            patch("lumi_eggcracker.supervisor.contain_many") as contain,
+            patch.object(supervisor, "_store_detection") as store_detection,
+        ):
+            supervisor._enforce_discovery(
+                snapshot,
+                detected,
+                (),
+                (),
+                1,
+                2,
+                None,
+                "e" * 24,
+                targets={target},
+            )
+
+        contain.assert_not_called()
+        store_detection.assert_not_called()
+        self.assertNotIn(target, supervisor.discovery_active)
+        self.assertIn(cgroup, supervisor.owned_containment_cgroups)
 
     def test_autonomous_kill_barrier_blocks_transient_allowed_completion(self) -> None:
         supervisor = self._instance()

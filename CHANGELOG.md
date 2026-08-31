@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.4 (release candidate)
+
+- Serialize deterministic owned-cgroup containment against autonomous
+  enforcement so an operator, tripwire or boundary kill cannot race a second
+  detector kill and create a redundant lockdown incident while the approved
+  process is disappearing.
+- Preserve the 1.0.3 exact offline-boundary cleanup repair and bind both fixes
+  to a new package identity and complete native/adaptive requalification.
+
 ## 1.0.3 (release candidate)
 
 - Reclaim an Eggcracker-owned workload's exact offline namespace pair after an

@@ -310,6 +310,7 @@ class Supervisor:
         self.discovery_active: set[ProcessIdentity] = set()
         self.discovery_done: dict[ProcessIdentity, int] = {}
         self.discovery_containing_cgroups: set[str] = set()
+        self.owned_containment_cgroups: set[str] = set()
         self.discovery_thread: threading.Thread | None = None
         self.active_cgroups: set[str] = set()
         self.digest_cache: dict[tuple[int, int, int, int, int], str] = {}
@@ -1630,6 +1631,15 @@ class Supervisor:
         managed_targets = targets or {snapshot.identity}
         discovered_run_cgroups = self._discovered_run_cgroups(snapshot, correlated)
         with self.discovery_lock:
+            # An operator, tripwire, or boundary trigger already enforcing the
+            # exact owned cgroup is authoritative.  Do not race it with a
+            # second autonomous kill or manufacture a redundant lockdown
+            # incident from a process disappearing during that containment.
+            if discovered_run_cgroups & self.owned_containment_cgroups:
+                self.discovery_active.difference_update(managed_targets)
+                if pidfd is not None:
+                    os.close(pidfd)
+                return
             self.discovery_containing_cgroups.update(discovered_run_cgroups)
         try:
             if self.quarantine_root is None:
@@ -2154,17 +2164,25 @@ class Supervisor:
                 if trigger in {"NETWORK_BOUNDARY", "EXECUTION_BOUNDARY"}
                 else None
             )
+            with self.discovery_lock:
+                self.owned_containment_cgroups.add(record["cgroup"])
             try:
-                path = validate_identity(identity)
-                self.operations.append("cgroup.kill")
-                kill_started, kill_completed = kill_path(path)
-                empty_ns, proof = verify_empty(identity)
-                if not proof.complete:
-                    raise JsonInputError("owned cgroup did not become empty after direct kill")
-            except Exception as error:
-                record["state"] = "CONTAINMENT_FAILED"
-                self._store(record)
-                raise JsonInputError(f"containment failed: {error}") from error
+                try:
+                    path = validate_identity(identity)
+                    self.operations.append("cgroup.kill")
+                    kill_started, kill_completed = kill_path(path)
+                    empty_ns, proof = verify_empty(identity)
+                    if not proof.complete:
+                        raise JsonInputError(
+                            "owned cgroup did not become empty after direct kill"
+                        )
+                except Exception as error:
+                    record["state"] = "CONTAINMENT_FAILED"
+                    self._store(record)
+                    raise JsonInputError(f"containment failed: {error}") from error
+            finally:
+                with self.discovery_lock:
+                    self.owned_containment_cgroups.discard(record["cgroup"])
             event_id = os.urandom(12).hex()
             receipt = make_receipt(
                 record=record,
