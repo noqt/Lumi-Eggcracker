@@ -5,12 +5,7 @@ don't need Linux, a GPU, a model download or a local installation.
 
 ![Four-step hosted-proof path: fork, run, see what survives, and share the public run](docs/hosted-proof-flow.svg)
 
-1. [Fork Lumi Eggcracker](https://github.com/noqt/Lumi-Eggcracker/fork).
-2. In your fork, open **Actions** and enable workflows if GitHub asks.
-3. Open **Containment probe (manual disposable runner)**, choose **Run
-   workflow**, tick the acknowledgement and run it on the default branch.
-
-### Use the guided GitHub CLI path
+## Start it with GitHub CLI
 
 If you already use the authenticated [GitHub CLI](https://cli.github.com/), a
 fail-closed helper can create or reuse only your exact Lumi Eggcracker fork,
@@ -24,6 +19,17 @@ gh repo clone noqt/Lumi-Eggcracker "$proof_dir" -- --depth=1 &&
 python3 "$proof_dir/scripts/start_hosted_proof.py" \
   --i-understand-this-kills-a-test-tree
 ```
+
+The helper prints the exact workflow-run URL when GitHub returns it directly or
+the helper can uniquely correlate it to this dispatch. Open that URL to watch
+the proof and read its bounded result.
+
+### Or use the GitHub interface
+
+1. [Fork Lumi Eggcracker](https://github.com/noqt/Lumi-Eggcracker/fork).
+2. In your fork, open **Actions** and enable workflows if GitHub asks.
+3. Open **Containment probe (manual disposable runner)**, choose **Run
+   workflow**, tick the acknowledgement and run it on the default branch.
 
 The temporary source checkout remains at the printed operating-system temp
 location after the run. If you already have a current public source checkout,
@@ -40,11 +46,10 @@ through a shell; the copy-paste setup above uses your shell only to create the
 temporary public-source checkout and start the helper.
 It also refuses to dispatch if the fork's workflow differs from the reviewed
 workflow. It never requests or prints a token; authenticated `gh` handles its
-own credentials. The helper prints the exact workflow-run URL when GitHub
-returns it directly or the helper can uniquely correlate it to this dispatch.
-If that bounded lookup is unavailable or ambiguous, it prints the fork's
-workflow page instead. This starts the same disposable hosted proof described
-above; it does not install Eggcracker or test workload recognition.
+own credentials. If the bounded run lookup is unavailable or ambiguous, it
+prints the fork's workflow page instead. This starts the same disposable hosted
+proof described above; it does not install Eggcracker or test workload
+recognition.
 
 The proof creates a harmless two-process test tree, kills it with Eggcracker's
 containment mechanism and checks that an unrelated canary survives. A passing
