@@ -119,7 +119,11 @@ def start_hosted_proof(
         "api",
         "--hostname",
         HOST,
-        f"repos/{repository}/contents/.github/workflows/{WORKFLOW}?ref={branch}",
+        "--method",
+        "GET",
+        f"repos/{repository}/contents/.github/workflows/{WORKFLOW}",
+        "--raw-field",
+        f"ref={branch}",
         "--jq",
         ".sha",
     )

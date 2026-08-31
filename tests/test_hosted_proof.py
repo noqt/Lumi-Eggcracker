@@ -124,6 +124,45 @@ class HostedProofTests(unittest.TestCase):
         self.assertEqual(4, len(runner.commands))
         self.assertEqual("api", runner.commands[-1][1])
 
+    def test_exotic_branch_is_encoded_for_verification_and_reused_for_dispatch(self) -> None:
+        branch = "release&proof#1"
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(
+                    ("metadata",),
+                    stdout=f"true\tnoqt/Lumi-Eggcracker\t{branch}\n",
+                ),
+                result(
+                    ("workflow-identity",),
+                    stdout="7f3526bcd3aad11c70fe20cf997881908b0b64ad\n",
+                ),
+                result(("enable",)),
+                result(("dispatch",)),
+            ]
+        )
+
+        start_hosted_proof(acknowledged=True, runner=runner)
+
+        self.assertEqual(
+            (
+                "gh",
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                "GET",
+                "repos/operator/Lumi-Eggcracker/contents/.github/workflows/containment-probe.yml",
+                "--raw-field",
+                f"ref={branch}",
+                "--jq",
+                ".sha",
+            ),
+            runner.commands[3],
+        )
+        self.assertEqual(branch, runner.commands[-1][7])
+
     def test_already_active_workflow_is_safe_after_enable_error(self) -> None:
         runner = FakeRunner(
             [
