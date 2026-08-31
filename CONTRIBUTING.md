@@ -6,8 +6,8 @@ new containment claims.
 
 ## Choose the right route
 
-- Use [Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions) for
-  design-partner reports, supported-profile ideas and questions.
+- Use [Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a)
+  for questions and observed feedback from an actual supported-path run.
 - Use the [bug form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=bug_report.yml)
   for reproducible, non-security defects.
 - Use [private vulnerability reporting](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
@@ -15,8 +15,10 @@ new containment claims.
   privilege issue, unsafe installer behaviour or other security-sensitive
   finding. Do not publish exploit details first.
 
-Before a large change, open a Discussion describing the user problem, the
-smallest supported scope and how a false positive will be prevented.
+Keep public Q&A to questions and observed feedback from an actual
+supported-path run. Coordinate any large code change through separately
+authorised maintainer review; do not use public support routes for
+product-direction proposals.
 
 ## Local checks
 

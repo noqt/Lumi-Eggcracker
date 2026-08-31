@@ -1,5 +1,5 @@
 name: Hosted proof result
-description: Share a pass, safe refusal, or friction report from the disposable GitHub-hosted proof
+description: Share a pass, redacted failure, or friction report from the disposable GitHub-hosted proof
 title: "[Hosted proof]: "
 body:
   - type: markdown
@@ -12,7 +12,7 @@ body:
       label: What happened?
       options:
         - The proof passed and the outside canary survived
-        - The workflow refused safely with a reason code
+        - The workflow returned a redacted failure with a reason code
         - The setup or result was confusing
         - The workflow failed in another non-security-sensitive way
     validations:

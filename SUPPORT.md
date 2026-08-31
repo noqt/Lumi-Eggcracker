@@ -3,8 +3,8 @@
 Lumi Eggcracker is an open-source public alpha without a paid support plan or
 guaranteed response window.
 
-- Ask usage questions and share first-kill or design-partner results in
-  [Discussions](https://github.com/noqt/Lumi-Eggcracker/discussions).
+- Ask questions and share observed results from an actual supported-path run in
+  [Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a).
 - Report reproducible, non-security defects with the
   [bug form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=bug_report.yml).
 - Report security-sensitive findings through
