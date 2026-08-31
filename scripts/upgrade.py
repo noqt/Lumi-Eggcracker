@@ -41,6 +41,7 @@ SUPPORTED_SOURCES = {
     "0.8.1",
     "0.9.0",
     "1.0.0",
+    "1.0.1",
     installer.INSTALLER_VERSION,
 }
 

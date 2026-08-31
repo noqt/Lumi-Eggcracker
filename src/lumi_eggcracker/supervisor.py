@@ -436,6 +436,18 @@ class Supervisor:
             except JsonInputError:
                 continue
             if value["state"] not in ACTIVE_STATES:
+                boundary_value = value.get("boundary")
+                if boundary_value is not None:
+                    try:
+                        boundary = OfflineBoundary.from_record(boundary_value)
+                        if boundary.namespace_mounts_present():
+                            # Keep the exact device/inode authority until
+                            # identity-checked boundary cleanup has completed.
+                            continue
+                    except (JsonInputError, OSError):
+                        # Never discard cleanup authority on an uncertain
+                        # namespace observation.
+                        continue
                 records.append((int(value["created_monotonic_ns"]), path))
         remove_count = max(0, len(records) - MAX_TERMINAL_RECORDS)
         removable = [
@@ -2619,12 +2631,24 @@ class Supervisor:
 
     def _start(self, args: dict[str, Any]) -> dict[str, Any]:
         self._require_workload_identity()
-        if set(args) == {"argv", "cpu_quota_percent", "max_memory_mib", "max_pids", "name"}:
+        base_arguments = {
+            "argv",
+            "cpu_quota_percent",
+            "max_memory_mib",
+            "max_pids",
+            "name",
+        }
+        if set(args) == base_arguments:
+            args = {**args, "exec_policy": None, "require_approval": False}
+        elif set(args) == base_arguments | {"exec_policy"}:
+            args = {**args, "require_approval": False}
+        elif set(args) == base_arguments | {"require_approval"}:
             args = {**args, "exec_policy": None}
-        if set(args) != {"argv", "cpu_quota_percent", "exec_policy", "max_memory_mib", "max_pids", "name"}:
+        if set(args) != base_arguments | {"exec_policy", "require_approval"}:
             raise JsonInputError("start arguments are invalid")
         name, argv, maximum = args["name"], args["argv"], args["max_pids"]
         exec_policy_id = args["exec_policy"]
+        require_approval = args["require_approval"]
         memory_mib, cpu_quota = args["max_memory_mib"], args["cpu_quota_percent"]
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise JsonInputError("workload name is invalid")
@@ -2635,6 +2659,8 @@ class Supervisor:
             raise JsonInputError("max_memory_mib must be from 64 to 131072")
         if isinstance(cpu_quota, bool) or not isinstance(cpu_quota, int) or not 10 <= cpu_quota <= 10_000:
             raise JsonInputError("cpu_quota_percent must be from 10 to 10000")
+        if not isinstance(require_approval, bool):
+            raise JsonInputError("require_approval must be boolean")
         if not self._incident_status()["healthy"]:
             raise JsonInputError("local lockdown state is unavailable; root recovery is required")
         with self.start_lock, self.approval_lock:
@@ -2663,6 +2689,8 @@ class Supervisor:
                 )
             except JsonInputError:
                 approval = None
+            if require_approval and approval is None:
+                raise JsonInputError("protected launch is not approved")
             run_id = os.urandom(12).hex()
             if exec_policy_id is None:
                 execution_policy = ephemeral_execution_policy(argv[0], run_id)
@@ -2922,6 +2950,11 @@ class Supervisor:
 
     def _recover(self) -> None:
         recorded_ids: set[str] = set()
+        empty_terminal_states = {
+            "COMPLETED_ALLOWED",
+            "CONTAINED_RECEIPT_FAILED",
+            "TERMINATED",
+        }
         if not hasattr(self, "active_cgroups"):
             self.active_cgroups = set()
         self.active_cgroups.clear()
@@ -2931,6 +2964,17 @@ class Supervisor:
             except JsonInputError:
                 continue
             recorded_ids.add(record["run_id"])
+            if (
+                record["state"] in empty_terminal_states
+                and record.get("boundary") is not None
+            ):
+                try:
+                    self._teardown_boundary(record)
+                except (JsonInputError, OSError):
+                    # A completed workload cannot retain a useful boundary.
+                    # Refuse a clean-health claim if exact identity-checked
+                    # reclamation fails, but keep root diagnosis available.
+                    self.boundary_cleanup_healthy = False
             if record["state"] in ACTIVE_STATES:
                 self.active_cgroups.add(record["cgroup"])
                 try:

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.2 (release candidate)
+
+- Add opt-in fail-closed approval admission for protected starts: when
+  `--require-approval` is selected, a missing or concurrently revoked exact
+  approval rejects the request before any workload-side effect.
+- Preserve ordinary unapproved starts as the deliberate path for autonomous
+  supported-profile recognition and whole-tree containment.
+- Reclaim exact recorded offline namespaces for terminal workloads during
+  supervisor recovery, and fail health closed if identity-checked cleanup
+  cannot complete. Retain any terminal run record while its namespace mounts
+  still exist so history compaction cannot erase that cleanup authority.
+- Bind the repair to a new artifact identity and require the complete native
+  and adaptive qualification campaign before any release decision.
+
 ## 1.0.1 (release candidate)
 
 - Treat root-owned launch provenance as proof of prior admission, not a

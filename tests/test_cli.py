@@ -13,7 +13,7 @@ class CliTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(0, main(["version"]))
-        self.assertEqual("1.0.1", output.getvalue().strip())
+        self.assertEqual("1.0.2", output.getvalue().strip())
 
     def test_public_help_has_only_supported_commands(self) -> None:
         from lumi_eggcracker.cli import _parser
@@ -56,6 +56,34 @@ class CliTests(unittest.TestCase):
         request.assert_called_once_with(
             "start", name="demo", max_pids=8, max_memory_mib=2048,
             cpu_quota_percent=400, argv=["/bin/sleep", "1"], exec_policy="a" * 24,
+        )
+
+    def test_start_can_require_exact_approval_at_admission_time(self) -> None:
+        with patch("lumi_eggcracker.cli.request", return_value={"result": "STARTED"}) as request:
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "start",
+                        "--name",
+                        "demo",
+                        "--max-pids",
+                        "8",
+                        "--require-approval",
+                        "--",
+                        "/bin/sleep",
+                        "1",
+                    ]
+                ),
+            )
+        request.assert_called_once_with(
+            "start",
+            name="demo",
+            max_pids=8,
+            max_memory_mib=2048,
+            cpu_quota_percent=400,
+            argv=["/bin/sleep", "1"],
+            require_approval=True,
         )
 
     def test_execution_policy_create_requires_root(self) -> None:

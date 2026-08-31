@@ -1,6 +1,6 @@
 # Qualification
 
-This file defines the native qualification contract for one exact 1.0.1
+This file defines the native qualification contract for one exact 1.0.2
 candidate and host. The release manifest, source archive, embedded zipapp
 identity, installed policy, all receipts and the evidence seal must name the
 same source commit. Re-run every gate after any commit change; evidence from

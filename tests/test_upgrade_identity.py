@@ -3,8 +3,10 @@ from __future__ import annotations
 import importlib.util
 import os
 import pwd
+import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +27,18 @@ class UpgradeIdentityTests(unittest.TestCase):
         if specification is None or specification.loader is None:
             raise RuntimeError("cannot load the privileged upgrader")
         module = importlib.util.module_from_spec(specification)
-        specification.loader.exec_module(module)
+        flag_values = {
+            name: getattr(sys.flags, name)
+            for name in dir(sys.flags)
+            if not name.startswith("_")
+        }
+        flag_values.update({"isolated": 1, "no_site": 1})
+        with mock.patch.object(
+            sys,
+            "flags",
+            SimpleNamespace(**flag_values),
+        ):
+            specification.loader.exec_module(module)
         return module
 
     @staticmethod
@@ -48,9 +61,10 @@ class UpgradeIdentityTests(unittest.TestCase):
             ("operator", "x", 1000, 1000, "", "/home/operator", "/bin/sh")
         )
 
-    def test_1_0_1_accepts_the_1_0_0_candidate_as_an_upgrade_source(self) -> None:
+    def test_1_0_2_accepts_both_prior_1_0_candidates_as_upgrade_sources(self) -> None:
         upgrader = self.load_upgrader()
         self.assertIn("1.0.0", upgrader.SUPPORTED_SOURCES)
+        self.assertIn("1.0.1", upgrader.SUPPORTED_SOURCES)
 
     def test_legacy_manifest_resolves_live_gid_instead_of_using_uid(self) -> None:
         upgrader = self.load_upgrader()

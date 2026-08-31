@@ -50,6 +50,11 @@ def _parser() -> argparse.ArgumentParser:
         action=_RejectDuplicateIdentifier,
         help="root-created sealed-exec policy identifier",
     )
+    start.add_argument(
+        "--require-approval",
+        action="store_true",
+        help="reject the launch unless an exact approval exists at admission time",
+    )
     start.add_argument("argv", nargs=argparse.REMAINDER)
     kill = commands.add_parser("kill", help="terminate one protected workload")
     kill.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
@@ -133,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
             }
             if args.exec_policy is not None:
                 start_args["exec_policy"] = args.exec_policy
+            if args.require_approval:
+                start_args["require_approval"] = True
             action = start_args.pop("action")
             value = request(action, **start_args)
         elif args.command == "status":

@@ -105,6 +105,50 @@ class SupervisorTests(unittest.TestCase):
         ), self.assertRaisesRegex(JsonInputError, "do not match policy"):
             supervisor._validate_gated_credentials(process)
 
+    def test_required_approval_rejects_before_launch_side_effects(self) -> None:
+        supervisor = self._instance()
+        supervisor.approval_lock = threading.Lock()
+        supervisor.active_cgroups = set()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supervisor.approvals = root / "approvals"
+            supervisor.approvals.mkdir()
+            supervisor.names = root / "names"
+            supervisor.names.mkdir()
+            with (
+                patch.object(supervisor, "_require_workload_identity"),
+                patch.object(
+                    supervisor,
+                    "_incident_status",
+                    return_value={"healthy": True},
+                ),
+                patch.object(
+                    supervisor,
+                    "_incident_block_for_start",
+                    return_value=None,
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.match_launch",
+                    side_effect=JsonInputError("approval not found"),
+                ),
+                patch("lumi_eggcracker.supervisor.OfflineBoundary.create") as boundary,
+                self.assertRaisesRegex(
+                    JsonInputError,
+                    "^protected launch is not approved$",
+                ),
+            ):
+                supervisor._start(
+                    {
+                        "argv": ["/bin/true"],
+                        "cpu_quota_percent": 400,
+                        "max_memory_mib": 2048,
+                        "max_pids": 8,
+                        "name": "demo",
+                        "require_approval": True,
+                    }
+                )
+            boundary.assert_not_called()
+
     def test_oversized_valid_json_integer_is_rejected_without_escaping(self) -> None:
         server, client = socket.socketpair()
         try:
@@ -810,6 +854,41 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual("RUNNING", item["state"])
         completed.assert_called_once_with(item)
 
+    def test_recovery_reclaims_exact_terminal_offline_boundary(self) -> None:
+        supervisor = self._instance()
+        supervisor.boundary_cleanup_healthy = True
+        item = record()
+        item["state"] = "TERMINATED"
+        item["boundary"] = {"recorded": True}
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [Path("a" * 24 + ".json")]
+        with (
+            patch("lumi_eggcracker.supervisor.load_run", return_value=item),
+            patch.object(supervisor, "_teardown_boundary") as teardown,
+        ):
+            supervisor._recover()
+        teardown.assert_called_once_with(item)
+        self.assertTrue(supervisor.boundary_cleanup_healthy)
+
+    def test_recovery_reports_terminal_boundary_identity_cleanup_failure(self) -> None:
+        supervisor = self._instance()
+        supervisor.boundary_cleanup_healthy = True
+        item = record()
+        item["state"] = "CONTAINED_RECEIPT_FAILED"
+        item["boundary"] = {"recorded": True}
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [Path("a" * 24 + ".json")]
+        with (
+            patch("lumi_eggcracker.supervisor.load_run", return_value=item),
+            patch.object(
+                supervisor,
+                "_teardown_boundary",
+                side_effect=JsonInputError("boundary identity drifted"),
+            ),
+        ):
+            supervisor._recover()
+        self.assertFalse(supervisor.boundary_cleanup_healthy)
+
     def test_status_is_read_only(self) -> None:
         supervisor = self._instance()
         item = record()
@@ -923,6 +1002,47 @@ class SupervisorTests(unittest.TestCase):
 
             self.assertTrue((supervisor.runs / ("a" * 24 + ".json")).is_file())
             self.assertFalse((supervisor.runs / ("b" * 24 + ".json")).exists())
+
+    def test_terminal_pruning_retains_boundary_cleanup_authority(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            pending_path = supervisor.runs / ("a" * 24 + ".json")
+            clean_path = supervisor.runs / ("b" * 24 + ".json")
+            pending_path.write_text("{}", encoding="utf-8")
+            clean_path.write_text("{}", encoding="utf-8")
+            pending = {
+                **record(),
+                "boundary": {"recorded": True},
+                "created_monotonic_ns": 1,
+                "state": "TERMINATED",
+            }
+            clean = {
+                **record(),
+                "created_monotonic_ns": 2,
+                "run_id": "b" * 24,
+                "state": "TERMINATED",
+            }
+            boundary = MagicMock()
+            boundary.namespace_mounts_present.return_value = True
+
+            with (
+                patch("lumi_eggcracker.supervisor.MAX_TERMINAL_RECORDS", 0),
+                patch(
+                    "lumi_eggcracker.supervisor.load_run",
+                    side_effect=lambda _root, run_id: (
+                        pending if run_id == "a" * 24 else clean
+                    ),
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.OfflineBoundary.from_record",
+                    return_value=boundary,
+                ),
+            ):
+                supervisor._prune_terminal_records()
+
+            self.assertTrue(pending_path.is_file())
+            self.assertFalse(clean_path.exists())
 
     def test_autonomous_kill_terminal_state_wins_completion_race(self) -> None:
         supervisor = self._instance()

@@ -63,7 +63,7 @@ TARGETS = (
     RUNTIME,
     WATCHDOG_RUNTIME,
 )
-INSTALLER_VERSION = "1.0.1"
+INSTALLER_VERSION = "1.0.2"
 MAX_RELEASE_MANIFEST_BYTES = 32 * 1024
 INSTALL_JOURNAL = Path("/var/lib/lumi-eggcracker-install-journal.json")
 LIFECYCLE_LOCK = Path("/run/lock/lumi-eggcracker-lifecycle.lock")

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
-1.0.1 release candidate (local qualification)
+1.0.2 release candidate (local qualification)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
 · [Run the first kill](#run-the-first-kill)
@@ -23,7 +23,7 @@ live inside the thing it's meant to stop.
 
 Eggcracker works on native Linux today and supports four qualified AI workload
 profiles plus an offline boundary for every explicitly selected workload. It's
-an internal 1.0.1 release candidate, intentionally limited; the exact boundary is in
+an internal 1.0.2 release candidate, intentionally limited; the exact boundary is in
 [Current boundary](#current-boundary).
 
 **Want to see the core idea work?** [Try the hosted proof](TRY_IT.md). You don't
@@ -63,7 +63,7 @@ The release demonstration prints a bounded result like this after native
 qualification:
 
 ```text
-[eggcracker] candidate artifact and release identity verified: 1.0.1 -> <qualified-commit>
+[eggcracker] candidate artifact and release identity verified: 1.0.2 -> <qualified-commit>
 {
   "primitive": "pidfd-stop+cgroup.kill",
   "profile": "content.gguf-llama",
@@ -227,6 +227,9 @@ with a redacted support bundle; route security-sensitive findings through
 - supports exact root approvals bound to the protected launch's command,
   workload identity and PID, memory and CPU limits, plus operator-triggered
   kills and status, list, doctor, detections, incidents and version queries.
+- lets approval-sensitive automation add `--require-approval` to `start`, so a
+  missing or concurrently revoked approval rejects the launch before Eggcracker
+  creates any workload boundary or process.
 
 The product is intentionally a kill switch, not an alerting dashboard. It
 does not wait for an operator after an unapproved complete match.

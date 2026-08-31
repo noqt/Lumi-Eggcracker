@@ -395,6 +395,16 @@ class OfflineBoundary:
     def workload_namespace_path(self) -> Path:
         return _netns_path(self.identity.workload_namespace)
 
+    def namespace_mounts_present(self) -> bool:
+        """Report whether either exact run-owned namespace name still exists."""
+        return any(
+            path.exists() or path.is_symlink()
+            for path in (
+                _netns_path(self.identity.workload_namespace),
+                _netns_path(self.identity.sink_namespace),
+            )
+        )
+
     @classmethod
     def create(cls, run_id: str) -> OfflineBoundary:
         if os.geteuid() != 0:

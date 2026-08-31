@@ -1,6 +1,6 @@
 # Limitations
 
-Lumi Eggcracker 1.0.1 autonomously acts on a complete match from its four active,
+Lumi Eggcracker 1.0.2 autonomously acts on a complete match from its four active,
 publicly qualified native content profiles and on a prohibited egress event from every
 explicitly selected workload. Its content path supports a regular GGUF v2/v3
 artifact combined with the exact SHA-256-pinned qualified llama.cpp ELF, or a
@@ -22,7 +22,7 @@ workloads.
 The qualification contract is published in `QUALIFICATION.md`. Qualification
 is exact-commit and host bound. The release manifest, installed policy, native
 receipts and portable evidence seal must agree; a prior 0.5.0, 0.6.0 or 0.9.0
-result or CI pass does not qualify a 1.0.1 package or another host.
+result or CI pass does not qualify a 1.0.2 package or another host.
 
 Ollama and vLLM are active only for the exact native CPU topology fixtures and
 launcher identities in the candidate catalogue. Name-only profiles for TGI,
@@ -38,13 +38,13 @@ The product does not kill generic Python, Node.js, Java, shell, GPU-intensive or
 memory-intensive processes based on those generic properties. It does not
 require or claim proof of inference: an unapproved converter, inspector,
 evaluator or trainer satisfying both evidence groups is an intended kill.
-Selected workloads are offline-only in 1.0.1. Loopback is allowed; all
+Selected workloads are offline-only in 1.0.2. Loopback is allowed; all
 non-loopback IPv4/IPv6 output is kernel-denied in a transient run namespace and
 trips whole-tree containment. This is not general host network isolation,
 allowlisting, DNS policy, proxying, filesystem isolation, credential isolation,
 behavioural modelling, telemetry upload, malware prevention or EDR.
 
-Approvals are exact and deliberately narrow: only a qualified native llama runtime or root-owned CPython executing one absolute regular script is supported. Workload UID, resolved executable identity and complete argv digest must match at the protected pre-exec `start` gate. Python `-c`, `-m`, stdin/interactive, relative-script, package-directory, symlink and unsupported-interpreter forms are rejected. The Python script is identity/digest bound and launched from an immutable per-run root-owned stage; changing it aborts `start`. This does not claim a general dependency-closure analyser or make approved workloads a sandbox. A direct or third-party launch cannot consume an approval, and descendants or siblings do not inherit one. Revoking an approval affects future protected launches, not a workload already running under that approval.
+Approvals are exact and deliberately narrow: only a qualified native llama runtime or root-owned CPython executing one absolute regular script is supported. Workload UID, resolved executable identity and complete argv digest must match at the protected pre-exec `start` gate. Python `-c`, `-m`, stdin/interactive, relative-script, package-directory, symlink and unsupported-interpreter forms are rejected. The Python script is identity/digest bound and launched from an immutable per-run root-owned stage; changing it aborts `start`. This does not claim a general dependency-closure analyser or make approved workloads a sandbox. A direct or third-party launch cannot consume an approval, and descendants or siblings do not inherit one. Revoking an approval rejects future approval-required launches and makes an already-running supported AI workload using that exact approval eligible for autonomous containment. Callers that require an approved admission result must select `start --require-approval`; ordinary `start` deliberately permits an unapproved workload so the autonomous detector can recognise and terminate it.
 
 Operator-supplied workload names are single-use for the lifetime of an installation. A name remains reserved after completion or containment so a stale status or kill command cannot resolve to a replacement workload. Clean uninstallation removes those reservations with the rest of Eggcracker's local state.
 

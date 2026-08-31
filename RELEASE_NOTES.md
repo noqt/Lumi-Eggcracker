@@ -1,6 +1,6 @@
-# Lumi Eggcracker 1.0.1 — release candidate repair
+# Lumi Eggcracker 1.0.2 — release candidate repair
 
-This local 1.0.1 candidate repairs the qualified root-supervisor product after
+This local 1.0.2 candidate repairs the qualified root-supervisor product after
 the 0.7 runtime-topology, 0.8 execution-boundary, 0.8.1 deployment-hardening
 and 0.9 bounded-local-lockdown milestones. It carries four exact native CPU
 AI profiles, direct cgroup-v2 containment, offline selected-workload and
@@ -12,7 +12,14 @@ exact launch specification. Changing one of those limits cannot inherit an
 approval; older approval records remain administratively visible and revocable
 but fail closed until root recreates them with the intended limits.
 
-The public first-kill helper defaults to `v1.0.1`. The packaged support helper
+Approval-sensitive launchers can now request fail-closed admission with
+`eggcracker start --require-approval`. If the exact root approval is absent or
+concurrently revoked, the supervisor rejects the request while holding the
+serialized approval/start locks and before creating a namespace, gate, cgroup
+or workload. Ordinary unapproved starts remain available so autonomous
+recognition and containment continue to work as designed.
+
+The public first-kill helper defaults to `v1.0.2`. The packaged support helper
 delegates to the installed root-owned zipapp, so the documented command works
 from the verified Linux release bundle without importing a mutable checkout.
 The bootstrap now also requires a detached `SHA256SUMS.asc` signature from the
