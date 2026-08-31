@@ -13,6 +13,9 @@
 - Serialize autonomous containment with owned-run completion so a cgroup made
   empty by detector enforcement cannot be transiently reported as an allowed
   benign completion before its terminal kill state is durable.
+- Link a successful autonomous incident to the exact owned workload record
+  after containment, allowing recovery tooling to identify the selected run
+  without replacing the authoritative quarantine kill receipt.
 
 ## 1.0.0 (release candidate)
 

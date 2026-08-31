@@ -904,7 +904,12 @@ class SupervisorTests(unittest.TestCase):
             item = record()
             supervisor._store(item)
             stale_watcher_record = item.copy()
-            supervisor._mark_discovered_runs_terminated({str(item["cgroup"])})
+            terminated = supervisor._mark_discovered_runs_terminated(
+                {str(item["cgroup"])}
+            )
+            self.assertEqual(1, len(terminated))
+            self.assertEqual(item["run_id"], terminated[0]["run_id"])
+            self.assertEqual("TERMINATED", terminated[0]["state"])
             self.assertEqual(
                 "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
             )
@@ -921,6 +926,13 @@ class SupervisorTests(unittest.TestCase):
         detected = MagicMock(profile="content.gguf-llama")
         containment = MagicMock()
         order: list[str] = []
+        terminated_record = record()
+        terminated_record["state"] = "TERMINATED"
+
+        def mark(cgroups: set[str]) -> tuple[dict[str, object], ...]:
+            order.append("mark")
+            self.assertEqual({str(terminated_record["cgroup"])}, cgroups)
+            return (terminated_record,)
 
         with (
             patch.object(
@@ -944,14 +956,14 @@ class SupervisorTests(unittest.TestCase):
             patch.object(
                 supervisor,
                 "_mark_discovered_runs_terminated",
-                side_effect=lambda _cgroups: order.append("mark"),
+                side_effect=mark,
             ),
             patch.object(
                 supervisor,
                 "_store_detection",
                 side_effect=lambda _receipt: order.append("publish"),
             ),
-            patch.object(supervisor, "_post_containment_response"),
+            patch.object(supervisor, "_post_containment_response") as respond,
         ):
             supervisor._enforce_discovery(
                 snapshot,
@@ -966,6 +978,9 @@ class SupervisorTests(unittest.TestCase):
             )
 
         self.assertEqual(["mark", "publish"], order)
+        response_receipt = respond.call_args.args[0]
+        self.assertEqual("e" * 24, response_receipt["event_id"])
+        self.assertIs(terminated_record, respond.call_args.kwargs["record"])
 
     def test_autonomous_kill_barrier_blocks_transient_allowed_completion(self) -> None:
         supervisor = self._instance()

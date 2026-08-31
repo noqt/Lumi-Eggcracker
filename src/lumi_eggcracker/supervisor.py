@@ -1043,10 +1043,13 @@ class Supervisor:
                     values.add(cgroup)
         return values
 
-    def _mark_discovered_runs_terminated(self, cgroups: set[str]) -> None:
-        """Prevent the cgroup watcher from relabelling a detector kill benign."""
+    def _mark_discovered_runs_terminated(
+        self, cgroups: set[str]
+    ) -> tuple[dict[str, Any], ...]:
+        """Persist and return the exact owned runs terminated by detection."""
         if not cgroups:
-            return
+            return ()
+        terminated: list[dict[str, Any]] = []
         for path in self.runs.glob("*.json"):
             try:
                 current = load_run(self.runs, path.stem)
@@ -1063,6 +1066,8 @@ class Supervisor:
                 if latest["state"] != "TERMINATED":
                     latest["state"] = "TERMINATED"
                     self._store(latest)
+                terminated.append(latest)
+        return tuple(terminated)
 
     def _mark_discovered_runs_containment_failed(self, cgroups: set[str]) -> None:
         """Prevent a failed detector kill from being relabelled benign."""
@@ -1614,9 +1619,14 @@ class Supervisor:
             # finishing.  Resolve that race before publishing the detection
             # receipt: once a kill receipt is visible, every affected owned
             # run must already have the unambiguous TERMINATED state.
-            self._mark_discovered_runs_terminated(discovered_run_cgroups)
+            terminated_runs = self._mark_discovered_runs_terminated(
+                discovered_run_cgroups
+            )
             self._store_detection(receipt)
-            self._post_containment_response(receipt)
+            incident_record = (
+                terminated_runs[0] if len(terminated_runs) == 1 else None
+            )
+            self._post_containment_response(receipt, record=incident_record)
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
             if containment_started:
                 try:
