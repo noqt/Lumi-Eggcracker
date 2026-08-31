@@ -459,6 +459,20 @@ class Supervisor:
         for _, path in removable[:remove_count]:
             path.unlink(missing_ok=True)
 
+    def _teardown_terminal_boundary(
+        self, record: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """Release exact boundary authority, then retry bounded history pruning.
+
+        Namespace identifiers can be reused while the next workload boundary is
+        live.  The pre-cleanup persistence pass must therefore retain records
+        whose recorded identity still appears mounted.  Once exact teardown has
+        succeeded, retry pruning while protecting the record just completed.
+        """
+        result = self._teardown_boundary(record)
+        self._prune_terminal_records(protected_run_id=record["run_id"])
+        return result
+
     def _stored_boundary_cleanup_healthy(self) -> bool:
         """Reject clean health while a terminal run still owns namespace mounts."""
         try:
@@ -1131,7 +1145,7 @@ class Supervisor:
             if record.get("boundary") is None:
                 continue
             try:
-                self._teardown_boundary(record)
+                self._teardown_terminal_boundary(record)
             except (JsonInputError, OSError):
                 # Containment and its receipt remain authoritative. Keep the
                 # retained run identity for restart recovery and fail health
@@ -2221,7 +2235,9 @@ class Supervisor:
             cleanup = self._cleanup(record["unit"])
             if boundary is not None:
                 try:
-                    cleanup["offline_boundary"] = self._teardown_boundary(record)
+                    cleanup["offline_boundary"] = self._teardown_terminal_boundary(
+                        record
+                    )
                 except (JsonInputError, OSError) as error:
                     self.boundary_cleanup_healthy = False
                     cleanup["offline_boundary"] = {"error": str(error)[:160]}
@@ -2266,7 +2282,7 @@ class Supervisor:
                 record.update(current)
                 self._store(current)
             try:
-                self._teardown_boundary(current)
+                self._teardown_terminal_boundary(current)
             except (JsonInputError, OSError):
                 # The workload is already empty and the terminal state is
                 # durable.  Keep the boundary failure visible to doctor and
@@ -3017,7 +3033,7 @@ class Supervisor:
                 and record.get("boundary") is not None
             ):
                 try:
-                    self._teardown_boundary(record)
+                    self._teardown_terminal_boundary(record)
                 except (JsonInputError, OSError):
                     # A completed workload cannot retain a useful boundary.
                     # Refuse a clean-health claim if exact identity-checked

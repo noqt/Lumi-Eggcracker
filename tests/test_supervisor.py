@@ -1073,6 +1073,76 @@ class SupervisorTests(unittest.TestCase):
             self.assertTrue(pending_path.is_file())
             self.assertFalse(clean_path.exists())
 
+    def test_terminal_boundary_teardown_retries_pruning_after_identity_release(
+        self,
+    ) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            current_path = supervisor.runs / ("a" * 24 + ".json")
+            historical_path = supervisor.runs / ("b" * 24 + ".json")
+            current_path.write_text("{}", encoding="utf-8")
+            historical_path.write_text("{}", encoding="utf-8")
+            current = {
+                **record(),
+                "boundary": {"recorded": True},
+                "created_monotonic_ns": 1,
+                "state": "TERMINATED",
+            }
+            historical = {
+                **record(),
+                "boundary": {"recorded": True},
+                "created_monotonic_ns": 10_000,
+                "name": "historical",
+                "run_id": "b" * 24,
+                "state": "TERMINATED",
+                "unit": "lumi-eggcracker-workload-" + "b" * 24 + ".service",
+            }
+            boundary = MagicMock()
+            boundary.namespace_mounts_present.return_value = False
+
+            with (
+                patch("lumi_eggcracker.supervisor.MAX_TERMINAL_RECORDS", 1),
+                patch.object(
+                    supervisor,
+                    "_teardown_boundary",
+                    return_value={"removed": True},
+                ) as teardown,
+                patch(
+                    "lumi_eggcracker.supervisor.load_run",
+                    side_effect=lambda _root, run_id: (
+                        current if run_id == "a" * 24 else historical
+                    ),
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.OfflineBoundary.from_record",
+                    return_value=boundary,
+                ),
+            ):
+                result = supervisor._teardown_terminal_boundary(current)
+
+            self.assertEqual({"removed": True}, result)
+            teardown.assert_called_once_with(current)
+            self.assertTrue(current_path.is_file())
+            self.assertFalse(historical_path.exists())
+
+    def test_terminal_boundary_teardown_does_not_prune_after_cleanup_failure(
+        self,
+    ) -> None:
+        supervisor = self._instance()
+        item = {**record(), "boundary": {"recorded": True}, "state": "TERMINATED"}
+        with (
+            patch.object(
+                supervisor,
+                "_teardown_boundary",
+                side_effect=JsonInputError("boundary identity drifted"),
+            ),
+            patch.object(supervisor, "_prune_terminal_records") as prune,
+            self.assertRaisesRegex(JsonInputError, "identity drifted"),
+        ):
+            supervisor._teardown_terminal_boundary(item)
+        prune.assert_not_called()
+
     def test_autonomous_kill_terminal_state_wins_completion_race(self) -> None:
         supervisor = self._instance()
         with tempfile.TemporaryDirectory() as raw:

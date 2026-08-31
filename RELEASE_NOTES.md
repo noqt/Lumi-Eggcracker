@@ -1,6 +1,6 @@
-# Lumi Eggcracker 1.0.4 — release candidate repair
+# Lumi Eggcracker 1.0.5 — release candidate repair
 
-This local 1.0.4 candidate repairs the qualified root-supervisor product after
+This local 1.0.5 candidate repairs the qualified root-supervisor product after
 the 0.7 runtime-topology, 0.8 execution-boundary, 0.8.1 deployment-hardening
 and 0.9 bounded-local-lockdown milestones. It carries four exact native CPU
 AI profiles, direct cgroup-v2 containment, offline selected-workload and
@@ -31,7 +31,13 @@ owned cgroup through direct kill and empty proof. The autonomous detector
 defers that same cgroup, preventing a redundant detector kill and false local
 lockdown when an approved process disappears during deterministic containment.
 
-The public first-kill helper defaults to `v1.0.4`. The packaged support helper
+After exact offline-boundary teardown succeeds, terminal-history pruning now
+runs again with the just-completed run protected. This keeps the bounded store
+at 128 records even when namespace identity reuse made older records
+temporarily non-removable during the pre-cleanup persistence pass. An uncertain
+boundary remains retained and still fails health closed.
+
+The public first-kill helper defaults to `v1.0.5`. The packaged support helper
 delegates to the installed root-owned zipapp, so the documented command works
 from the verified Linux release bundle without importing a mutable checkout.
 The bootstrap now also requires a detached `SHA256SUMS.asc` signature from the

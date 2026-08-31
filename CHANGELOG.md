@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.5 (release candidate)
+
+- Retry bounded terminal-history pruning after exact offline-boundary teardown
+  succeeds, preventing namespace identity reuse from leaving the store above
+  its 128-record limit on a busy or rebooted host.
+- Protect the just-completed run during the post-cleanup pass and continue to
+  retain any terminal record whose namespace cleanup remains uncertain.
+
 ## 1.0.4 (release candidate)
 
 - Serialize deterministic owned-cgroup containment against autonomous
