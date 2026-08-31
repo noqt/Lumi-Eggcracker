@@ -40,9 +40,11 @@ through a shell; the copy-paste setup above uses your shell only to create the
 temporary public-source checkout and start the helper.
 It also refuses to dispatch if the fork's workflow differs from the reviewed
 workflow. It never requests or prints a token; authenticated `gh` handles its
-own credentials. The helper prints the workflow-run URL when GitHub returns
-one. This starts the same disposable hosted proof described above; it does not
-install Eggcracker or test workload recognition.
+own credentials. The helper prints the exact workflow-run URL when GitHub
+returns it directly or the helper can uniquely correlate it to this dispatch.
+If that bounded lookup is unavailable or ambiguous, it prints the fork's
+workflow page instead. This starts the same disposable hosted proof described
+above; it does not install Eggcracker or test workload recognition.
 
 The proof creates a harmless two-process test tree, kills it with Eggcracker's
 containment mechanism and checks that an unrelated canary survives. A passing
