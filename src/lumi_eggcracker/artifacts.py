@@ -288,7 +288,12 @@ def validate_safetensors_fd(
 
 def validate_path(path: Path) -> ArtifactEvidence | None:
     """Return strict GGUF or Safetensors evidence for one opened file."""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -308,7 +313,12 @@ def validate_path(path: Path) -> ArtifactEvidence | None:
 
 def _looks_like_artifact(path: Path) -> bool:
     """Use only a bounded regular-file probe before full validation."""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -366,7 +376,13 @@ def from_argv_paths(
         # vLLM commonly receives a model directory and closes the checkpoint
         # after loading.  Inspect only its bounded immediate children; this is
         # not a recursive filesystem walk and names are never trusted.
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_DIRECTORY", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+        )
         try:
             descriptor = os.open(path, flags)
         except OSError:
