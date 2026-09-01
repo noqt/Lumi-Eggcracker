@@ -878,6 +878,46 @@ class HostedProofTests(unittest.TestCase):
             start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner)
         self.assertEqual(6, len(runner.commands))
 
+    def test_post_sync_metadata_read_failure_never_dispatches(self) -> None:
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="0" * 40 + "\n"),
+                result(("sync",)),
+                result(("metadata",), returncode=1),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "could not revalidate"):
+            start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner)
+        self.assertEqual(6, len(runner.commands))
+        self.assertNotIn(
+            "workflow",
+            [argument for command in runner.commands for argument in command],
+        )
+
+    def test_post_sync_default_branch_drift_never_dispatches(self) -> None:
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="0" * 40 + "\n"),
+                result(("sync",)),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\ttrunk\n"),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "changed its default branch"):
+            start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner)
+        self.assertEqual(6, len(runner.commands))
+        self.assertNotIn(
+            "workflow",
+            [argument for command in runner.commands for argument in command],
+        )
+
     def test_post_sync_workflow_mismatch_never_dispatches(self) -> None:
         runner = FakeRunner(
             [
