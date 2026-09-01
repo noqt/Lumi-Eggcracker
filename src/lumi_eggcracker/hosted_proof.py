@@ -58,6 +58,16 @@ def _watch_command(url: str) -> str | None:
     return f"gh run watch {match.group('run_id')} --repo {repository} --exit-status"
 
 
+def _log_command(url: str) -> str | None:
+    """Return a bounded-result command only for an exact hosted-proof run URL."""
+
+    match = RUN_URL.fullmatch(url)
+    if match is None:
+        return None
+    repository = f"{HOST}/{match.group('owner')}/{REPOSITORY_NAME}"
+    return f"gh run view {match.group('run_id')} --repo {repository} --log"
+
+
 def _default_runner(
     command: Sequence[str],
     *,
@@ -422,5 +432,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     watch_command = _watch_command(url)
     if watch_command is not None:
         print(f"Watch from this terminal: {watch_command}")
+    log_command = _log_command(url)
+    if log_command is not None:
+        print(f"Read the bounded result: {log_command}")
     print(f"After it finishes, share the public run or friction: {RESULT_FORM_URL}")
     return 0
