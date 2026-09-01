@@ -7,7 +7,7 @@ import re
 import subprocess
 import unittest
 from collections.abc import Sequence
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
@@ -163,7 +163,7 @@ class HostedProofTests(unittest.TestCase):
             output.getvalue().splitlines(),
         )
 
-    def test_cli_waits_for_exact_run_and_prints_bounded_log(self) -> None:
+    def test_cli_waits_for_exact_run_and_prints_concise_success(self) -> None:
         url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
         output = StringIO()
         with (
@@ -185,8 +185,7 @@ class HostedProofTests(unittest.TestCase):
         self.assertEqual(
             [
                 f"Hosted proof dispatched: {url}",
-                "Hosted proof finished. Bounded public workflow log:",
-                '{"result":"TERMINATED"}',
+                "Hosted proof finished.",
                 (
                     "After it finishes, share the public run or friction: "
                     f"{hosted_proof_module.RESULT_FORM_URL}"
@@ -199,6 +198,51 @@ class HostedProofTests(unittest.TestCase):
             f"Hosted proof result: PASS ({url})",
             output.getvalue().splitlines()[-1],
         )
+
+    def test_cli_wait_show_log_prints_bounded_success_log(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        output = StringIO()
+        with (
+            patch.object(hosted_proof_module.shutil, "which", return_value="gh"),
+            patch.object(hosted_proof_module, "start_hosted_proof", return_value=url),
+            patch.object(
+                hosted_proof_module,
+                "follow_hosted_proof",
+                return_value=('{"result":"TERMINATED"}', True),
+            ),
+            redirect_stdout(output),
+        ):
+            status = hosted_proof_module.main(
+                [
+                    "--i-understand-this-kills-a-test-tree",
+                    "--wait",
+                    "--show-log",
+                ]
+            )
+
+        self.assertEqual(0, status)
+        self.assertEqual(
+            [
+                f"Hosted proof dispatched: {url}",
+                "Hosted proof finished.",
+                "Bounded public workflow log:",
+                '{"result":"TERMINATED"}',
+                (
+                    "After it finishes, share the public run or friction: "
+                    f"{hosted_proof_module.RESULT_FORM_URL}"
+                ),
+                f"Hosted proof result: PASS ({url})",
+            ],
+            output.getvalue().splitlines(),
+        )
+
+    def test_cli_show_log_requires_wait(self) -> None:
+        error = StringIO()
+        with redirect_stderr(error), self.assertRaises(SystemExit) as raised:
+            hosted_proof_module.main(["--show-log"])
+
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("--show-log requires --wait", error.getvalue())
 
     def test_follow_exact_run_waits_then_reads_bounded_log(self) -> None:
         url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
@@ -385,6 +429,7 @@ class HostedProofTests(unittest.TestCase):
 
         self.assertEqual(1, status)
         self.assertIn('{"result":"FAILED"}', output.getvalue().splitlines())
+        self.assertIn("Bounded public workflow log:", output.getvalue().splitlines())
         self.assertIn(
             f"Hosted proof result: FAIL ({url})",
             output.getvalue().splitlines(),

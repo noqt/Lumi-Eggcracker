@@ -509,9 +509,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--wait",
         action="store_true",
-        help="wait for an exact run to finish and print its bounded public workflow log",
+        help="wait for an exact run and print its terminal PASS or FAIL result",
+    )
+    parser.add_argument(
+        "--show-log",
+        action="store_true",
+        help="with --wait, also print the bounded public log on a successful run",
     )
     arguments = parser.parse_args(argv)
+    if arguments.show_log and not arguments.wait:
+        parser.error("--show-log requires --wait")
 
     if shutil.which("gh") is None:
         parser.error("GitHub CLI (`gh`) is required")
@@ -533,8 +540,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 log, passed = follow_hosted_proof(url)
             except HostedProofError as error:
                 parser.error(str(error))
-            print("Hosted proof finished. Bounded public workflow log:")
-            print(log)
+            print("Hosted proof finished.")
+            if arguments.show_log or not passed:
+                print("Bounded public workflow log:")
+                print(log)
             result = "PASS" if passed else "FAIL"
             result_line = f"Hosted proof result: {result} ({url})"
             if not passed:
