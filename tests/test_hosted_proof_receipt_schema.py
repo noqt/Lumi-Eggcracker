@@ -13,6 +13,9 @@ from lumi_eggcracker import containment_probe as probe
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schemas" / "hosted-proof-receipt-v1.schema.json"
+SUCCESS_EXAMPLE_PATH = (
+    ROOT / "schemas" / "examples" / "hosted-proof-receipt-v1-success.json"
+)
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "containment-probe.yml"
 
 
@@ -82,6 +85,12 @@ class HostedProofReceiptSchemaTests(unittest.TestCase):
         self.assertEqual(probe.SUCCESS_KEYS, properties)
         self.assertFalse(self.success["additionalProperties"])
         self.validator.validate(success_receipt())
+
+    def test_published_success_example_validates(self) -> None:
+        example = json.loads(SUCCESS_EXAMPLE_PATH.read_text(encoding="utf-8"))
+        self.validator.validate(example)
+        self.assertEqual("0" * 40, example["source_commit"])
+        self.assertEqual("0" * 64, example["source_tree_sha256"])
 
     def test_success_latency_bound_matches_probe_and_hosted_workflow(self) -> None:
         maximum = self.success["properties"]["trigger_to_empty_ms"]["maximum"]
