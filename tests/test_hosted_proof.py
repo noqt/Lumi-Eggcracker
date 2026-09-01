@@ -7,10 +7,13 @@ import re
 import subprocess
 import unittest
 from collections.abc import Sequence
+from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+from lumi_eggcracker import hosted_proof as hosted_proof_module
 from lumi_eggcracker.hosted_proof import (
     REVIEWED_WORKFLOW_BLOB,
     HostedProofError,
@@ -126,6 +129,31 @@ def existing_fork_responses(
 
 
 class HostedProofTests(unittest.TestCase):
+    def test_cli_prints_run_and_result_route(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        output = StringIO()
+        with (
+            patch.object(hosted_proof_module.shutil, "which", return_value="gh"),
+            patch.object(hosted_proof_module, "start_hosted_proof", return_value=url) as starter,
+            redirect_stdout(output),
+        ):
+            status = hosted_proof_module.main(
+                ["--i-understand-this-kills-a-test-tree"]
+            )
+
+        self.assertEqual(0, status)
+        starter.assert_called_once_with(acknowledged=True)
+        self.assertEqual(
+            [
+                f"Hosted proof dispatched: {url}",
+                (
+                    "After it finishes, share the public run or friction: "
+                    f"{hosted_proof_module.RESULT_FORM_URL}"
+                ),
+            ],
+            output.getvalue().splitlines(),
+        )
+
     def test_reviewed_workflow_blob_matches_current_workflow(self) -> None:
         raw = WORKFLOW.read_bytes()
         framed = f"blob {len(raw)}\0".encode("ascii") + raw
