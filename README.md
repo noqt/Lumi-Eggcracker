@@ -9,6 +9,8 @@
 · [Current-run Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
 
+Maintained by [NOQT](https://github.com/noqt), which builds open-source software for security and risk. The [independent watchlist entry](https://github.com/scadastrangelove/awesome-ai-security-tools/blob/main/WATCHLIST.md#candidates) records the current alpha limits and the fact that outside field runs are still missing; it is context, not endorsement or assurance.
+
 ## The kill switch outside the sandbox
 
 Lumi Eggcracker is an AI kill tool.
