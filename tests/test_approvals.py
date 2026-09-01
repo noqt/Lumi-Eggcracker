@@ -37,6 +37,7 @@ class ApprovalTests(unittest.TestCase):
             trusted = SimpleNamespace(
                 st_mode=stat.S_IFREG | 0o600,
                 st_nlink=1,
+                st_size=manifest.stat().st_size,
                 st_uid=0,
             )
             with patch.object(Path, "lstat", autospec=True, return_value=trusted):
@@ -44,6 +45,7 @@ class ApprovalTests(unittest.TestCase):
             untrusted = SimpleNamespace(
                 st_mode=stat.S_IFREG | 0o644,
                 st_nlink=1,
+                st_size=manifest.stat().st_size,
                 st_uid=0,
             )
             with (
