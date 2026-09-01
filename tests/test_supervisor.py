@@ -975,7 +975,10 @@ class SupervisorTests(unittest.TestCase):
         supervisor = self._instance()
         item = record()
         with tempfile.TemporaryDirectory() as raw:
-            supervisor.runs = Path(raw)
+            root = Path(raw)
+            supervisor.runs = root
+            supervisor.names = root / "names"
+            supervisor.names.mkdir()
             (supervisor.runs / ("a" * 24 + ".json")).write_text(__import__("json").dumps(item), encoding="utf-8")
             with patch("lumi_eggcracker.supervisor.boot_id", return_value="b" * 36), patch.object(supervisor, "_contain", side_effect=JsonInputError("containment failed: owned cgroup is unavailable")), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(1, EmptyProof(True, 0, 0, []))), patch.object(supervisor, "_mark_completed") as completed:
                 supervisor._recover()
@@ -990,7 +993,10 @@ class SupervisorTests(unittest.TestCase):
             raise JsonInputError("containment failed: owned cgroup is unavailable")
 
         with tempfile.TemporaryDirectory() as raw:
-            supervisor.runs = Path(raw)
+            root = Path(raw)
+            supervisor.runs = root
+            supervisor.names = root / "names"
+            supervisor.names.mkdir()
             (supervisor.runs / ("a" * 24 + ".json")).write_text(
                 __import__("json").dumps(item), encoding="utf-8"
             )
