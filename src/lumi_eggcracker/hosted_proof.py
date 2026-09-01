@@ -22,7 +22,11 @@ RESULT_FORM_URL = (
 )
 REVIEWED_WORKFLOW_BLOB = "3761d8c3b29f1265e402c788e5340f6eab2c70df"
 ACKNOWLEDGEMENT = "i_understand_this_kills_a_test_tree=true"
-RUN_URL = re.compile(r"^https://github\.com/[^/]+/[^/]+/actions/runs/[1-9][0-9]*$")
+RUN_URL = re.compile(
+    r"^https://github\.com/"
+    r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/"
+    r"Lumi-Eggcracker/actions/runs/(?P<run_id>[1-9][0-9]*)$"
+)
 CORRELATION_ID = re.compile(r"^[0-9a-f]{32}$")
 RUN_NAME_PREFIX = "Containment probe"
 RUN_LOOKUP_ATTEMPTS = 3
@@ -42,6 +46,16 @@ TokenFactory = Callable[[int], str]
 
 class HostedProofError(RuntimeError):
     """A bounded, user-actionable hosted-proof startup failure."""
+
+
+def _watch_command(url: str) -> str | None:
+    """Return a copyable command only for an exact validated hosted-proof run URL."""
+
+    match = RUN_URL.fullmatch(url)
+    if match is None:
+        return None
+    repository = f"{HOST}/{match.group('owner')}/{REPOSITORY_NAME}"
+    return f"gh run watch {match.group('run_id')} --repo {repository} --exit-status"
 
 
 def _default_runner(
@@ -405,5 +419,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except HostedProofError as error:
         parser.error(str(error))
     print(f"Hosted proof dispatched: {url}")
+    watch_command = _watch_command(url)
+    if watch_command is not None:
+        print(f"Watch from this terminal: {watch_command}")
     print(f"After it finishes, share the public run or friction: {RESULT_FORM_URL}")
     return 0

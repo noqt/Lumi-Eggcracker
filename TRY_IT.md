@@ -33,8 +33,10 @@ python (Join-Path $proofDir "scripts\start_hosted_proof.py") `
 ```
 
 The helper prints the exact workflow-run URL when GitHub returns it directly or
-the helper can uniquely correlate it to this dispatch. Open that URL to watch
-the proof and read its bounded result.
+the helper can uniquely correlate it to this dispatch. For an exact run URL it
+also prints a copyable `gh run watch` command, so you can follow the workflow's
+progress and final status without leaving the terminal. Open the run URL to read
+the bounded result.
 
 ### Or use the GitHub interface
 

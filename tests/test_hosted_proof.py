@@ -147,6 +147,61 @@ class HostedProofTests(unittest.TestCase):
             [
                 f"Hosted proof dispatched: {url}",
                 (
+                    "Watch from this terminal: "
+                    "gh run watch 123 --repo github.com/operator/Lumi-Eggcracker "
+                    "--exit-status"
+                ),
+                (
+                    "After it finishes, share the public run or friction: "
+                    f"{hosted_proof_module.RESULT_FORM_URL}"
+                ),
+            ],
+            output.getvalue().splitlines(),
+        )
+
+    def test_watch_command_requires_exact_safe_github_run_url(self) -> None:
+        self.assertEqual(
+            (
+                "gh run watch 123 --repo github.com/operator/Lumi-Eggcracker "
+                "--exit-status"
+            ),
+            hosted_proof_module._watch_command(
+                "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+            ),
+        )
+        rejected = (
+            "http://github.com/operator/Lumi-Eggcracker/actions/runs/123",
+            "https://gitlab.com/operator/Lumi-Eggcracker/actions/runs/123",
+            "https://github.com/operator/other/actions/runs/123",
+            "https://github.com/operator/Lumi-Eggcracker/actions/runs/0",
+            "https://github.com/operator/Lumi-Eggcracker/actions/runs/123?x=1",
+            "https://github.com/operator/Lumi-Eggcracker/actions/runs/123#fragment",
+            "https://github.com/bad;name/Lumi-Eggcracker/actions/runs/123",
+        )
+        for url in rejected:
+            with self.subTest(url=url):
+                self.assertIsNone(hosted_proof_module._watch_command(url))
+
+    def test_cli_omits_watch_command_for_fallback_workflow_page(self) -> None:
+        url = (
+            "https://github.com/operator/Lumi-Eggcracker/actions/workflows/"
+            "containment-probe.yml"
+        )
+        output = StringIO()
+        with (
+            patch.object(hosted_proof_module.shutil, "which", return_value="gh"),
+            patch.object(hosted_proof_module, "start_hosted_proof", return_value=url),
+            redirect_stdout(output),
+        ):
+            status = hosted_proof_module.main(
+                ["--i-understand-this-kills-a-test-tree"]
+            )
+
+        self.assertEqual(0, status)
+        self.assertEqual(
+            [
+                f"Hosted proof dispatched: {url}",
+                (
                     "After it finishes, share the public run or friction: "
                     f"{hosted_proof_module.RESULT_FORM_URL}"
                 ),
