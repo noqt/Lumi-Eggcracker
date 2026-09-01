@@ -39,6 +39,7 @@ from .approvals import public as public_approval
 from .artifacts import MAX_FD_PROBES_PER_SCAN, MAX_MAP_PROBES_PER_SCAN, ArtifactEvidence
 from .artifacts import from_snapshot as artifacts_from_snapshot
 from .containment import (
+    boot_id,
     capture_identity,
     events_from_fd,
     kill_path,
@@ -3058,6 +3059,26 @@ class Supervisor:
             "workload_uid": self.policy["workload_uid"],
         }
 
+    @staticmethod
+    def _record_cgroup_present(record: dict[str, Any]) -> bool:
+        """Check only the already-validated owned cgroup name for this boot."""
+        path = Path("/sys/fs/cgroup").joinpath(
+            *record["cgroup"].lstrip("/").split("/")
+        )
+        return path.is_dir() or path.is_symlink()
+
+    def _complete_recovered_empty(self, record: dict[str, Any]) -> None:
+        """Commit an exact empty recovery without leaving a false failure."""
+        # `_contain` durably records CONTAINMENT_FAILED before it reports that
+        # an already-collected cgroup is unavailable.  Recovery runs before
+        # public sockets are exposed, so restore the active state durably and
+        # use the ordinary serialized empty transition to remove launch
+        # provenance and reclaim the exact offline boundary.
+        record["state"] = "RUNNING"
+        self._store(record)
+        if not self._mark_completed(record):
+            raise JsonInputError("recovered empty workload did not become terminal")
+
     def _recover(self) -> None:
         recorded_ids: set[str] = set()
         empty_terminal_states = {
@@ -3085,26 +3106,39 @@ class Supervisor:
                     # Refuse a clean-health claim if exact identity-checked
                     # reclamation fails, but keep root diagnosis available.
                     self.boundary_cleanup_healthy = False
-            if record["state"] in ACTIVE_STATES:
+            if record["state"] in ACTIVE_STATES or record["state"] == "CONTAINMENT_FAILED":
                 self.active_cgroups.add(record["cgroup"])
+                if record["boot_id"] != boot_id():
+                    # A prior kernel epoch cannot retain a process.  Refuse to
+                    # adopt a same-named current-boot cgroup, but otherwise
+                    # reconcile the now-impossible workload and its ephemeral
+                    # launch provenance through the normal empty transition.
+                    if self._record_cgroup_present(record):
+                        raise JsonInputError(
+                            "prior-boot workload cgroup name is present in current boot"
+                        )
+                    self._complete_recovered_empty(record)
+                    continue
+                if record["state"] == "CONTAINMENT_FAILED":
+                    # Retry a previously interrupted containment.  If the
+                    # cgroup still exists, `_contain` applies cgroup.kill; if
+                    # it was collected, the exact empty proof below closes it.
+                    record["state"] = "RUNNING"
+                    self._store(record)
                 try:
                     self._contain(record, "SUPERVISOR_RESTART_FAIL_CLOSED")
-                except JsonInputError as error:
-                    # The transient unit may have been collected after its
-                    # cgroup was proven empty but before the restart scan.
-                    # It is not a live workload and must not crash recovery.
-                    if "owned cgroup is unavailable" not in str(error):
+                except JsonInputError:
+                    # The transient unit may have exited fail-closed and been
+                    # collected between its supervisor-side gate/listener
+                    # disappearing and this restart scan.  Only an exact empty
+                    # proof permits reconciliation; identity drift still
+                    # raises and blocks healthy recovery.
+                    if record.get("state") == "CONTAINED_RECEIPT_FAILED":
                         raise
                     _empty_ns, proof = verify_empty(identity_from_run(record))
                     if not proof.complete:
                         raise
-                    # `_contain` records a failure before raising when the
-                    # systemd unit has already been collected.  The exact
-                    # empty proof is authoritative for this recovery case;
-                    # restore the active state so normal completion can be
-                    # committed instead of leaving a false failure record.
-                    record["state"] = "RUNNING"
-                    self._mark_completed(record)
+                    self._complete_recovered_empty(record)
         root = Path("/sys/fs/cgroup/system.slice")
         if not root.is_dir():
             return

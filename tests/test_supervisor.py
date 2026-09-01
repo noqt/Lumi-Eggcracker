@@ -976,7 +976,7 @@ class SupervisorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             supervisor.runs = Path(raw)
             (supervisor.runs / ("a" * 24 + ".json")).write_text(__import__("json").dumps(item), encoding="utf-8")
-            with patch.object(supervisor, "_contain", side_effect=JsonInputError("containment failed: owned cgroup is unavailable")), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(1, EmptyProof(True, 0, 0, []))), patch.object(supervisor, "_mark_completed") as completed:
+            with patch("lumi_eggcracker.supervisor.boot_id", return_value="b" * 36), patch.object(supervisor, "_contain", side_effect=JsonInputError("containment failed: owned cgroup is unavailable")), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(1, EmptyProof(True, 0, 0, []))), patch.object(supervisor, "_mark_completed") as completed:
                 supervisor._recover()
         completed.assert_called_once_with(item)
 
@@ -993,13 +993,88 @@ class SupervisorTests(unittest.TestCase):
             (supervisor.runs / ("a" * 24 + ".json")).write_text(
                 __import__("json").dumps(item), encoding="utf-8"
             )
-            with patch.object(supervisor, "_contain", side_effect=fail_containment), patch(
+            with patch("lumi_eggcracker.supervisor.boot_id", return_value="b" * 36), patch.object(supervisor, "_contain", side_effect=fail_containment), patch(
                 "lumi_eggcracker.supervisor.verify_empty",
                 return_value=(1, EmptyProof(True, 0, 0, [])),
             ), patch.object(supervisor, "_mark_completed") as completed:
                 supervisor._recover()
         self.assertEqual("RUNNING", item["state"])
         completed.assert_called_once_with(item)
+
+    def test_recovered_empty_transition_is_durable_and_terminal(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        item["state"] = "CONTAINMENT_FAILED"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            supervisor.runs.mkdir()
+            supervisor.names.mkdir()
+            with patch.object(supervisor, "_teardown_terminal_boundary"):
+                supervisor._complete_recovered_empty(item)
+            stored = load_run(supervisor.runs, "a" * 24)
+        self.assertEqual("COMPLETED_ALLOWED", stored["state"])
+        self.assertNotIn(stored["cgroup"], supervisor.active_cgroups)
+
+    def test_recovery_reconciles_absent_prior_boot_workload(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(
+                json.dumps(item), encoding="utf-8"
+            )
+            with (
+                patch("lumi_eggcracker.supervisor.boot_id", return_value="c" * 36),
+                patch.object(
+                    supervisor, "_record_cgroup_present", return_value=False
+                ),
+                patch.object(supervisor, "_complete_recovered_empty") as completed,
+                patch.object(supervisor, "_contain") as contain,
+            ):
+                supervisor._recover()
+        completed.assert_called_once_with(item)
+        contain.assert_not_called()
+
+    def test_recovery_rejects_prior_boot_cgroup_name_collision(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(
+                json.dumps(item), encoding="utf-8"
+            )
+            with (
+                patch("lumi_eggcracker.supervisor.boot_id", return_value="c" * 36),
+                patch.object(
+                    supervisor, "_record_cgroup_present", return_value=True
+                ),
+                self.assertRaisesRegex(JsonInputError, "prior-boot workload"),
+            ):
+                supervisor._recover()
+
+    def test_recovery_does_not_erase_receipt_persistence_failure(self) -> None:
+        supervisor = self._instance()
+        item = record()
+
+        def fail_receipt(value: dict[str, object], _trigger: str) -> None:
+            value["state"] = "CONTAINED_RECEIPT_FAILED"
+            raise JsonInputError("contained but receipt persistence failed")
+
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(
+                json.dumps(item), encoding="utf-8"
+            )
+            with (
+                patch("lumi_eggcracker.supervisor.boot_id", return_value="b" * 36),
+                patch.object(supervisor, "_contain", side_effect=fail_receipt),
+                patch("lumi_eggcracker.supervisor.verify_empty") as empty,
+                self.assertRaisesRegex(JsonInputError, "receipt persistence"),
+            ):
+                supervisor._recover()
+        empty.assert_not_called()
 
     def test_recovery_reclaims_exact_terminal_offline_boundary(self) -> None:
         supervisor = self._instance()

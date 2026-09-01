@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.7 (release candidate)
+
+- Reconcile an exact already-empty protected cgroup after supervisor restart
+  instead of leaving a false `CONTAINMENT_FAILED` record and stale offline
+  namespace mounts.
+- Retry a persisted containment failure during restart when its exact cgroup
+  still exists; otherwise require the authoritative collected-empty proof.
+- Reconcile prior-boot active launch provenance only when no same-named cgroup
+  exists in the current kernel epoch, keeping a collision fail closed.
+- Preserve receipt-persistence failures rather than relabelling them as benign
+  completion during recovery.
+
 ## 1.0.6 (release candidate)
 
 - Cache the last fully validated bounded incident store and use exact file
