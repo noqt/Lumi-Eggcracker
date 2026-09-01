@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from lumi_eggcracker import incidents
 from lumi_eggcracker.artifacts import ArtifactEvidence
 from lumi_eggcracker.containment import EmptyProof
 from lumi_eggcracker.detectors import load_bundled, match
@@ -361,6 +362,123 @@ class SupervisorTests(unittest.TestCase):
         started = time.monotonic()
         supervisor._incident_sweep("i" * 24)
         self.assertLess(time.monotonic() - started, 0.1)
+
+    def test_incident_cache_avoids_revalidating_unchanged_records(self) -> None:
+        supervisor = self._instance()
+        supervisor.incident_health_healthy = True
+        supervisor.incident_response_lock = threading.RLock()
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor.incidents = Path(temporary)
+            with patch(
+                "lumi_eggcracker.supervisor.incident_store.compact",
+                wraps=incidents.compact,
+            ) as compact:
+                self.assertEqual([], supervisor._incident_values())
+                self.assertEqual([], supervisor._incident_values())
+            self.assertEqual(1, compact.call_count)
+
+    def test_incident_cache_adopts_atomic_write_without_full_reload(self) -> None:
+        supervisor = self._instance()
+        supervisor.incident_health_healthy = True
+        supervisor.incident_response_lock = threading.RLock()
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor.incidents = Path(temporary)
+            original = incidents.create(
+                supervisor.incidents,
+                receipt={
+                    "event_id": "a" * 24,
+                    "observed": {"argv_sha256": "b" * 64, "uid": 2001},
+                    "executable": {"sha256": "c" * 64},
+                },
+                policy={"version": "1.0.0"},
+                catalogue_sha256="d" * 64,
+                source_commit="e" * 40,
+                version="1.0.0",
+                trigger="UNAPPROVED_AI_MATCH",
+                profile="content.gguf-llama",
+                evidence=["gguf-v3"],
+                match={
+                    "argv_sha256": "b" * 64,
+                    "executable_sha256": "c" * 64,
+                    "profile": "content.gguf-llama",
+                    "uid": 2001,
+                },
+                workload={
+                    "boot_id": "f" * 36,
+                    "cgroup": "/system.slice/lumi-eggcracker-workload-"
+                    + "a" * 24
+                    + ".service",
+                    "cgroup_device": 1,
+                    "cgroup_inode": 2,
+                    "run_id": "a" * 24,
+                    "unit": "lumi-eggcracker-workload-" + "a" * 24 + ".service",
+                    "uid": 2001,
+                },
+                approval=None,
+            )
+            supervisor._incident_values()
+            updated = incidents.update(
+                supervisor.incidents,
+                original,
+                acknowledgement={"monotonic_ns": 1, "uid": 0},
+                state="ACKNOWLEDGED",
+            )
+            supervisor._cache_incident_write(updated)
+            with patch(
+                "lumi_eggcracker.supervisor.incident_store.compact",
+                side_effect=AssertionError("unchanged store was reparsed"),
+            ):
+                self.assertEqual(
+                    "ACKNOWLEDGED", supervisor._incident_values()[0]["state"]
+                )
+
+    def test_incident_cache_revalidates_and_rejects_in_place_tamper(self) -> None:
+        supervisor = self._instance()
+        supervisor.incident_health_healthy = True
+        supervisor.incident_response_lock = threading.RLock()
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor.incidents = Path(temporary)
+            value = incidents.create(
+                supervisor.incidents,
+                receipt={
+                    "event_id": "a" * 24,
+                    "observed": {"argv_sha256": "b" * 64, "uid": 2001},
+                    "executable": {"sha256": "c" * 64},
+                },
+                policy={"version": "1.0.0"},
+                catalogue_sha256="d" * 64,
+                source_commit="e" * 40,
+                version="1.0.0",
+                trigger="UNAPPROVED_AI_MATCH",
+                profile="content.gguf-llama",
+                evidence=["gguf-v3"],
+                match={
+                    "argv_sha256": "b" * 64,
+                    "executable_sha256": "c" * 64,
+                    "profile": "content.gguf-llama",
+                    "uid": 2001,
+                },
+                workload={
+                    "boot_id": "f" * 36,
+                    "cgroup": "/system.slice/lumi-eggcracker-workload-"
+                    + "a" * 24
+                    + ".service",
+                    "cgroup_device": 1,
+                    "cgroup_inode": 2,
+                    "run_id": "a" * 24,
+                    "unit": "lumi-eggcracker-workload-" + "a" * 24 + ".service",
+                    "uid": 2001,
+                },
+                approval=None,
+            )
+            supervisor._incident_values()
+            path = supervisor.incidents / f"{value['incident_id']}.json"
+            tampered = json.loads(path.read_text(encoding="utf-8"))
+            tampered["state"] = "CLEARED"
+            path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+            with self.assertRaises(JsonInputError):
+                supervisor._incident_values()
+            self.assertFalse(supervisor.incident_health_healthy)
 
     def test_group_refresh_replaces_preexec_gate_snapshot_without_losing_evidence(self) -> None:
         identity = ProcessIdentity(10, 100)

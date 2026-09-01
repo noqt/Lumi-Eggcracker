@@ -340,6 +340,10 @@ class Supervisor:
         self.boundary_cleanup_healthy = True
         self.incident_health_healthy = True
         self.incident_response_lock = threading.RLock()
+        self.incident_cache_values: tuple[dict[str, Any], ...] | None = None
+        self.incident_cache_fingerprint: tuple[
+            tuple[str, int, int, int, int, int, int, int, int], ...
+        ] | None = None
         self.incident_sweep_lock = threading.Lock()
         self.incident_sweep_active = False
         self.boundaries: dict[str, OfflineBoundary] = {}
@@ -607,7 +611,7 @@ class Supervisor:
         # service available for root diagnosis, but fail health and all new
         # starts closed until the store is repaired or cleared by root.
         try:
-            incident_store.compact(self.incidents)
+            self._replace_incident_cache(incident_store.compact(self.incidents))
         except (JsonInputError, OSError):
             self.incident_health_healthy = False
         self._backfill_name_tombstones()
@@ -1212,6 +1216,36 @@ class Supervisor:
             self.receipt_persistence_healthy = False
             raise
 
+    def _replace_incident_cache(
+        self, values: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        root = getattr(self, "incidents", None)
+        if root is None:
+            return []
+        ordered = sorted(values, key=lambda item: item["incident_id"])
+        fingerprint = incident_store.fingerprint(root)
+        expected_names = tuple(f"{item['incident_id']}.json" for item in ordered)
+        if tuple(item[0] for item in fingerprint) != expected_names:
+            raise JsonInputError("incident store changed during validation")
+        self.incident_cache_values = tuple(ordered)
+        self.incident_cache_fingerprint = fingerprint
+        return list(ordered)
+
+    def _cache_incident_write(self, value: dict[str, Any]) -> None:
+        """Adopt one successful atomic root write without reparsing the store."""
+        cached = getattr(self, "incident_cache_values", None)
+        if cached is None:
+            self._replace_incident_cache(incident_store.compact(self.incidents))
+            return
+        values = {item["incident_id"]: item for item in cached}
+        values[value["incident_id"]] = value
+        if len(values) > incident_store.MAX_INCIDENTS:
+            # A new incident may cross the bound when cleared history fills
+            # the store.  Apply the existing fail-closed compaction rules.
+            self._replace_incident_cache(incident_store.compact(self.incidents))
+            return
+        self._replace_incident_cache(list(values.values()))
+
     def _incident_values(self) -> list[dict[str, Any]]:
         root = getattr(self, "incidents", None)
         if root is None:
@@ -1220,13 +1254,20 @@ class Supervisor:
             raise JsonInputError("incident store is unavailable; root recovery is required")
         lock = getattr(self, "incident_response_lock", None)
         try:
-            if lock is None:
-                return incident_store.compact(root)
-            with lock:
-                return incident_store.compact(root)
+            if lock is not None:
+                lock.acquire()
+            fingerprint = incident_store.fingerprint(root)
+            cached_values = getattr(self, "incident_cache_values", None)
+            cached_fingerprint = getattr(self, "incident_cache_fingerprint", None)
+            if cached_values is not None and fingerprint == cached_fingerprint:
+                return list(cached_values)
+            return self._replace_incident_cache(incident_store.compact(root))
         except (JsonInputError, OSError):
             self.incident_health_healthy = False
             raise
+        finally:
+            if lock is not None:
+                lock.release()
 
     def _incident_status(self) -> dict[str, Any]:
         root = getattr(self, "incidents", None)
@@ -1390,7 +1431,10 @@ class Supervisor:
                     current = next(item for item in values if item["incident_id"] == incident_id)
                     recurrence = dict(current["recurrence"])
                     recurrence["sweep_count"] += 1
-                    incident_store.update(self.incidents, current, recurrence=recurrence)
+                    updated = incident_store.update(
+                        self.incidents, current, recurrence=recurrence
+                    )
+                    self._cache_incident_write(updated)
                 self.operations.append("incident-sweep")
                 # Reuse the existing bounded discovery and containment path.
                 # Nested response calls link receipts to this incident but do
@@ -1433,7 +1477,8 @@ class Supervisor:
                     profile=match["profile"],
                 )
                 if existing is not None:
-                    incident_store.link(root, existing, receipt)
+                    updated = incident_store.link(root, existing, receipt)
+                    self._cache_incident_write(updated)
                     self.operations.append("incident-state")
                     return
                 detector = receipt.get("detector") if isinstance(receipt.get("detector"), dict) else {}
@@ -1461,6 +1506,7 @@ class Supervisor:
                 response["completed"] = revoked
                 response["response_completed_monotonic_ns"] = time.monotonic_ns()
                 incident = incident_store.update(root, incident, response=response)
+                self._cache_incident_write(incident)
                 # The sweep performs a synchronous discovery pass.  Run it
                 # after releasing incident_response_lock: a nested match can
                 # itself complete containment and call this method, and a
@@ -3329,6 +3375,7 @@ class Supervisor:
                         response=response,
                         state="CLEARED",
                     )
+                self._cache_incident_write(updated)
                 self.operations.append("incident-state")
                 return incident_store.public_detail(updated)
         if action == "detections" and not args:

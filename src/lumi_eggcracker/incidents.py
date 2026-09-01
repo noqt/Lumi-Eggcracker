@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -251,6 +252,45 @@ def _paths(root: Path) -> list[Path]:
     if root.is_symlink() or not root.is_dir():
         raise JsonInputError("incident root is invalid")
     return sorted(root.glob("*.json"))
+
+
+def fingerprint(root: Path) -> tuple[tuple[str, int, int, int, int, int, int, int, int], ...]:
+    """Return bounded exact metadata for an already validated incident store.
+
+    Incident records are root-owned and replaced atomically.  The supervisor
+    can therefore avoid reparsing every record for every candidate while
+    still noticing creates, replacements, removals and in-place changes.
+    A changed fingerprint always causes a complete integrity validation.
+    """
+    paths = _paths(root)
+    if len(paths) > MAX_INCIDENTS + MAX_COMPACTION_OVERFLOW:
+        raise JsonInputError("incident store exceeds bounded capacity")
+    values: list[tuple[str, int, int, int, int, int, int, int, int]] = []
+    for path in paths:
+        try:
+            metadata = path.lstat()
+        except OSError as error:
+            raise JsonInputError(f"cannot stat incident record: {error}") from error
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or path.name != f"{path.stem}.json"
+        ):
+            raise JsonInputError("incident filename is invalid")
+        values.append(
+            (
+                path.name,
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_size,
+                metadata.st_mtime_ns,
+                metadata.st_ctime_ns,
+                metadata.st_mode,
+                metadata.st_uid,
+                metadata.st_nlink,
+            )
+        )
+    return tuple(values)
 
 
 def _load_paths(root: Path, paths: list[Path]) -> list[dict[str, Any]]:

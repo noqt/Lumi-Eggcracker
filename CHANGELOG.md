@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.6 (release candidate)
+
+- Cache the last fully validated bounded incident store and use exact file
+  metadata to detect any subsequent change, avoiding repeated parsing and
+  integrity hashing on every discovery candidate and health query.
+- Adopt successful root-owned atomic incident updates directly into that
+  cache while retaining full fail-closed revalidation for external changes,
+  overflow compaction and malformed records.
+- Preserve the one-second discovery/watchdog health bound under the full
+  256-record incident history used by the adaptive revocation-race campaign.
+
 ## 1.0.5 (release candidate)
 
 - Retry bounded terminal-history pruning after exact offline-boundary teardown
