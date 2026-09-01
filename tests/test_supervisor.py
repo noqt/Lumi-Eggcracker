@@ -1360,6 +1360,79 @@ class SupervisorTests(unittest.TestCase):
                 "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
             )
 
+    def test_live_admitted_pid_outside_empty_cgroup_cannot_complete_allowed(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            supervisor.launches = root / "launches"
+            item = record()
+            supervisor._store(item)
+            provenance = {
+                "cgroup": item["cgroup"],
+                "pid": 42,
+                "run_id": item["run_id"],
+                "start_time": 100,
+            }
+            with (
+                patch(
+                    "lumi_eggcracker.supervisor.load_launch_provenance",
+                    return_value=[provenance],
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.process_identity",
+                    return_value=ProcessIdentity(42, 100),
+                ),
+            ):
+                self.assertFalse(supervisor._mark_completed(item.copy()))
+            self.assertEqual(
+                "RUNNING", load_run(supervisor.runs, str(item["run_id"]))["state"]
+            )
+
+    def test_discovery_attributes_moved_exact_launch_identity_to_owned_run(self) -> None:
+        supervisor = self._instance()
+        supervisor.launches = Path("launches")
+        item = record()
+        snapshot = MagicMock(
+            identity=ProcessIdentity(42, 100),
+            cgroups=("0::/r2-43-escape",),
+        )
+        provenance = {
+            "cgroup": item["cgroup"],
+            "pid": 42,
+            "run_id": item["run_id"],
+            "start_time": 100,
+        }
+        with patch(
+            "lumi_eggcracker.supervisor.load_launch_provenance",
+            return_value=[provenance],
+        ):
+            self.assertEqual(
+                {item["cgroup"]}, supervisor._discovered_run_cgroups(snapshot, ())
+            )
+
+    def test_affected_approval_is_captured_from_the_exact_owned_run(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            supervisor.launches = root / "launches"
+            item = record()
+            supervisor._store(item)
+            approval = {"name": "exact-approval"}
+            with patch.object(
+                supervisor, "_approval_identity", return_value=approval
+            ) as approval_identity:
+                self.assertIs(
+                    approval,
+                    supervisor._approval_for_discovered_cgroups(
+                        {str(item["cgroup"])}
+                    ),
+                )
+            approval_identity.assert_called_once_with(item["run_id"])
+
     def test_autonomous_kill_reclaims_owned_boundary_after_receipt_publish(self) -> None:
         supervisor = self._instance()
         supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
@@ -1460,6 +1533,14 @@ class SupervisorTests(unittest.TestCase):
         order: list[str] = []
         terminated_record = record()
         terminated_record["state"] = "TERMINATED"
+        affected_approval = {
+            "argv_sha256": "a" * 64,
+            "bound_input_sha256": ["b" * 64],
+            "created_monotonic_ns": 1,
+            "executable_sha256": "c" * 64,
+            "name": "approved-run",
+            "uid": 2001,
+        }
 
         def mark(cgroups: set[str]) -> tuple[dict[str, object], ...]:
             order.append("mark")
@@ -1476,7 +1557,11 @@ class SupervisorTests(unittest.TestCase):
                     + ".service"
                 },
             ),
-            patch("lumi_eggcracker.supervisor.contain_many", return_value=containment),
+            patch(
+                "lumi_eggcracker.supervisor.contain_many",
+                side_effect=lambda *_args, **_kwargs: order.append("contain")
+                or containment,
+            ),
             patch.object(
                 supervisor,
                 "_detection_receipt",
@@ -1484,6 +1569,12 @@ class SupervisorTests(unittest.TestCase):
                     "event_id": "e" * 24,
                     "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
                 },
+            ),
+            patch.object(
+                supervisor,
+                "_approval_for_discovered_cgroups",
+                side_effect=lambda _cgroups: order.append("approval")
+                or affected_approval,
             ),
             patch.object(
                 supervisor,
@@ -1509,10 +1600,11 @@ class SupervisorTests(unittest.TestCase):
                 targets={target},
             )
 
-        self.assertEqual(["mark", "publish"], order)
+        self.assertEqual(["contain", "approval", "mark", "publish"], order)
         response_receipt = respond.call_args.args[0]
         self.assertEqual("e" * 24, response_receipt["event_id"])
         self.assertIs(terminated_record, respond.call_args.kwargs["record"])
+        self.assertIs(affected_approval, respond.call_args.kwargs["approval"])
 
     def test_owned_containment_claim_suppresses_redundant_autonomous_kill(self) -> None:
         supervisor = self._instance()

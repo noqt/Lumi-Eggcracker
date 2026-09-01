@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.9 (release candidate)
+
+- Keep an exact admitted run active when its launch PID still exists after
+  hostile cgroup-membership escape; an empty original cgroup is not benign
+  completion proof in that case.
+- Attribute autonomous containment of that escaped PID to its root-owned run,
+  terminate the run record, revoke the exact approval and create the incident
+  against the original protected workload.
+- Preserve containment-first ordering: approval capture, terminal state,
+  incident persistence and revocation occur only after the kill and empty proof.
+- Permit an exact in-place upgrade from the preceding 1.0.8 candidate.
+
 ## 1.0.8 (release candidate)
 
 - Bind root-created approvals to a private, random installation epoch.

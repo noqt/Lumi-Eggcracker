@@ -71,6 +71,7 @@ class UpgradeIdentityTests(unittest.TestCase):
         self.assertIn("1.0.5", upgrader.SUPPORTED_SOURCES)
         self.assertIn("1.0.6", upgrader.SUPPORTED_SOURCES)
         self.assertIn("1.0.7", upgrader.SUPPORTED_SOURCES)
+        self.assertIn("1.0.8", upgrader.SUPPORTED_SOURCES)
 
     def test_legacy_manifest_resolves_live_gid_instead_of_using_uid(self) -> None:
         upgrader = self.load_upgrader()

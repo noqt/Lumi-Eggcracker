@@ -1096,7 +1096,40 @@ class Supervisor:
                     )
                 ):
                     values.add(cgroup)
+        # An exact approved launch identity can be moved out of its owned
+        # cgroup by a hostile root-side fault injection. Membership loss
+        # invalidates approval, but must not sever attribution to the run
+        # whose root-owned provenance admitted that exact PID/start-time.
+        launch_root = getattr(self, "launches", None)
+        if isinstance(launch_root, Path):
+            identities = {candidate.snapshot.identity for candidate in candidates}
+            try:
+                provenances = load_launch_provenance(launch_root)
+            except (JsonInputError, OSError):
+                provenances = []
+            for provenance in provenances:
+                identity = ProcessIdentity(
+                    provenance["pid"], provenance["start_time"]
+                )
+                if identity in identities:
+                    values.add(provenance["cgroup"])
         return values
+
+    def _approval_for_discovered_cgroups(
+        self, cgroups: set[str]
+    ) -> dict[str, Any] | None:
+        """Capture one affected approval after enforcement, before terminal storage."""
+        if len(cgroups) != 1 or not isinstance(getattr(self, "launches", None), Path):
+            return None
+        selected = next(iter(cgroups))
+        for path in self.runs.glob("*.json"):
+            try:
+                current = load_run(self.runs, path.stem)
+            except JsonInputError:
+                continue
+            if current["cgroup"] == selected:
+                return self._approval_identity(current["run_id"])
+        return None
 
     def _mark_discovered_runs_terminated(
         self, cgroups: set[str]
@@ -1747,6 +1780,11 @@ class Supervisor:
             receipt["receipt_written_utc"] = (
                 dt.datetime.now(dt.UTC).isoformat().replace("+00:00", "Z")
             )
+            # Enforcement is complete. Capture the exact approval identity
+            # before terminal run storage removes its launch provenance.
+            affected_approval = self._approval_for_discovered_cgroups(
+                discovered_run_cgroups
+            )
             # The selected run watcher can observe the emptied source cgroup
             # as an ordinary completion while autonomous containment is
             # finishing.  Resolve that race before publishing the detection
@@ -1760,7 +1798,11 @@ class Supervisor:
             incident_record = (
                 terminated_runs[0] if len(terminated_runs) == 1 else None
             )
-            self._post_containment_response(receipt, record=incident_record)
+            self._post_containment_response(
+                receipt,
+                record=incident_record,
+                approval=affected_approval,
+            )
         except (JsonInputError, OSError, RuntimeError, ProcessLookupError) as error:
             if containment_started:
                 try:
@@ -2322,6 +2364,26 @@ class Supervisor:
             return False
         return self._mark_completed(record)
 
+    def _launch_identity_still_alive(self, record: dict[str, Any]) -> bool:
+        """Keep an emptied run active while its exact admitted PID still exists."""
+        launch_root = getattr(self, "launches", None)
+        if not isinstance(launch_root, Path):
+            return False
+        try:
+            provenances = load_launch_provenance(launch_root)
+        except (JsonInputError, OSError):
+            # Root-owned provenance becoming unreadable must fail closed; it
+            # cannot justify an allowed-completion transition.
+            return True
+        provenance = next(
+            (item for item in provenances if item["run_id"] == record["run_id"]),
+            None,
+        )
+        if provenance is None:
+            return False
+        expected = ProcessIdentity(provenance["pid"], provenance["start_time"])
+        return process_identity(expected.pid) == expected
+
     def _mark_completed(self, record: dict[str, Any]) -> bool:
         lock = self._new_lock(record["run_id"])
         with lock:
@@ -2338,6 +2400,7 @@ class Supervisor:
                     current["cgroup"]
                     in getattr(self, "discovery_containing_cgroups", set())
                     or current["state"] not in ACTIVE_STATES
+                    or self._launch_identity_still_alive(current)
                 ):
                     return False
                 current["state"] = "COMPLETED_ALLOWED"

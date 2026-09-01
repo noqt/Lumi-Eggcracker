@@ -1,14 +1,19 @@
-# Lumi Eggcracker 1.0.8 — release candidate repair
+# Lumi Eggcracker 1.0.9 — release candidate repair
 
-This local 1.0.8 candidate binds every approval to one private installation epoch and
-rejects approval-state objects transplanted across a clean reinstall. It also retains
-the 1.0.7 restart recovery repair when a protected launch's
+This local 1.0.9 candidate keeps an exact admitted workload active when its launch
+PID still exists after hostile cgroup-membership escape. Autonomous containment is
+attributed to the original root-owned run, which is terminated before receipt
+publication; its exact approval is then revoked and the resulting incident names the
+original protected workload. All attribution, state and response work remains after
+the kill and empty proof. The candidate also retains the 1.0.8 installation-epoch
+binding, which rejects approval-state objects transplanted across a clean reinstall,
+and the 1.0.7 restart recovery repair when a protected launch's
 pre-exec cgroup is collected after its supervisor-side gate authority
 disappears. Recovery now commits the exact empty state, removes ephemeral
 launch provenance, and reclaims the run's identity-checked offline boundary.
 It also reconciles prior-boot active records only when their same-named cgroup
 is absent in the current boot; a collision remains fail closed.
-The in-place upgrader accepts the immediately preceding 1.0.6 candidate.
+The in-place upgrader accepts the immediately preceding 1.0.8 candidate.
 
 The candidate retains the qualified root-supervisor product after
 the 0.7 runtime-topology, 0.8 execution-boundary, 0.8.1 deployment-hardening
@@ -54,7 +59,7 @@ the cache directly. This removes repeated parsing and hashing of 256 incident
 records from the discovery hot path without relaxing the one-second watchdog
 health bound or malformed-store fail-closed behavior.
 
-The public first-kill helper defaults to `v1.0.8`. The packaged support helper
+The public first-kill helper defaults to `v1.0.9`. The packaged support helper
 delegates to the installed root-owned zipapp, so the documented command works
 from the verified Linux release bundle without importing a mutable checkout.
 The bootstrap now also requires a detached `SHA256SUMS.asc` signature from the
