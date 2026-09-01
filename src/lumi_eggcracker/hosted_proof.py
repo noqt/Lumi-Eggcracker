@@ -17,6 +17,9 @@ HOST = "github.com"
 UPSTREAM = "noqt/Lumi-Eggcracker"
 REPOSITORY_NAME = "Lumi-Eggcracker"
 WORKFLOW = "containment-probe.yml"
+RESULT_FORM_URL = (
+    "https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml"
+)
 REVIEWED_WORKFLOW_BLOB = "3761d8c3b29f1265e402c788e5340f6eab2c70df"
 ACKNOWLEDGEMENT = "i_understand_this_kills_a_test_tree=true"
 RUN_URL = re.compile(r"^https://github\.com/[^/]+/[^/]+/actions/runs/[1-9][0-9]*$")
@@ -402,4 +405,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     except HostedProofError as error:
         parser.error(str(error))
     print(f"Hosted proof dispatched: {url}")
+    print(f"After it finishes, share the public run or friction: {RESULT_FORM_URL}")
     return 0
