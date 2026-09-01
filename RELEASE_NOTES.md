@@ -1,6 +1,8 @@
-# Lumi Eggcracker 1.0.7 — release candidate repair
+# Lumi Eggcracker 1.0.8 — release candidate repair
 
-This local 1.0.7 candidate repairs restart recovery when a protected launch's
+This local 1.0.8 candidate binds every approval to one private installation epoch and
+rejects approval-state objects transplanted across a clean reinstall. It also retains
+the 1.0.7 restart recovery repair when a protected launch's
 pre-exec cgroup is collected after its supervisor-side gate authority
 disappears. Recovery now commits the exact empty state, removes ephemeral
 launch provenance, and reclaims the run's identity-checked offline boundary.
@@ -52,7 +54,7 @@ the cache directly. This removes repeated parsing and hashing of 256 incident
 records from the discovery hot path without relaxing the one-second watchdog
 health bound or malformed-store fail-closed behavior.
 
-The public first-kill helper defaults to `v1.0.7`. The packaged support helper
+The public first-kill helper defaults to `v1.0.8`. The packaged support helper
 delegates to the installed root-owned zipapp, so the documented command works
 from the verified Linux release bundle without importing a mutable checkout.
 The bootstrap now also requires a detached `SHA256SUMS.asc` signature from the

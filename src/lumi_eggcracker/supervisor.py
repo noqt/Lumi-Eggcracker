@@ -34,7 +34,7 @@ from . import incidents as incident_store
 from .adoption import AdoptionResult, contain_many, open_pidfd, pidfd_available
 from .approvals import create as create_approval
 from .approvals import load_all as load_approvals
-from .approvals import match_launch, revoke, stage_launch
+from .approvals import load_installation_epoch, match_launch, revoke, stage_launch
 from .approvals import public as public_approval
 from .artifacts import MAX_FD_PROBES_PER_SCAN, MAX_MAP_PROBES_PER_SCAN, ArtifactEvidence
 from .artifacts import from_snapshot as artifacts_from_snapshot
@@ -291,6 +291,9 @@ class Supervisor:
             catalogue_path.read_bytes(), expected_digest=policy["catalogue_sha256"]
         )
         self.policy = policy
+        self.installation_epoch = load_installation_epoch(
+            STATE_DIR / "install-manifest.json"
+        )
         self.runs = STATE_DIR / "runs"
         self.names = STATE_DIR / "names"
         self.receipts = STATE_DIR / "receipts"
@@ -1334,7 +1337,7 @@ class Supervisor:
     def _revoke_exact_approval(self, approval: dict[str, Any] | None) -> bool:
         if approval is None:
             return True
-        values = load_approvals(self.approvals)
+        values = self._load_approvals()
         matches = [
             item
             for item in values
@@ -1350,8 +1353,20 @@ class Supervisor:
             if any(item["name"] == approval["name"] for item in values):
                 raise JsonInputError("affected approval identity no longer matches")
             return True
-        revoke(self.approvals, approval["name"])
+        self._revoke_approval(approval["name"])
         return True
+
+    def _load_approvals(self) -> list[dict[str, Any]]:
+        return load_approvals(
+            self.approvals, installation_epoch=self.installation_epoch
+        )
+
+    def _revoke_approval(self, name: str) -> dict[str, Any]:
+        return revoke(
+            self.approvals,
+            name,
+            installation_epoch=self.installation_epoch,
+        )
 
     @staticmethod
     def _incident_match(
@@ -1941,7 +1956,7 @@ class Supervisor:
                 # provenance alone.
                 with self.approval_lock:
                     provenances = load_launch_provenance(self.launches)
-                    current_approvals = load_approvals(self.approvals)
+                    current_approvals = self._load_approvals()
             except (JsonInputError, OSError):
                 # Corrupt or incomplete provenance/approval state never
                 # authorizes a matching workload.  Post-exec procfs argv is
@@ -2793,7 +2808,7 @@ class Supervisor:
                 approval = match_launch(
                     uid=self.policy["workload_uid"],
                     argv=argv,
-                    approvals=load_approvals(self.approvals),
+                    approvals=self._load_approvals(),
                     max_pids=maximum,
                     max_memory_mib=memory_mib,
                     cpu_quota_percent=cpu_quota,
@@ -3331,6 +3346,7 @@ class Supervisor:
                     uid=args["uid"],
                     argv=args["argv"],
                     administrator_uid=0,
+                    installation_epoch=self.installation_epoch,
                     max_pids=args["max_pids"],
                     max_memory_mib=args["max_memory_mib"],
                     cpu_quota_percent=args["cpu_quota_percent"],
@@ -3338,12 +3354,12 @@ class Supervisor:
             return {"approval": public_approval(value), "result": "APPROVED"}
         if action == "revoke" and set(args) == {"name"}:
             with self.approval_lock:
-                return revoke(self.approvals, args["name"])
+                return self._revoke_approval(args["name"])
         if action == "approvals" and not args:
             with self.approval_lock:
                 return {
                     "approvals": [
-                        public_approval(value) for value in load_approvals(self.approvals)
+                        public_approval(value) for value in self._load_approvals()
                     ]
                 }
         if action == "exec_policies" and not args:

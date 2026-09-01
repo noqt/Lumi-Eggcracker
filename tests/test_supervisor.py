@@ -49,6 +49,7 @@ class SupervisorTests(unittest.TestCase):
             "workload_gid": 2001,
             "workload_uid": 2001,
         }
+        value.installation_epoch = "e" * 64
         value.runs = Path(".")
         value.names = Path(".")
         value.receipts = Path(".")

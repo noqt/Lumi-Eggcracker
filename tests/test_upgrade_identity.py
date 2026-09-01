@@ -70,6 +70,7 @@ class UpgradeIdentityTests(unittest.TestCase):
         self.assertIn("1.0.4", upgrader.SUPPORTED_SOURCES)
         self.assertIn("1.0.5", upgrader.SUPPORTED_SOURCES)
         self.assertIn("1.0.6", upgrader.SUPPORTED_SOURCES)
+        self.assertIn("1.0.7", upgrader.SUPPORTED_SOURCES)
 
     def test_legacy_manifest_resolves_live_gid_instead_of_using_uid(self) -> None:
         upgrader = self.load_upgrader()
@@ -110,6 +111,7 @@ class UpgradeIdentityTests(unittest.TestCase):
     def test_installer_persists_workload_gid(self) -> None:
         installer = (ROOT / "scripts" / "install.py").read_text(encoding="utf-8")
         self.assertIn('"workload_gid": account.pw_gid', installer)
+        self.assertIn('"installation_epoch": secrets.token_hex(32)', installer)
 
     def test_transitional_health_accepts_only_the_live_upgrade_journal(self) -> None:
         upgrader = self.load_upgrader()

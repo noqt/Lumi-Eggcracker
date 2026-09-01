@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.8 (release candidate)
+
+- Bind root-created approvals to a private, random installation epoch.
+- Reject approval records copied from a prior uninstall/reinstall epoch before launch.
+- Preserve an existing valid epoch across upgrades; require legacy approvals to be
+  revoked before the one-time transition to epoch-bound records.
+- Make the watchdog treat a missing or malformed installation epoch as install drift.
+- Retain the 1.0.7 fail-closed recovery of collected gated launches and offline
+  boundary cleanup after supervisor or host restart.
+
 ## 1.0.7 (release candidate)
 
 - Reconcile an exact already-empty protected cgroup after supervisor restart

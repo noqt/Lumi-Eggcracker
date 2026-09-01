@@ -47,6 +47,7 @@ SUPPORTED_SOURCES = {
     "1.0.4",
     "1.0.5",
     "1.0.6",
+    "1.0.7",
     installer.INSTALLER_VERSION,
 }
 
@@ -147,6 +148,17 @@ def validate_existing(manifest: dict[str, Any], operator_name: str) -> pwd.struc
     operator = pwd.getpwnam(operator_name)
     if manifest.get("operator_uid") != operator.pw_uid or operator.pw_uid == 0:
         raise RuntimeError("installed operator identity changed")
+    installation_epoch = manifest.get("installation_epoch")
+    if installation_epoch is None:
+        approvals = STATE / "approvals"
+        if approvals.exists() and any(approvals.glob("*.json")):
+            raise RuntimeError(
+                "revoke existing approvals before upgrading to install-epoch binding"
+            )
+    elif not isinstance(installation_epoch, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", installation_epoch
+    ):
+        raise RuntimeError("installed installation epoch is invalid")
     files = manifest.get("files")
     if not isinstance(files, dict) or not files:
         raise RuntimeError("existing install manifest has no file inventory")
@@ -290,10 +302,16 @@ def replace_install(release: dict[str, Any], operator: pwd.struct_passwd, manife
     atomic_bytes(installer.TMPFILES, installer.tmpfiles(), 0o644)
     atomic_bytes(installer.UNIT, installer._SERVICE_RELEASE.replace(b"Requires=lumi-eggcracker-watchdog.service\n\n", b"Requires=lumi-eggcracker-watchdog.service\nStartLimitIntervalSec=0\n\n"), 0o644)
     atomic_bytes(installer.WATCHDOG_UNIT, installer.watchdog_service().replace(b"Before=lumi-eggcracker.service\n\n", b"Before=lumi-eggcracker.service\nStartLimitIntervalSec=0\n\n"), 0o644)
+    installation_epoch = manifest.get("installation_epoch")
+    if not isinstance(installation_epoch, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", installation_epoch
+    ):
+        installation_epoch = secrets.token_hex(32)
     updated = {
         "created_workload_group": bool(manifest.get("created_workload_group")),
         "created_workload_user": bool(manifest.get("created_workload_user")),
         "files": {str(path): digest(path) for path in (installer.BIN, installer.ETC / "detector_catalogue.json", installer.ETC / "policy.json", installer.LIB / "lumi-eggcracker.pyz", installer.TMPFILES, installer.UNIT, installer.WATCHDOG_UNIT)},
+        "installation_epoch": installation_epoch,
         "operator": operator.pw_name,
         "operator_uid": operator.pw_uid,
         "schema_version": "lumi-eggcracker.install.v5",

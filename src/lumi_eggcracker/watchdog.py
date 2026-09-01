@@ -155,7 +155,13 @@ class Watchdog:
         try:
             manifest = load_regular_json(manifest_path)
             files = manifest["files"]
-            if manifest.get("schema_version") != "lumi-eggcracker.install.v5" or not isinstance(files, dict):
+            installation_epoch = manifest.get("installation_epoch")
+            if (
+                manifest.get("schema_version") != "lumi-eggcracker.install.v5"
+                or not isinstance(files, dict)
+                or not isinstance(installation_epoch, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", installation_epoch)
+            ):
                 return False
             for raw_path, expected in files.items():
                 path = Path(raw_path)

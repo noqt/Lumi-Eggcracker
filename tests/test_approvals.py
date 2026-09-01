@@ -14,6 +14,7 @@ from lumi_eggcracker.approvals import (
     _root_controlled_reference,
     create,
     load_all,
+    load_installation_epoch,
     match_launch,
     public,
     revoke,
@@ -22,8 +23,35 @@ from lumi_eggcracker.approvals import (
 from lumi_eggcracker.discovery import argv_digest
 from lumi_eggcracker.jsonio import JsonInputError
 
+EPOCH = "e" * 64
+OTHER_EPOCH = "f" * 64
+
 
 class ApprovalTests(unittest.TestCase):
+    def test_installation_epoch_requires_root_private_regular_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            manifest = Path(raw) / "install-manifest.json"
+            manifest.write_text(
+                json.dumps({"installation_epoch": EPOCH}), encoding="utf-8"
+            )
+            trusted = SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o600,
+                st_nlink=1,
+                st_uid=0,
+            )
+            with patch.object(Path, "lstat", autospec=True, return_value=trusted):
+                self.assertEqual(EPOCH, load_installation_epoch(manifest))
+            untrusted = SimpleNamespace(
+                st_mode=stat.S_IFREG | 0o644,
+                st_nlink=1,
+                st_uid=0,
+            )
+            with (
+                patch.object(Path, "lstat", autospec=True, return_value=untrusted),
+                self.assertRaisesRegex(JsonInputError, "root-private"),
+            ):
+                load_installation_epoch(manifest)
+
     def test_root_owned_interpreter_symlink_uses_parent_and_target_controls(self) -> None:
         link = Path("/opt/root-venv/bin/python")
 
@@ -75,12 +103,13 @@ class ApprovalTests(unittest.TestCase):
                     uid=1001,
                     argv=argv,
                     administrator_uid=0,
+                    installation_epoch=EPOCH,
                 )
             with patch(
                 "lumi_eggcracker.approvals._root_controlled_reference",
                 return_value=True,
             ):
-                values = load_all(root)
+                values = load_all(root, installation_epoch=EPOCH)
                 self.assertEqual(
                     record, match_launch(uid=1001, argv=argv, approvals=values)
                 )
@@ -138,11 +167,15 @@ class ApprovalTests(unittest.TestCase):
                     uid=1001,
                     argv=argv,
                     administrator_uid=0,
+                    installation_epoch=EPOCH,
                 )
-            self.assertEqual("REVOKED", revoke(root, "qwen")["result"])
-            self.assertEqual([], load_all(root))
+            self.assertEqual(
+                "REVOKED",
+                revoke(root, "qwen", installation_epoch=EPOCH)["result"],
+            )
+            self.assertEqual([], load_all(root, installation_epoch=EPOCH))
 
-    def test_legacy_approval_is_visible_and_revocable_but_never_matches(self) -> None:
+    def test_pre_epoch_approval_is_rejected_after_install_transition(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw) / "approvals"
             binary = Path(raw) / "runner"
@@ -177,23 +210,60 @@ class ApprovalTests(unittest.TestCase):
                     uid=1001,
                     argv=argv,
                     administrator_uid=0,
+                    installation_epoch=EPOCH,
                 )
             record["schema_version"] = LEGACY_SCHEMA
+            record.pop("installation_epoch")
             for key in ("cpu_quota_percent", "max_memory_mib", "max_pids"):
                 record.pop(key)
             (root / "legacy.json").write_text(
                 json.dumps(record), encoding="utf-8"
             )
-            values = load_all(root)
-            with patch(
-                "lumi_eggcracker.approvals._root_controlled_reference",
-                return_value=True,
+            self.assertIsNone(public(record)["resource_limits"])
+            with self.assertRaisesRegex(JsonInputError, "installation epoch"):
+                load_all(root, installation_epoch=EPOCH)
+            with self.assertRaisesRegex(JsonInputError, "installation epoch"):
+                revoke(root, "legacy", installation_epoch=EPOCH)
+
+    def test_epoch_bound_approval_cannot_be_loaded_in_another_install(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "approvals"
+            binary = Path(raw) / "runner"
+            binary.write_bytes(b"x")
+            binary.chmod(0o755)
+            argv = [str(binary), "-m", "/models/qwen.gguf"]
+            with (
+                patch(
+                    "lumi_eggcracker.approvals._classify",
+                    return_value=(
+                        "NATIVE_LLAMA",
+                        [
+                            {
+                                "argument_index": 2,
+                                "device": 1,
+                                "inode": 1,
+                                "kind": "MODEL_ARTIFACT",
+                                "sha256": "a" * 64,
+                                "size": 1,
+                            }
+                        ],
+                    ),
+                ),
+                patch(
+                    "lumi_eggcracker.approvals._root_controlled_reference",
+                    return_value=True,
+                ),
             ):
-                self.assertIsNone(
-                    match_launch(uid=1001, argv=argv, approvals=values)
+                create(
+                    root,
+                    name="epoch-a",
+                    uid=1001,
+                    argv=argv,
+                    administrator_uid=0,
+                    installation_epoch=EPOCH,
                 )
-            self.assertIsNone(public(values[0])["resource_limits"])
-            self.assertEqual("REVOKED", revoke(root, "legacy")["result"])
+            with self.assertRaisesRegex(JsonInputError, "does not match"):
+                load_all(root, installation_epoch=OTHER_EPOCH)
 
     def test_python_script_is_staged_from_bound_bytes_and_drift_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -223,6 +293,7 @@ class ApprovalTests(unittest.TestCase):
                     uid=1001,
                     argv=argv,
                     administrator_uid=0,
+                    installation_epoch=EPOCH,
                 )
             self.assertEqual("PYTHON_SCRIPT", record["launch_kind"])
             self.assertEqual(1, len(record["bound_inputs"]))
@@ -282,6 +353,7 @@ class ApprovalTests(unittest.TestCase):
                     uid=1001,
                     argv=argv,
                     administrator_uid=0,
+                    installation_epoch=EPOCH,
                 )
                 self.assertEqual(argv, stage_launch(record, argv, base / "unused"))
                 replacement = base / "replacement.gguf"
@@ -316,4 +388,5 @@ class ApprovalTests(unittest.TestCase):
                         uid=1001,
                         argv=[str(executable), *suffix],
                         administrator_uid=0,
+                        installation_epoch=EPOCH,
                     )

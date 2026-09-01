@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -157,6 +158,8 @@ def validate_manifest_structure(manifest: object) -> dict[str, object]:
         or not isinstance(manifest.get("workload_uid"), int)
         or not isinstance(manifest.get("created_workload_user"), bool)
         or not isinstance(manifest.get("created_workload_group"), bool)
+        or not isinstance(manifest.get("installation_epoch"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(manifest["installation_epoch"]))
     ):
         raise SystemExit("installed manifest identity is invalid")
     return manifest
