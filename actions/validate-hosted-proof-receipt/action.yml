@@ -1,0 +1,15 @@
+name: Validate Lumi Eggcracker hosted-proof receipt
+description: Validate one local receipt against the bounded public v1 schema without uploading it
+inputs:
+  receipt:
+    description: Path to one local hosted-proof receipt JSON object
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Validate v1 receipt locally
+      shell: bash --noprofile --norc -euo pipefail {0}
+      env:
+        RECEIPT_PATH: ${{ inputs.receipt }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/../../scripts/validate_hosted_proof_receipt.py" "$RECEIPT_PATH"

@@ -104,6 +104,20 @@ Exit status `0` means the object matches exactly one current v1 shape; status
 `1` means it does not. This validates structure only and does not turn a
 synthetic example into run evidence or authenticate a real receipt.
 
+A partner repository can call the same local validator as a pinned composite
+action:
+
+```yaml
+- uses: noqt/Lumi-Eggcracker/actions/validate-hosted-proof-receipt@<40-character-commit-sha>
+  with:
+    receipt: receipt.json
+```
+
+Replace the placeholder with an immutable commit containing the action. The
+receipt path is passed as an environment value rather than interpolated into a
+shell command. The action uploads nothing and prints only the bounded validator
+result; it still validates structure rather than authenticating a run.
+
 If it passes, returns a redacted failure or gives you confusing friction,
 [send the public run](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
 The short form asks for the workflow URL and what happened. That is useful
