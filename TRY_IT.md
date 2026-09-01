@@ -92,6 +92,18 @@ source commit or tree, workflow or host, and it does not claim that the host is
 suitable for production or that Eggcracker detected a real workload. The v1
 file remains compatible; an incompatible contract uses a new versioned path.
 
+If you save the single JSON receipt object as `receipt.json`, the repository's
+zero-dependency validator gives automation an exact local exit status without
+uploading or echoing the receipt:
+
+```sh
+python3 scripts/validate_hosted_proof_receipt.py receipt.json
+```
+
+Exit status `0` means the object matches exactly one current v1 shape; status
+`1` means it does not. This validates structure only and does not turn a
+synthetic example into run evidence or authenticate a real receipt.
+
 If it passes, returns a redacted failure or gives you confusing friction,
 [send the public run](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
 The short form asks for the workflow URL and what happened. That is useful
