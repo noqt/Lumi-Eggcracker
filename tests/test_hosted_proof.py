@@ -142,7 +142,7 @@ class HostedProofTests(unittest.TestCase):
             )
 
         self.assertEqual(0, status)
-        starter.assert_called_once_with(acknowledged=True)
+        starter.assert_called_once_with(acknowledged=True, sync_fork=False)
         self.assertEqual(
             [
                 f"Hosted proof dispatched: {url}",
@@ -243,6 +243,24 @@ class HostedProofTests(unittest.TestCase):
 
         self.assertEqual(2, raised.exception.code)
         self.assertIn("--show-log requires --wait", error.getvalue())
+
+    def test_cli_passes_explicit_sync_fork_permission(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        with (
+            patch.object(hosted_proof_module.shutil, "which", return_value="gh"),
+            patch.object(
+                hosted_proof_module,
+                "start_hosted_proof",
+                return_value=url,
+            ) as starter,
+            redirect_stdout(StringIO()),
+        ):
+            status = hosted_proof_module.main(
+                ["--i-understand-this-kills-a-test-tree", "--sync-fork"]
+            )
+
+        self.assertEqual(0, status)
+        starter.assert_called_once_with(acknowledged=True, sync_fork=True)
 
     def test_follow_exact_run_waits_then_reads_bounded_log(self) -> None:
         url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
@@ -780,10 +798,142 @@ class HostedProofTests(unittest.TestCase):
             ]
         )
 
-        with self.assertRaisesRegex(HostedProofError, "does not match"):
+        with self.assertRaisesRegex(HostedProofError, "--sync-fork"):
             start_hosted_proof(acknowledged=True, runner=runner)
         self.assertEqual(4, len(runner.commands))
         self.assertEqual("api", runner.commands[-1][1])
+
+    def test_explicit_sync_fast_forwards_then_revalidates_before_dispatch(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/125"
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="0" * 40 + "\n"),
+                result(("sync",)),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout=f"{REVIEWED_WORKFLOW_BLOB}\n"),
+                result(("enable",)),
+                result(("dispatch",), stdout=f"{url}\n"),
+            ]
+        )
+
+        self.assertEqual(
+            url,
+            start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner),
+        )
+        self.assertIn(
+            (
+                "gh",
+                "repo",
+                "sync",
+                "github.com/operator/Lumi-Eggcracker",
+                "--source",
+                "github.com/noqt/Lumi-Eggcracker",
+                "--branch",
+                "main",
+            ),
+            runner.commands,
+        )
+        self.assertNotIn(
+            "--force",
+            [argument for command in runner.commands for argument in command],
+        )
+        self.assertEqual("workflow", runner.commands[-2][1])
+        self.assertEqual("workflow", runner.commands[-1][1])
+
+    def test_failed_fast_forward_never_dispatches(self) -> None:
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="0" * 40 + "\n"),
+                result(("sync",), returncode=1),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "could not fast-forward"):
+            start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner)
+        self.assertEqual("sync", runner.commands[-1][2])
+        self.assertNotIn(
+            "workflow",
+            [argument for command in runner.commands for argument in command],
+        )
+
+    def test_post_sync_fork_identity_drift_never_dispatches(self) -> None:
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="0" * 40 + "\n"),
+                result(("sync",)),
+                result(("metadata",), stdout="false\t\tmain\n"),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "no longer matches"):
+            start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner)
+        self.assertEqual(6, len(runner.commands))
+
+    def test_post_sync_metadata_read_failure_never_dispatches(self) -> None:
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="0" * 40 + "\n"),
+                result(("sync",)),
+                result(("metadata",), returncode=1),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "could not revalidate"):
+            start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner)
+        self.assertEqual(6, len(runner.commands))
+        self.assertNotIn(
+            "workflow",
+            [argument for command in runner.commands for argument in command],
+        )
+
+    def test_post_sync_default_branch_drift_never_dispatches(self) -> None:
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="0" * 40 + "\n"),
+                result(("sync",)),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\ttrunk\n"),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "changed its default branch"):
+            start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner)
+        self.assertEqual(6, len(runner.commands))
+        self.assertNotIn(
+            "workflow",
+            [argument for command in runner.commands for argument in command],
+        )
+
+    def test_post_sync_workflow_mismatch_never_dispatches(self) -> None:
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="0" * 40 + "\n"),
+                result(("sync",)),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout="1" * 40 + "\n"),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "still does not contain"):
+            start_hosted_proof(acknowledged=True, sync_fork=True, runner=runner)
+        self.assertEqual(7, len(runner.commands))
 
     def test_exotic_branch_is_encoded_for_verification_and_reused_for_dispatch(self) -> None:
         branch = "release&proof#1"

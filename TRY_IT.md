@@ -66,11 +66,15 @@ that is not a fork of `noqt/Lumi-Eggcracker`. The helper itself never executes
 through a shell; the copy-paste setup above uses your shell only to create the
 temporary public-source checkout and start the helper.
 It also refuses to dispatch if the fork's workflow differs from the reviewed
-workflow. It never requests or prints a token; authenticated `gh` handles its
-own credentials. If the bounded run lookup is unavailable or ambiguous, it
-prints the fork's workflow page instead. This starts the same disposable hosted
-proof described above; it does not install Eggcracker or test workload
-recognition.
+workflow. If an existing fork is simply stale, rerun the helper with
+`--sync-fork` to explicitly permit a fast-forward-only GitHub sync from the
+exact upstream. The helper never adds `--force`: after syncing, it revalidates
+the fork identity, default branch and reviewed workflow blob, and dispatches
+nothing if any check fails. It never requests or prints a token; authenticated
+`gh` handles its own credentials. If the bounded run lookup is unavailable or
+ambiguous, it prints the fork's workflow page instead. This starts the same
+disposable hosted proof described above; it does not install Eggcracker or test
+workload recognition.
 
 The proof creates a harmless two-process test tree, kills it with Eggcracker's
 containment mechanism and checks that an unrelated canary survives. A passing
