@@ -14,6 +14,9 @@ from lumi_eggcracker.elfmarkers import (
     PYTORCH_ATEN_EVIDENCE_ID,
     PYTORCH_BRIDGE_EVIDENCE_ID,
     PYTORCH_PAIR_EVIDENCE_ID,
+    VLLM_EXTENSION_EVIDENCE_ID,
+    VLLM_PAIR_EVIDENCE_ID,
+    VLLM_PYTHON_EVIDENCE_ID,
     RuntimeEvidence,
     _inspect_descriptor,
     _matches_mapping,
@@ -21,6 +24,7 @@ from lumi_eggcracker.elfmarkers import (
     inspect_path,
     inspect_pytorch_path,
     with_pytorch_pair,
+    with_vllm_pair,
 )
 from lumi_eggcracker.procfd import ExecutableMappingReference, StableFileMetadata
 
@@ -400,6 +404,14 @@ class ElfMarkerTests(unittest.TestCase):
             if item.evidence_id == PYTORCH_PAIR_EVIDENCE_ID
         )
         self.assertEqual("SHA256_PAIR", pair.method)
+
+    def test_vllm_pair_requires_exact_python_and_extension_identities(self) -> None:
+        python = RuntimeEvidence(VLLM_PYTHON_EVIDENCE_ID, "vLLM/CPython", "SHA256", ())
+        extension = RuntimeEvidence(VLLM_EXTENSION_EVIDENCE_ID, "vLLM", "SHA256", ())
+        self.assertEqual((python,), with_vllm_pair((python,)))
+        self.assertEqual((extension,), with_vllm_pair((extension,)))
+        values = with_vllm_pair((python, extension))
+        self.assertIn(VLLM_PAIR_EVIDENCE_ID, {item.evidence_id for item in values})
 
     def test_runtime_candidate_cap_deduplicates_repeated_map_segments(self) -> None:
         bridge = type("Evidence", (), {"evidence_id": PYTORCH_BRIDGE_EVIDENCE_ID})()

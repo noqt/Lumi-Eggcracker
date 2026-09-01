@@ -16,7 +16,9 @@ from .elfmarkers import inspect_path
 from .jsonio import JsonInputError, load_regular_json
 from .records import write_atomic
 
-SCHEMA = "lumi-eggcracker.approval.v4"
+SCHEMA = "lumi-eggcracker.approval.v6"
+PRE_EPOCH_SCHEMA = "lumi-eggcracker.approval.v5"
+LEGACY_SCHEMA = "lumi-eggcracker.approval.v4"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 LAUNCH_KINDS = {"NATIVE_LLAMA", "PYTHON_SCRIPT"}
@@ -25,6 +27,24 @@ MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 MAX_MATERIAL_BYTES = 1024 * 1024 * 1024 * 1024
 MAX_BOUND_INPUTS = 32
 INPUT_KINDS = {"MODEL_ARTIFACT", "PYTHON_SCRIPT", "RUNTIME_MATERIAL"}
+
+
+def _valid_resource_limits(
+    max_pids: object,
+    max_memory_mib: object,
+    cpu_quota_percent: object,
+) -> bool:
+    return (
+        isinstance(max_pids, int)
+        and not isinstance(max_pids, bool)
+        and 4 <= max_pids <= 4096
+        and isinstance(max_memory_mib, int)
+        and not isinstance(max_memory_mib, bool)
+        and 64 <= max_memory_mib <= 131_072
+        and isinstance(cpu_quota_percent, int)
+        and not isinstance(cpu_quota_percent, bool)
+        and 10 <= cpu_quota_percent <= 10_000
+    )
 
 
 def _runtime_is_root_controlled(metadata: os.stat_result) -> bool:
@@ -69,8 +89,32 @@ def _path(root: Path, name: str) -> Path:
     return root / f"{name}.json"
 
 
-def validate(value: dict[str, Any]) -> dict[str, Any]:
-    expected = {
+def _valid_installation_epoch(value: object) -> bool:
+    return isinstance(value, str) and bool(HEX.fullmatch(value))
+
+
+def load_installation_epoch(path: Path) -> str:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise JsonInputError("installation epoch manifest is unavailable") from error
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_mode & 0o077
+        or metadata.st_nlink != 1
+    ):
+        raise JsonInputError("installation epoch manifest is not root-private")
+    value = load_regular_json(path).get("installation_epoch")
+    if not _valid_installation_epoch(value):
+        raise JsonInputError("installation epoch is invalid")
+    return value
+
+
+def validate(
+    value: dict[str, Any], *, installation_epoch: str | None = None
+) -> dict[str, Any]:
+    common = {
         "administrator_uid",
         "argv_count",
         "argv_sha256",
@@ -85,8 +129,25 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         "schema_version",
         "uid",
     }
-    if set(value) != expected or value.get("schema_version") != SCHEMA:
+    resources = {"cpu_quota_percent", "max_memory_mib", "max_pids"}
+    epoch = {"installation_epoch"}
+    schema = value.get("schema_version")
+    if not (
+        (schema == SCHEMA and set(value) == common | resources | epoch)
+        or (schema == PRE_EPOCH_SCHEMA and set(value) == common | resources)
+        or (schema == LEGACY_SCHEMA and set(value) == common)
+    ):
         raise JsonInputError("approval schema is invalid")
+    if schema == SCHEMA and not _valid_installation_epoch(
+        value["installation_epoch"]
+    ):
+        raise JsonInputError("approval installation epoch is invalid")
+    if installation_epoch is not None and (
+        not _valid_installation_epoch(installation_epoch)
+        or schema != SCHEMA
+        or value["installation_epoch"] != installation_epoch
+    ):
+        raise JsonInputError("approval installation epoch does not match")
     if not isinstance(value["name"], str) or not NAME.fullmatch(value["name"]):
         raise JsonInputError("approval name is invalid")
     for key in ("argv_sha256", "executable_sha256"):
@@ -101,6 +162,12 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         raise JsonInputError("approval administrator must be root")
     if value["launch_kind"] not in LAUNCH_KINDS:
         raise JsonInputError("approval launch kind is invalid")
+    if schema in {SCHEMA, PRE_EPOCH_SCHEMA} and not _valid_resource_limits(
+        value["max_pids"],
+        value["max_memory_mib"],
+        value["cpu_quota_percent"],
+    ):
+        raise JsonInputError("approval resource limits are invalid")
     inputs = value["bound_inputs"]
     if not isinstance(inputs, list):
         raise JsonInputError("approval bound inputs are invalid")
@@ -357,9 +424,24 @@ def _classify(executable: Path, metadata: os.stat_result, argv: list[str]) -> tu
     return "PYTHON_SCRIPT", bindings
 
 
-def create(root: Path, *, name: str, uid: int, argv: list[str], administrator_uid: int) -> dict[str, Any]:
+def create(
+    root: Path,
+    *,
+    name: str,
+    uid: int,
+    argv: list[str],
+    administrator_uid: int,
+    installation_epoch: str,
+    max_pids: int = 64,
+    max_memory_mib: int = 2048,
+    cpu_quota_percent: int = 400,
+) -> dict[str, Any]:
+    if not _valid_installation_epoch(installation_epoch):
+        raise JsonInputError("approval installation epoch is invalid")
     if isinstance(uid, bool) or not isinstance(uid, int) or uid < 1 or not argv or not all(isinstance(item, str) and item for item in argv):
         raise JsonInputError("approval arguments are invalid")
+    if not _valid_resource_limits(max_pids, max_memory_mib, cpu_quota_percent):
+        raise JsonInputError("approval resource limits are invalid")
     supplied = Path(argv[0])
     if not supplied.is_absolute():
         raise JsonInputError("approval executable must be an absolute regular file")
@@ -378,12 +460,12 @@ def create(root: Path, *, name: str, uid: int, argv: list[str], administrator_ui
     if destination.exists() or destination.is_symlink():
         raise JsonInputError("approval name is unavailable")
     launch_kind, bound_inputs = _classify(executable, metadata, argv)
-    value = validate({"administrator_uid": administrator_uid, "argv_count": len(argv), "argv_sha256": argv_digest(argv), "bound_inputs": bound_inputs, "created_monotonic_ns": time.monotonic_ns(), "executable": str(executable), "executable_device": metadata.st_dev, "executable_inode": metadata.st_ino, "executable_sha256": executable_digest(executable), "launch_kind": launch_kind, "name": name, "schema_version": SCHEMA, "uid": uid})
+    value = validate({"administrator_uid": administrator_uid, "argv_count": len(argv), "argv_sha256": argv_digest(argv), "bound_inputs": bound_inputs, "cpu_quota_percent": cpu_quota_percent, "created_monotonic_ns": time.monotonic_ns(), "executable": str(executable), "executable_device": metadata.st_dev, "executable_inode": metadata.st_ino, "executable_sha256": executable_digest(executable), "installation_epoch": installation_epoch, "launch_kind": launch_kind, "max_memory_mib": max_memory_mib, "max_pids": max_pids, "name": name, "schema_version": SCHEMA, "uid": uid}, installation_epoch=installation_epoch)
     write_atomic(destination, value)
     return value
 
 
-def load_all(root: Path) -> list[dict[str, Any]]:
+def load_all(root: Path, *, installation_epoch: str) -> list[dict[str, Any]]:
     if not root.exists():
         return []
     if root.is_symlink() or not root.is_dir():
@@ -392,7 +474,9 @@ def load_all(root: Path) -> list[dict[str, Any]]:
     for path in sorted(root.glob("*.json")):
         if path.name != f"{path.stem}.json":
             raise JsonInputError("approval filename is invalid")
-        value = validate(load_regular_json(path))
+        value = validate(
+            load_regular_json(path), installation_epoch=installation_epoch
+        )
         if value["name"] != path.stem:
             raise JsonInputError("approval name/path mismatch")
         values.append(value)
@@ -400,7 +484,13 @@ def load_all(root: Path) -> list[dict[str, Any]]:
 
 
 def match_launch(
-    *, uid: int, argv: list[str], approvals: list[dict[str, Any]]
+    *,
+    uid: int,
+    argv: list[str],
+    approvals: list[dict[str, Any]],
+    max_pids: int = 64,
+    max_memory_mib: int = 2048,
+    cpu_quota_percent: int = 400,
 ) -> dict[str, Any] | None:
     """Match one trusted, pre-exec launch request to a root approval.
 
@@ -415,6 +505,7 @@ def match_launch(
         or uid < 1
         or not argv
         or not all(isinstance(item, str) and item for item in argv)
+        or not _valid_resource_limits(max_pids, max_memory_mib, cpu_quota_percent)
     ):
         return None
     try:
@@ -433,21 +524,27 @@ def match_launch(
         (
             item
             for item in approvals
-            if item["uid"] == uid
+            if item["schema_version"] == SCHEMA
+            and item["uid"] == uid
             and item["executable"] == str(executable)
             and item["executable_device"] == metadata.st_dev
             and item["executable_inode"] == metadata.st_ino
             and item["executable_sha256"] == digest
             and item["argv_count"] == len(argv)
             and item["argv_sha256"] == command_hash
+            and item["max_pids"] == max_pids
+            and item["max_memory_mib"] == max_memory_mib
+            and item["cpu_quota_percent"] == cpu_quota_percent
         ),
         None,
     )
 
 
-def revoke(root: Path, name: str) -> dict[str, Any]:
+def revoke(root: Path, name: str, *, installation_epoch: str) -> dict[str, Any]:
     path = _path(root, name)
-    value = validate(load_regular_json(path))
+    value = validate(
+        load_regular_json(path), installation_epoch=installation_epoch
+    )
     if value["name"] != name:
         raise JsonInputError("approval name/path mismatch")
     path.unlink()
@@ -457,6 +554,15 @@ def revoke(root: Path, name: str) -> dict[str, Any]:
 def public(value: dict[str, Any]) -> dict[str, Any]:
     result = {key: value[key] for key in ("administrator_uid", "argv_count", "argv_sha256", "created_monotonic_ns", "executable", "executable_sha256", "launch_kind", "name", "uid")}
     result["bound_input_count"] = len(value["bound_inputs"])
+    result["resource_limits"] = (
+        {
+            "cpu_quota_percent": value["cpu_quota_percent"],
+            "max_memory_mib": value["max_memory_mib"],
+            "max_pids": value["max_pids"],
+        }
+        if value["schema_version"] in {SCHEMA, PRE_EPOCH_SCHEMA}
+        else None
+    )
     return result
 
 

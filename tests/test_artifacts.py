@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lumi_eggcracker.artifacts import (
+    from_argv_paths,
     from_mapped_files,
     from_process_fds,
     from_snapshot,
@@ -41,6 +42,35 @@ def safetensors(*, dtype: str = "F32", shape: list[int] | None = None, offsets: 
 
 
 class ArtifactTests(unittest.TestCase):
+    def test_extensionless_absolute_argv_model_path_is_inspected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "sha256-content-addressed-blob"
+            path.write_bytes(gguf())
+            sample = type(
+                "Snapshot",
+                (),
+                {"argv": ("runner", "--model", str(path), "--offline")},
+            )()
+            evidence = from_argv_paths(sample)
+            self.assertEqual(("gguf-v3",), tuple(item.evidence_id for item in evidence))
+
+    def test_model_directory_argv_path_is_inspected_one_level_deep(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            directory = Path(raw) / "model-store"
+            directory.mkdir()
+            (directory / "config.json").write_text("{}", encoding="utf-8")
+            (directory / "model.safetensors").write_bytes(safetensors())
+            sample = type("Snapshot", (), {"argv": ("python", "--model", str(directory))})()
+            evidence = from_argv_paths(sample)
+            self.assertEqual(("safetensors-v1",), tuple(item.evidence_id for item in evidence))
+
+    def test_argv_probe_does_not_accept_name_or_embedded_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "not-a-model"
+            path.write_bytes(b"GGUF model marker only")
+            sample = type("Snapshot", (), {"argv": ("runner", f"--model={path}")})()
+            self.assertEqual((), from_argv_paths(sample))
+
     def test_executable_mapping_parser_excludes_data_maps_and_binds_mount(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             proc = Path(raw)
@@ -235,6 +265,19 @@ class ArtifactTests(unittest.TestCase):
             truncated.write_bytes(struct.pack("<Q", 1024) + b"{}")
             for path in (duplicate_file, invalid_dtype, invalid_range, truncated):
                 self.assertIsNone(validate_path(path))
+
+    def test_safetensors_duplicate_names_follow_reference_loader_last_value(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "duplicate-loader-accepted"
+            header = (
+                b'{"x":{"dtype":"U8","shape":[1],"data_offsets":[0,1]},'
+                b'"x":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}'
+            )
+            path.write_bytes(struct.pack("<Q", len(header)) + header + b"x")
+            evidence = validate_path(path)
+            self.assertIsNotNone(evidence)
+            assert evidence is not None
+            self.assertEqual("safetensors-v1", evidence.evidence_id)
 
     def test_safetensors_allows_scalar_and_zero_dimension_tensors(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

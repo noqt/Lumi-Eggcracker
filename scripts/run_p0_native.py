@@ -805,6 +805,12 @@ class Campaign:
                 name,
                 "--uid",
                 str(self.policy["workload_uid"]),
+                "--max-pids",
+                "32",
+                "--max-memory-mib",
+                "1024",
+                "--cpu-quota-percent",
+                "400",
                 "--",
                 *command,
             ]
@@ -916,6 +922,12 @@ class Campaign:
                     name,
                     "--uid",
                     str(self.policy["workload_uid"]),
+                    "--max-pids",
+                    "32",
+                    "--max-memory-mib",
+                    "1024",
+                    "--cpu-quota-percent",
+                    "400",
                     "--",
                     *command,
                 ]
@@ -986,6 +998,12 @@ class Campaign:
                 name,
                 "--uid",
                 str(self.policy["workload_uid"]),
+                "--max-pids",
+                "32",
+                "--max-memory-mib",
+                "1024",
+                "--cpu-quota-percent",
+                "400",
                 "--",
                 *command,
             ]
@@ -1088,6 +1106,12 @@ class Campaign:
                 name,
                 "--uid",
                 str(self.policy["workload_uid"]),
+                "--max-pids",
+                "64",
+                "--max-memory-mib",
+                "2048",
+                "--cpu-quota-percent",
+                "400",
                 "--",
                 *command,
             ]
@@ -1127,8 +1151,20 @@ class Campaign:
                 expected=1,
                 source_commit=self.policy["source_commit"],
             )
-            status = json_control(["status", "--name", run_name], operator=self.operator)
-            if status.get("state") != "TERMINATED":
+            # The detector receipt is written immediately after authoritative
+            # cgroup containment.  Run-state reconciliation follows in the
+            # same supervisor worker, so a receipt observer can briefly win a
+            # race with the terminal state update.  Wait only for that
+            # bounded bookkeeping transition; do not treat the transient
+            # RUNNING response as a surviving parent.
+            status = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                status = json_control(["status", "--name", run_name], operator=self.operator)
+                if status.get("state") == "TERMINATED":
+                    break
+                time.sleep(0.01)
+            if status is None or status.get("state") != "TERMINATED":
                 raise RuntimeError("approved parent survived its unapproved supported child")
             started = False
             self.assert_canary()

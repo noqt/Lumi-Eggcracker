@@ -11,13 +11,15 @@ from typing import Any
 
 from .containment import CgroupIdentity, EmptyProof
 from .jsonio import JsonInputError, canonical_bytes, load_regular_json
+from .offline_boundary import BoundaryIdentity
 
-RUN_SCHEMA = "lumi-eggcracker.run.v3"
-RECEIPT_SCHEMA = "lumi-eggcracker.receipt.v2"
+RUN_SCHEMA = "lumi-eggcracker.run.v5"
+RECEIPT_SCHEMA = "lumi-eggcracker.receipt.v3"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 RUN_ID = re.compile(r"[0-9a-f]{24}\Z")
 ACTIVE_STATES = {"STARTING", "RUNNING"}
 TERMINAL_STATES = {"COMPLETED_ALLOWED", "TERMINATED", "CONTAINMENT_FAILED", "CONTAINED_RECEIPT_FAILED"}
+RECEIPT_TRIGGERS = {"OPERATOR", "PID_LIMIT", "SUPERVISOR_FAILURE", "SUPERVISOR_RESTART_FAIL_CLOSED", "NETWORK_BOUNDARY", "EXECUTION_BOUNDARY"}
 
 
 def write_atomic(path: Path, value: dict[str, Any]) -> None:
@@ -95,11 +97,32 @@ def command_summary(argv: list[str]) -> dict[str, Any]:
 
 def validate_run(value: dict[str, Any]) -> dict[str, Any]:
     expected = {
-        "argv_count", "argv_sha256", "boot_id", "cgroup", "cgroup_device", "cgroup_inode",
-        "created_monotonic_ns", "cpu_quota_percent", "executable", "max_memory_mib", "max_pids", "name", "operator_uid", "run_id",
-        "schema_version", "state", "unit", "workload_gid", "workload_uid",
+        "argv_count",
+        "argv_sha256",
+        "boot_id",
+        "boundary",
+        "cgroup",
+        "cgroup_device",
+        "cgroup_inode",
+        "created_monotonic_ns",
+        "cpu_quota_percent",
+        "exec_policy_digest",
+        "exec_policy_id",
+        "executable",
+        "max_memory_mib",
+        "max_pids",
+        "name",
+        "network_mode",
+        "operator_uid",
+        "run_id",
+        "schema_version",
+        "state",
+        "unit",
+        "workload_gid",
+        "workload_uid",
     }
-    if set(value) != expected or value.get("schema_version") != RUN_SCHEMA:
+    legacy_expected = expected - {"exec_policy_digest", "exec_policy_id"}
+    if set(value) not in (expected, legacy_expected) or value.get("schema_version") not in {RUN_SCHEMA, "lumi-eggcracker.run.v4"}:
         raise JsonInputError("run record schema is invalid")
     if not isinstance(value["name"], str) or not NAME.fullmatch(value["name"]):
         raise JsonInputError("run record name is invalid")
@@ -111,11 +134,27 @@ def validate_run(value: dict[str, Any]) -> dict[str, Any]:
         raise JsonInputError("run record executable is invalid")
     if not isinstance(value["argv_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["argv_sha256"]):
         raise JsonInputError("run record command hash is invalid")
+    if set(value) == expected:
+        if not isinstance(value["exec_policy_id"], str) or not value["exec_policy_id"]:
+            raise JsonInputError("run record execution policy identity is invalid")
+        if not isinstance(value["exec_policy_digest"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["exec_policy_digest"]):
+            raise JsonInputError("run record execution policy digest is invalid")
     keys = ("cgroup_device", "cgroup_inode", "created_monotonic_ns", "cpu_quota_percent", "max_memory_mib", "operator_uid", "workload_gid", "workload_uid", "max_pids", "argv_count")
     if any(isinstance(value[key], bool) or not isinstance(value[key], int) or value[key] < 0 for key in keys):
         raise JsonInputError("run record integer field is invalid")
     if value["state"] not in ACTIVE_STATES | TERMINAL_STATES:
         raise JsonInputError("run record state is invalid")
+    if value["network_mode"] not in {"offline", "none"}:
+        raise JsonInputError("run record network mode is invalid")
+    boundary = value["boundary"]
+    if boundary is not None:
+        parsed = BoundaryIdentity.from_record(boundary)
+        if parsed.run_id != value["run_id"]:
+            raise JsonInputError("run record boundary identity does not match run")
+        if value["network_mode"] != "offline":
+            raise JsonInputError("run record boundary requires offline mode")
+    elif value["network_mode"] != "none":
+        raise JsonInputError("run record network mode requires a boundary")
     return value
 
 
@@ -131,12 +170,34 @@ def load_run(runs: Path, run_id: str) -> dict[str, Any]:
 def make_receipt(
     *, record: dict[str, Any], trigger: str, trigger_ns: int, kill_started_ns: int, kill_complete_ns: int,
     empty_ns: int, proof: EmptyProof, version: str, source_commit: str, event_id: str,
+    boundary: dict[str, str] | None = None,
+    execution_boundary: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    if trigger not in {"OPERATOR", "PID_LIMIT", "SUPERVISOR_FAILURE", "SUPERVISOR_RESTART_FAIL_CLOSED"} or not RUN_ID.fullmatch(event_id):
+    if trigger not in RECEIPT_TRIGGERS or not RUN_ID.fullmatch(event_id):
         raise JsonInputError("receipt trigger or event identity is invalid")
     if not proof.complete or proof.root_populated != 0 or proof.surviving_pids:
         raise JsonInputError("cannot issue a success receipt before exact emptiness proof")
-    return {
+    if trigger == "NETWORK_BOUNDARY":
+        expected_boundary = {"address_family", "mode", "policy_sha256", "violation"}
+        if not isinstance(boundary, dict) or set(boundary) != expected_boundary:
+            raise JsonInputError("network boundary receipt metadata is invalid")
+        if boundary.get("mode") != "offline" or boundary.get("violation") != "NON_LOOPBACK_EGRESS":
+            raise JsonInputError("network boundary receipt metadata is invalid")
+        if boundary.get("address_family") not in {"INET", "INET6", "UNSPECIFIED"} or not isinstance(boundary.get("policy_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", boundary["policy_sha256"]):
+            raise JsonInputError("network boundary receipt metadata is invalid")
+    elif boundary is not None:
+        raise JsonInputError("unexpected network boundary receipt metadata")
+    if trigger == "EXECUTION_BOUNDARY":
+        expected_execution = {"policy_id", "policy_sha256"}
+        if not isinstance(execution_boundary, dict) or set(execution_boundary) != expected_execution:
+            raise JsonInputError("execution boundary receipt metadata is invalid")
+        if not isinstance(execution_boundary["policy_id"], str) or not execution_boundary["policy_id"]:
+            raise JsonInputError("execution boundary receipt metadata is invalid")
+        if not isinstance(execution_boundary["policy_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", execution_boundary["policy_sha256"]):
+            raise JsonInputError("execution boundary receipt metadata is invalid")
+    elif execution_boundary is not None:
+        raise JsonInputError("unexpected execution boundary receipt metadata")
+    receipt = {
         "cleanup": {"attempted": False},
         "containment": {
             "cgroup_kill_written": True,
@@ -162,3 +223,8 @@ def make_receipt(
             "unit": record["unit"], "workload_uid": record["workload_uid"],
         },
     }
+    if boundary is not None:
+        receipt["boundary"] = boundary
+    if execution_boundary is not None:
+        receipt["execution_boundary"] = execution_boundary
+    return receipt

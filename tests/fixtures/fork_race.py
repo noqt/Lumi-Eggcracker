@@ -9,6 +9,26 @@ import time
 
 mode = sys.argv[1] if len(sys.argv) == 2 else "fork"
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if mode.startswith("bounded"):
+    for _ in range(8):
+        child = os.fork()
+        if child == 0:
+            if mode == "bounded-session":
+                try:
+                    os.setsid()
+                except OSError:
+                    pass
+            if mode == "bounded-replace":
+                try:
+                    if os.fork() == 0:
+                        time.sleep(30)
+                        os._exit(0)
+                except OSError:
+                    pass
+            time.sleep(30)
+            os._exit(0)
+    time.sleep(30)
+    os._exit(0)
 end = time.monotonic() + 30
 while time.monotonic() < end:
     try:

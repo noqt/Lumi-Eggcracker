@@ -296,6 +296,11 @@ def contain_many(
     trigger_deadline = time.monotonic() + MAX_CAPTURE_SECONDS
     descriptors: dict[ProcessIdentity, int] = {}
     captured: set[ProcessIdentity] = set(targets)
+    # A root is stopped through its held pidfd before the quarantine cgroup is
+    # created.  Keep that fact through the capture loop: reopening and
+    # restopping the same identity is both unnecessary and expensive during a
+    # large fork storm, and can consume the bounded fixed-point budget.
+    stopped: set[ProcessIdentity] = set()
     fixed = 0
     quarantine: QuarantineIdentity | None = None
     try:
@@ -307,7 +312,15 @@ def contain_many(
             for descriptor in supplied.values():
                 os.close(descriptor)
             raise JsonInputError("pidfd map contains an unrelated identity")
-        stop_times = [stop_pidfd(target, descriptors[target], proc=proc) for target in roots]
+        stop_times: list[int] = []
+        for target in roots:
+            try:
+                stop_times.append(stop_pidfd(target, descriptors[target], proc=proc))
+            except ProcessLookupError:
+                continue
+            stopped.add(target)
+        if not stop_times:
+            raise ProcessLookupError(errno.ESRCH, "all containment roots vanished")
         first_stop = min(stop_times)
         for descriptor in descriptors.values():
             os.close(descriptor)
@@ -318,16 +331,24 @@ def contain_many(
             if len(captured) > MAX_CAPTURED:
                 raise JsonInputError("discovered process tree exceeds capture limit")
             for current in sorted(captured):
+                if current in stopped:
+                    continue
                 try:
                     stop(current, proc=proc)
                 except ProcessLookupError:
                     continue
+                stopped.add(current)
             for current in sorted(captured):
                 _move(current, quarantine.path, proc=proc)
             current_tree = descendants(captured, proc=proc)
             if current_tree == captured:
                 fixed += 1
-                if fixed >= 2:
+                # Once every identity in the stable capture is stopped, no
+                # member can fork another descendant.  A second identical
+                # scan adds no safety and makes the 96-process storm miss the
+                # bounded capture deadline.  Keep the two-scan requirement
+                # for the fallback path where a process could not be stopped.
+                if fixed >= 2 or captured <= stopped:
                     break
             else:
                 captured = current_tree

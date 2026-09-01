@@ -56,6 +56,41 @@ PINNED_PYTORCH_ATEN_FILES = {
 PYTORCH_BRIDGE_EVIDENCE_ID = "pytorch-bridge-build-id-pinned-cpu"
 PYTORCH_ATEN_EVIDENCE_ID = "pytorch-aten-build-id-pinned-cpu"
 PYTORCH_PAIR_EVIDENCE_ID = "pytorch-bridge-aten-pair-pinned-cpu"
+# Exact native identities qualified in the disposable Ubuntu CPU fixtures.
+# Hashes, not names or paths, are the release trust anchors.
+PINNED_OLLAMA_LAUNCHER_BUILD_IDS = frozenset({"d9eb30a551e9c61d699adfbccc961304605ca852"})
+PINNED_OLLAMA_LAUNCHER_FILES = {
+    "d9eb30a551e9c61d699adfbccc961304605ca852": (
+        39_348_080,
+        "9f595107f966433f93f20ee19043f8e0cdea88e7403672f4dba2cadcb45ee085",
+    )
+}
+PINNED_OLLAMA_RUNNER_BUILD_IDS = frozenset({"f8d44c042216b0a5042f13bf9426f7e263ac5471"})
+PINNED_OLLAMA_RUNNER_FILES = {
+    "f8d44c042216b0a5042f13bf9426f7e263ac5471": (
+        15_096,
+        "234b05b2138264f8fb263c3205e85f4c290e8afe5067e280a4f6f90cdac5696b",
+    )
+}
+PINNED_VLLM_PYTHON_BUILD_IDS = frozenset({"dc79f2c659038743f8f0c7ec18623284365df091"})
+PINNED_VLLM_PYTHON_FILES = {
+    "dc79f2c659038743f8f0c7ec18623284365df091": (
+        8_025_024,
+        "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223",
+    )
+}
+PINNED_VLLM_EXTENSION_BUILD_IDS = frozenset({"0b81145998cd6a2a1162b3ca47c1029e55061449"})
+PINNED_VLLM_EXTENSION_FILES = {
+    "0b81145998cd6a2a1162b3ca47c1029e55061449": (
+        17_766_528,
+        "56510a6c504707d8f986a76f87225ce8026de498672aceae4fc7642bf1aa1edc",
+    )
+}
+OLLAMA_LAUNCHER_EVIDENCE_ID = "ollama-launcher-pinned"
+OLLAMA_RUNNER_EVIDENCE_ID = "ollama-runner-pinned"
+VLLM_PYTHON_EVIDENCE_ID = "vllm-python-pinned-cpu"
+VLLM_EXTENSION_EVIDENCE_ID = "vllm-extension-pinned-cpu"
+VLLM_PAIR_EVIDENCE_ID = "vllm-python-extension-pair-pinned-cpu"
 MAX_RUNTIME_CANDIDATES = 256
 MAX_RUNTIME_AUTH_BYTES_PER_SCAN = 512 * 1024 * 1024
 PT_LOAD = 1
@@ -425,6 +460,101 @@ def _inspect_pytorch_descriptor(
         return None
 
 
+def _inspect_exact_descriptor(
+    descriptor: int,
+    *,
+    build_ids: frozenset[str],
+    files: dict[str, tuple[int, str]],
+    evidence_id: str,
+    family: str,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
+) -> RuntimeEvidence | None:
+    """Authenticate one exact native build without trusting its filename."""
+    try:
+        before = _metadata(descriptor, fallback)
+        if not stat.S_ISREG(before.st_mode) or before.st_size < 64:
+            return None
+        build_id = _build_id(descriptor, before.st_size)
+        expected = files.get(build_id) if build_id is not None else None
+        if (
+            build_id in build_ids
+            and expected is not None
+            and _authenticated_sha256(descriptor, before.st_size, expected, budget)
+            and _same_metadata(before, _metadata(descriptor, fallback))
+        ):
+            return RuntimeEvidence(evidence_id, family, "SHA256", ())
+        return None
+    except _AuthenticationDeferred:
+        raise
+    except (JsonInputError, OSError, KeyError, struct.error):
+        return None
+
+
+def _inspect_ollama_launcher_descriptor(
+    descriptor: int,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
+) -> RuntimeEvidence | None:
+    return _inspect_exact_descriptor(
+        descriptor,
+        build_ids=PINNED_OLLAMA_LAUNCHER_BUILD_IDS,
+        files=PINNED_OLLAMA_LAUNCHER_FILES,
+        evidence_id=OLLAMA_LAUNCHER_EVIDENCE_ID,
+        family="Ollama",
+        fallback=fallback,
+        budget=budget,
+    )
+
+
+def _inspect_ollama_runner_descriptor(
+    descriptor: int,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
+) -> RuntimeEvidence | None:
+    return _inspect_exact_descriptor(
+        descriptor,
+        build_ids=PINNED_OLLAMA_RUNNER_BUILD_IDS,
+        files=PINNED_OLLAMA_RUNNER_FILES,
+        evidence_id=OLLAMA_RUNNER_EVIDENCE_ID,
+        family="Ollama",
+        fallback=fallback,
+        budget=budget,
+    )
+
+
+def _inspect_vllm_python_descriptor(
+    descriptor: int,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
+) -> RuntimeEvidence | None:
+    return _inspect_exact_descriptor(
+        descriptor,
+        build_ids=PINNED_VLLM_PYTHON_BUILD_IDS,
+        files=PINNED_VLLM_PYTHON_FILES,
+        evidence_id=VLLM_PYTHON_EVIDENCE_ID,
+        family="vLLM/CPython",
+        fallback=fallback,
+        budget=budget,
+    )
+
+
+def _inspect_vllm_extension_descriptor(
+    descriptor: int,
+    fallback: StableFileMetadata | None = None,
+    budget: _AuthenticationBudget | None = None,
+) -> RuntimeEvidence | None:
+    return _inspect_exact_descriptor(
+        descriptor,
+        build_ids=PINNED_VLLM_EXTENSION_BUILD_IDS,
+        files=PINNED_VLLM_EXTENSION_FILES,
+        evidence_id=VLLM_EXTENSION_EVIDENCE_ID,
+        family="vLLM",
+        fallback=fallback,
+        budget=budget,
+    )
+
+
 def _inspect_descriptor(
     descriptor: int,
     fallback: StableFileMetadata | None = None,
@@ -437,6 +567,15 @@ def _inspect_descriptor(
     pytorch = _inspect_pytorch_descriptor(descriptor, fallback, budget)
     if pytorch is not None and pytorch not in values:
         values.append(pytorch)
+    for inspector in (
+        _inspect_ollama_launcher_descriptor,
+        _inspect_ollama_runner_descriptor,
+        _inspect_vllm_python_descriptor,
+        _inspect_vllm_extension_descriptor,
+    ):
+        evidence = inspector(descriptor, fallback, budget)
+        if evidence is not None and evidence not in values:
+            values.append(evidence)
     return tuple(values)
 
 
@@ -466,6 +605,52 @@ def inspect_pytorch_path(path: Path) -> RuntimeEvidence | None:
         os.close(descriptor)
 
 
+def inspect_ollama_path(path: Path) -> RuntimeEvidence | None:
+    """Recognise one exact pinned Ollama launcher or runner binary."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        return next(
+            (
+                evidence
+                for inspector in (
+                    _inspect_ollama_launcher_descriptor,
+                    _inspect_ollama_runner_descriptor,
+                )
+                if (evidence := inspector(descriptor)) is not None
+            ),
+            None,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def inspect_vllm_path(path: Path) -> RuntimeEvidence | None:
+    """Recognise one exact pinned vLLM Python or native extension binary."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        return next(
+            (
+                evidence
+                for inspector in (
+                    _inspect_vllm_python_descriptor,
+                    _inspect_vllm_extension_descriptor,
+                )
+                if (evidence := inspector(descriptor)) is not None
+            ),
+            None,
+        )
+    finally:
+        os.close(descriptor)
+
+
 def _inspect_candidate(path: Path) -> tuple[RuntimeEvidence, ...]:
     values: list[RuntimeEvidence] = []
     llama = inspect_path(path)
@@ -474,6 +659,10 @@ def _inspect_candidate(path: Path) -> tuple[RuntimeEvidence, ...]:
     pytorch = inspect_pytorch_path(path)
     if pytorch is not None and pytorch not in values:
         values.append(pytorch)
+    for inspector in (inspect_ollama_path, inspect_vllm_path):
+        evidence = inspector(path)
+        if evidence is not None and evidence not in values:
+            values.append(evidence)
     return tuple(values)
 
 
@@ -490,6 +679,21 @@ def with_pytorch_pair(values: Iterable[RuntimeEvidence]) -> tuple[RuntimeEvidenc
             RuntimeEvidence(
                 PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "SHA256_PAIR", ()
             )
+        )
+    return tuple(result)
+
+
+def with_vllm_pair(values: Iterable[RuntimeEvidence]) -> tuple[RuntimeEvidence, ...]:
+    """Add the composite vLLM launcher/native-extension identity."""
+    result = list(values)
+    evidence_ids = {item.evidence_id for item in result}
+    if (
+        VLLM_PYTHON_EVIDENCE_ID in evidence_ids
+        and VLLM_EXTENSION_EVIDENCE_ID in evidence_ids
+        and VLLM_PAIR_EVIDENCE_ID not in evidence_ids
+    ):
+        result.append(
+            RuntimeEvidence(VLLM_PAIR_EVIDENCE_ID, "vLLM", "SHA256_PAIR", ())
         )
     return tuple(result)
 
@@ -691,4 +895,4 @@ def from_snapshot(
                         values = _inspect_candidate(path)
                         cache[key] = values
                 add(values)
-    return with_pytorch_pair(result)
+    return with_vllm_pair(with_pytorch_pair(result))

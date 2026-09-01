@@ -141,13 +141,17 @@ class AdoptionTests(unittest.TestCase):
 
     def test_each_enforcement_stage_fault_prevents_a_success_result(self) -> None:
         target = ProcessIdentity(10, 100)
+        descendant = ProcessIdentity(11, 101)
         identity = QuarantineIdentity(Path("/quarantine/aa"), 1, 2, "a" * 24)
         proof = adoption.EmptyProof(True, 1, 0, [])
         results = {
             "open_pidfd": 17,
             "stop_pidfd": 20,
             "stop": 21,
-            "descendants": {target},
+            # Keep one non-root identity in the capture so the stop stage is
+            # still exercised after root pidfd stops are intentionally
+            # retained by contain_many.
+            "descendants": {target, descendant},
             "create_quarantine": identity,
             "_move": True,
             "_validate": identity.path,

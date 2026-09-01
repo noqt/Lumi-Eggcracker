@@ -26,6 +26,9 @@ MAX_ARTIFACTS = 16
 MAX_TOTAL_BYTES = 4 * 1024 * 1024
 MAX_FD_PROBES_PER_SCAN = 64
 MAX_MAP_PROBES_PER_SCAN = 64
+MAX_ARG_ARTIFACT_PROBES = 32
+MAX_ARG_ARTIFACT_PATH_BYTES = 4096
+MAX_ARG_ARTIFACT_DIRECTORY_ENTRIES = 64
 MAX_GGUF_ITEMS = 10_000_000
 MAX_SAFETENSORS_TENSORS = 100_000
 MAX_SAFETENSORS_DIMS = 64
@@ -170,12 +173,11 @@ def validate_gguf_fd(
 
 
 def _json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    value: dict[str, object] = {}
-    for key, item in pairs:
-        if key in value:
-            raise JsonInputError("Safetensors header contains duplicate JSON keys")
-        value[key] = item
-    return value
+    # The reference Safetensors loader accepts duplicate JSON names with the
+    # final value taking precedence.  Mirror that interpretation before
+    # validating the resulting tensor layout; otherwise a loader-accepted
+    # model can evade content recognition merely by repeating a key.
+    return dict(pairs)
 
 
 def validate_safetensors_fd(
@@ -286,7 +288,12 @@ def validate_safetensors_fd(
 
 def validate_path(path: Path) -> ArtifactEvidence | None:
     """Return strict GGUF or Safetensors evidence for one opened file."""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -306,7 +313,12 @@ def validate_path(path: Path) -> ArtifactEvidence | None:
 
 def _looks_like_artifact(path: Path) -> bool:
     """Use only a bounded regular-file probe before full validation."""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError:
@@ -318,6 +330,95 @@ def _looks_like_artifact(path: Path) -> bool:
         return False
     finally:
         os.close(descriptor)
+
+
+def _argv_artifact_paths(snapshot: object) -> tuple[Path, ...]:
+    """Return a bounded set of absolute argv path candidates.
+
+    Content-addressed model stores (including Ollama blobs) commonly have no
+    model-file extension and may no longer be open after loading.  The argv is
+    only a locator here: a candidate becomes evidence only after opening the
+    exact path with ``O_NOFOLLOW`` and passing the bounded format validator.
+    No token is retained in evidence or receipts.
+    """
+    values: list[Path] = []
+    seen: set[str] = set()
+    argv = tuple(getattr(snapshot, "argv", ()))
+    for raw in argv:
+        if len(values) >= MAX_ARG_ARTIFACT_PROBES:
+            break
+        if not isinstance(raw, str) or not raw or len(raw.encode("utf-8", "ignore")) > MAX_ARG_ARTIFACT_PATH_BYTES:
+            continue
+        candidates = (raw, raw.partition("=")[2]) if raw.startswith("--") and "=" in raw else (raw,)
+        for candidate in candidates:
+            if len(values) >= MAX_ARG_ARTIFACT_PROBES:
+                break
+            if not candidate.startswith("/") or "\x00" in candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            values.append(Path(candidate))
+    return tuple(values)
+
+
+def from_argv_paths(
+    snapshot: object,
+    *,
+    cache: ArtifactCache | None = None,
+    max_probes: int = MAX_ARG_ARTIFACT_PROBES,
+) -> tuple[ArtifactEvidence, ...]:
+    """Inspect bounded absolute argv paths for extensionless model content."""
+    if isinstance(max_probes, bool) or not isinstance(max_probes, int) or max_probes < 1:
+        raise JsonInputError("artifact argv probe limit is invalid")
+    result: list[ArtifactEvidence] = []
+    candidates: list[Path] = []
+    for path in _argv_artifact_paths(snapshot)[:max_probes]:
+        candidates.append(path)
+        # vLLM commonly receives a model directory and closes the checkpoint
+        # after loading.  Inspect only its bounded immediate children; this is
+        # not a recursive filesystem walk and names are never trusted.
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_DIRECTORY", 0)
+        )
+        try:
+            descriptor = os.open(path, flags)
+        except OSError:
+            continue
+        try:
+            if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                continue
+            try:
+                children = sorted(path.iterdir(), key=lambda item: item.name)
+            except OSError:
+                children = []
+            for child in children[:MAX_ARG_ARTIFACT_DIRECTORY_ENTRIES]:
+                if child.is_symlink():
+                    continue
+                candidates.append(child)
+        finally:
+            os.close(descriptor)
+        if len(candidates) >= max_probes * (MAX_ARG_ARTIFACT_DIRECTORY_ENTRIES + 1):
+            break
+    for path in candidates:
+        try:
+            metadata = path.stat()
+            key = _cache_key(metadata)
+        except OSError:
+            continue
+        if cache is not None and key in cache:
+            evidence = cache[key]
+        else:
+            evidence = validate_path(path) if _looks_like_artifact(path) else None
+            if cache is not None:
+                cache[key] = evidence
+        if evidence is not None and evidence not in result:
+            result.append(evidence)
+            if len(result) >= MAX_ARTIFACTS:
+                break
+    return tuple(result)
 
 
 def _evidence_from_descriptor(
@@ -471,7 +572,7 @@ def from_snapshot(
     map_start_index: int = 0,
     map_max_probes: int = MAX_MAP_PROBES_PER_SCAN,
 ) -> tuple[ArtifactEvidence, ...]:
-    """Collect bounded content evidence from open and mapped descriptors."""
+    """Collect bounded content evidence from descriptors, mappings and argv locators."""
     result = list(
         from_process_fds(
             snapshot,
@@ -490,6 +591,11 @@ def from_snapshot(
     ):
         if evidence not in result:
             result.append(evidence)
+    for evidence in from_argv_paths(snapshot, cache=cache):
+        if evidence not in result:
+            result.append(evidence)
+            if len(result) >= MAX_ARTIFACTS:
+                return tuple(result[:MAX_ARTIFACTS])
     for raw in tuple(getattr(snapshot, "map_paths", ())):
         if not isinstance(raw, str) or not raw.startswith("/"):
             continue

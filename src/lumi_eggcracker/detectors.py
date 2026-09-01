@@ -14,7 +14,9 @@ from .jsonio import JsonInputError, canonical_bytes
 SCHEMA = "lumi-eggcracker.detectors.v3"
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 KINDS = {"exe_basename", "argv_token", "argv_model_suffix", "open_model_suffix", "map_basename"}
-GROUPS = {"MODEL_CONTENT", "MODEL_RUNTIME"}
+REQUIRED_GROUPS = {"MODEL_CONTENT", "MODEL_RUNTIME"}
+OPTIONAL_GROUPS = {"MODEL_TOPOLOGY"}
+GROUPS = REQUIRED_GROUPS | OPTIONAL_GROUPS
 
 
 class Snapshot(Protocol):
@@ -139,7 +141,7 @@ def load_catalogue(raw: bytes, *, expected_digest: str | None = None) -> Catalog
                     raise JsonInputError("content evidence group is invalid")
                 present.add(group["group"])
                 groups.append({"group": group["group"], "any": _values(group["any"])})
-            if present != GROUPS:
+            if not REQUIRED_GROUPS <= present:
                 raise JsonInputError("content profile must require model and runtime evidence")
             profile = Profile(identifier, path, groups=tuple(groups))
         else:
