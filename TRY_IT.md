@@ -55,7 +55,8 @@ run the helper directly instead:
 
 ```sh
 python3 scripts/start_hosted_proof.py \
-  --i-understand-this-kills-a-test-tree
+  --i-understand-this-kills-a-test-tree \
+  --wait
 ```
 
 The acknowledgement is mandatory. The helper refuses a same-named repository

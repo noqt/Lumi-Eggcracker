@@ -200,6 +200,12 @@ class HostedProofTests(unittest.TestCase):
         runner = FakeRunner(
             [
                 result(("watch",)),
+                result(
+                    ("status",),
+                    stdout=json.dumps(
+                        {"status": "completed", "conclusion": "success", "url": url}
+                    ),
+                ),
                 result(("log",), stdout='{"result":"TERMINATED"}\n'),
             ]
         )
@@ -226,6 +232,16 @@ class HostedProofTests(unittest.TestCase):
                     "123",
                     "--repo",
                     "github.com/operator/Lumi-Eggcracker",
+                    "--json",
+                    "status,conclusion,url",
+                ),
+                (
+                    "gh",
+                    "run",
+                    "view",
+                    "123",
+                    "--repo",
+                    "github.com/operator/Lumi-Eggcracker",
                     "--log",
                 ),
             ],
@@ -237,6 +253,12 @@ class HostedProofTests(unittest.TestCase):
         runner = FakeRunner(
             [
                 result(("watch",), returncode=1),
+                result(
+                    ("status",),
+                    stdout=json.dumps(
+                        {"status": "completed", "conclusion": "failure", "url": url}
+                    ),
+                ),
                 result(("log",), stdout='{"result":"FAILED"}\n'),
             ]
         )
@@ -245,6 +267,99 @@ class HostedProofTests(unittest.TestCase):
             ('{"result":"FAILED"}', False),
             hosted_proof_module.follow_hosted_proof(url, runner=runner),
         )
+
+    def test_follow_watch_timeout_is_not_reported_as_completion(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        runner = FakeRunner([subprocess.TimeoutExpired(cmd=("gh", "run", "watch"), timeout=900)])
+
+        with self.assertRaisesRegex(HostedProofError, "could not complete.*wait"):
+            hosted_proof_module.follow_hosted_proof(url, runner=runner)
+        self.assertEqual(1, len(runner.commands))
+
+    def test_follow_noncompleted_status_is_not_reported_as_finished(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        runner = FakeRunner(
+            [
+                result(("watch",), returncode=1),
+                result(
+                    ("status",),
+                    stdout=json.dumps(
+                        {"status": "in_progress", "conclusion": "", "url": url}
+                    ),
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "did not reach a completed state"):
+            hosted_proof_module.follow_hosted_proof(url, runner=runner)
+        self.assertEqual(2, len(runner.commands))
+
+    def test_follow_rejects_unavailable_status_and_log(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        completed = json.dumps(
+            {"status": "completed", "conclusion": "success", "url": url}
+        )
+        cases = (
+            (
+                [result(("watch",)), result(("status",), returncode=1)],
+                "could not read the hosted-proof status",
+            ),
+            (
+                [
+                    result(("watch",)),
+                    result(("status",), stdout=completed),
+                    result(("log",), returncode=1),
+                ],
+                "log was unavailable",
+            ),
+            (
+                [
+                    result(("watch",)),
+                    result(("status",), stdout=completed),
+                    result(("log",), stdout=""),
+                ],
+                "log was empty",
+            ),
+        )
+        for responses, message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                HostedProofError, message
+            ):
+                hosted_proof_module.follow_hosted_proof(
+                    url,
+                    runner=FakeRunner(responses),
+                )
+
+    def test_follow_log_byte_bound_is_exact(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        completed = json.dumps(
+            {"status": "completed", "conclusion": "success", "url": url}
+        )
+        exact = "x" * hosted_proof_module.FOLLOW_LOG_MAX_BYTES
+        runner = FakeRunner(
+            [
+                result(("watch",)),
+                result(("status",), stdout=completed),
+                result(("log",), stdout=exact),
+            ]
+        )
+        self.assertEqual(
+            (exact, True),
+            hosted_proof_module.follow_hosted_proof(url, runner=runner),
+        )
+
+        oversized = FakeRunner(
+            [
+                result(("watch",)),
+                result(("status",), stdout=completed),
+                result(
+                    ("log",),
+                    stdout="x" * (hosted_proof_module.FOLLOW_LOG_MAX_BYTES + 1),
+                ),
+            ]
+        )
+        with self.assertRaisesRegex(HostedProofError, "safe display bound"):
+            hosted_proof_module.follow_hosted_proof(url, runner=oversized)
 
     def test_cli_wait_returns_failure_after_printing_failed_log(self) -> None:
         url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
@@ -353,7 +468,7 @@ class HostedProofTests(unittest.TestCase):
                 ["--i-understand-this-kills-a-test-tree", "--wait"]
             )
 
-        self.assertEqual(0, status)
+        self.assertEqual(1, status)
         follower.assert_not_called()
         self.assertIn(
             "Automatic wait unavailable because the exact run URL was not resolved.",

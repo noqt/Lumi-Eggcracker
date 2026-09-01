@@ -39,6 +39,7 @@ RUN_LOOKUP_MAX_BYTES = 262_144
 RUN_LOOKUP_RECENCY = timedelta(minutes=5)
 RUN_LOOKUP_FUTURE_TOLERANCE = timedelta(minutes=1)
 FOLLOW_TIMEOUT_SECONDS = 900.0
+FOLLOW_STATUS_MAX_BYTES = 4_096
 FOLLOW_LOG_MAX_BYTES = 262_144
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -118,7 +119,7 @@ def follow_hosted_proof(
     repository = f"{HOST}/{match.group('owner')}/{REPOSITORY_NAME}"
     run_id = match.group("run_id")
     try:
-        watched = _call(
+        _call(
             runner,
             "run",
             "watch",
@@ -131,7 +132,37 @@ def follow_hosted_proof(
     except HostedProofError as error:
         raise HostedProofError("GitHub CLI could not complete the hosted-proof wait.") from error
     try:
-        viewed = _call(
+        status_result = _call(
+            runner,
+            "run",
+            "view",
+            run_id,
+            "--repo",
+            repository,
+            "--json",
+            "status,conclusion,url",
+        )
+    except HostedProofError as error:
+        raise HostedProofError("GitHub CLI could not verify hosted-proof completion.") from error
+    if status_result.returncode != 0:
+        raise HostedProofError("GitHub CLI could not read the hosted-proof status.")
+    try:
+        encoded_status = status_result.stdout.encode("utf-8")
+        if len(encoded_status) > FOLLOW_STATUS_MAX_BYTES:
+            raise HostedProofError("GitHub returned an oversized hosted-proof status.")
+        state = json.loads(status_result.stdout)
+    except (HostedProofError, UnicodeError, json.JSONDecodeError, RecursionError) as error:
+        raise HostedProofError("GitHub CLI could not verify hosted-proof completion.") from error
+    if not isinstance(state, dict) or state.get("url") != url:
+        raise HostedProofError("GitHub returned a mismatched hosted-proof status.")
+    if state.get("status") != "completed":
+        raise HostedProofError(f"Hosted proof did not reach a completed state; inspect {url}.")
+    conclusion = state.get("conclusion")
+    if not isinstance(conclusion, str) or not re.fullmatch(r"[a-z_]{1,32}", conclusion):
+        raise HostedProofError("GitHub returned an invalid hosted-proof conclusion.")
+
+    try:
+        log_result = _call(
             runner,
             "run",
             "view",
@@ -140,17 +171,17 @@ def follow_hosted_proof(
             repository,
             "--log",
         )
-        encoded_log = viewed.stdout.encode("utf-8")
+        encoded_log = log_result.stdout.encode("utf-8")
     except (HostedProofError, UnicodeError) as error:
         raise HostedProofError("GitHub CLI could not read the hosted-proof result.") from error
-    if viewed.returncode != 0:
+    if log_result.returncode != 0:
         raise HostedProofError(f"Hosted proof finished but its log was unavailable; inspect {url}.")
     if len(encoded_log) > FOLLOW_LOG_MAX_BYTES:
         raise HostedProofError(f"Hosted-proof log exceeded the safe display bound; inspect {url}.")
-    log = viewed.stdout.rstrip()
+    log = log_result.stdout.rstrip()
     if not log:
         raise HostedProofError(f"Hosted-proof log was empty; inspect {url}.")
-    return log, watched.returncode == 0
+    return log, conclusion == "success"
 
 
 def _fork_metadata(
@@ -495,6 +526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments.wait:
         if _watch_command(url) is None:
             print("Automatic wait unavailable because the exact run URL was not resolved.")
+            status = 1
         else:
             try:
                 log, passed = follow_hosted_proof(url)
