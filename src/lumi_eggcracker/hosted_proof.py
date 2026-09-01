@@ -199,6 +199,26 @@ def _fork_metadata(
     )
 
 
+def _workflow_identity(
+    runner: Runner,
+    repository: str,
+    branch: str,
+) -> subprocess.CompletedProcess[str]:
+    return _call(
+        runner,
+        "api",
+        "--hostname",
+        HOST,
+        "--method",
+        "GET",
+        f"repos/{repository}/contents/.github/workflows/{WORKFLOW}",
+        "--raw-field",
+        f"ref={branch}",
+        "--jq",
+        ".sha",
+    )
+
+
 def _parse_metadata(output: str) -> tuple[bool, str, str]:
     fields = output.strip().split("\t")
     if len(fields) != 3 or fields[0] not in {"true", "false"}:
@@ -358,6 +378,7 @@ def _discover_run_url(
 def start_hosted_proof(
     *,
     acknowledged: bool,
+    sync_fork: bool = False,
     runner: Runner = _default_runner,
     sleeper: Sleeper = time.sleep,
     monotonic: Monotonic = time.monotonic,
@@ -411,26 +432,55 @@ def start_hosted_proof(
     if not is_fork or parent.casefold() != UPSTREAM.casefold():
         raise HostedProofError(f"Refusing to use {repository}: it is not a fork of {UPSTREAM}.")
 
-    workflow_identity = _call(
-        runner,
-        "api",
-        "--hostname",
-        HOST,
-        "--method",
-        "GET",
-        f"repos/{repository}/contents/.github/workflows/{WORKFLOW}",
-        "--raw-field",
-        f"ref={branch}",
-        "--jq",
-        ".sha",
-    )
+    workflow_identity = _workflow_identity(runner, repository, branch)
     if (
         workflow_identity.returncode != 0
         or workflow_identity.stdout.strip() != REVIEWED_WORKFLOW_BLOB
     ):
-        raise HostedProofError(
-            "Refusing to dispatch: the fork workflow does not match the reviewed workflow."
+        if not sync_fork:
+            raise HostedProofError(
+                "Refusing to dispatch: the fork workflow does not match the reviewed "
+                "workflow. Rerun with `--sync-fork` to permit a fast-forward-only sync "
+                "and exact revalidation."
+            )
+        synchronized = _call(
+            runner,
+            "repo",
+            "sync",
+            f"{HOST}/{repository}",
+            "--source",
+            f"{HOST}/{UPSTREAM}",
+            "--branch",
+            branch,
         )
+        if synchronized.returncode != 0:
+            raise HostedProofError(
+                "GitHub could not fast-forward the fork; no workflow was dispatched."
+            )
+        refreshed_metadata = _fork_metadata(runner, repository)
+        if refreshed_metadata.returncode != 0:
+            raise HostedProofError(
+                "GitHub could not revalidate the synchronized fork; no workflow was dispatched."
+            )
+        is_fork, parent, refreshed_branch = _parse_metadata(refreshed_metadata.stdout)
+        if not is_fork or parent.casefold() != UPSTREAM.casefold():
+            raise HostedProofError(
+                "The synchronized repository no longer matches the expected upstream fork; "
+                "no workflow was dispatched."
+            )
+        if refreshed_branch != branch:
+            raise HostedProofError(
+                "The synchronized fork changed its default branch; no workflow was dispatched."
+            )
+        workflow_identity = _workflow_identity(runner, repository, branch)
+        if (
+            workflow_identity.returncode != 0
+            or workflow_identity.stdout.strip() != REVIEWED_WORKFLOW_BLOB
+        ):
+            raise HostedProofError(
+                "The synchronized fork still does not contain the reviewed workflow; "
+                "no workflow was dispatched."
+            )
 
     repository_selector = f"{HOST}/{repository}"
     enabled = _call(
@@ -512,6 +562,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="wait for an exact run and print its terminal PASS or FAIL result",
     )
     parser.add_argument(
+        "--sync-fork",
+        action="store_true",
+        help=(
+            "if the personal fork is stale, explicitly allow a fast-forward-only sync "
+            "from the reviewed upstream before exact revalidation"
+        ),
+    )
+    parser.add_argument(
         "--show-log",
         action="store_true",
         help="with --wait, also print the bounded public log on a successful run",
@@ -525,6 +583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         url = start_hosted_proof(
             acknowledged=arguments.i_understand_this_kills_a_test_tree,
+            sync_fork=arguments.sync_fork,
         )
     except HostedProofError as error:
         parser.error(str(error))
