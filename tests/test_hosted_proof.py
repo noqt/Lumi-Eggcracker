@@ -191,8 +191,13 @@ class HostedProofTests(unittest.TestCase):
                     "After it finishes, share the public run or friction: "
                     f"{hosted_proof_module.RESULT_FORM_URL}"
                 ),
+                f"Hosted proof result: PASS ({url})",
             ],
             output.getvalue().splitlines(),
+        )
+        self.assertEqual(
+            f"Hosted proof result: PASS ({url})",
+            output.getvalue().splitlines()[-1],
         )
 
     def test_follow_exact_run_waits_then_reads_bounded_log(self) -> None:
@@ -381,8 +386,16 @@ class HostedProofTests(unittest.TestCase):
         self.assertEqual(1, status)
         self.assertIn('{"result":"FAILED"}', output.getvalue().splitlines())
         self.assertIn(
+            f"Hosted proof result: FAIL ({url})",
+            output.getvalue().splitlines(),
+        )
+        self.assertIn(
             f"Hosted proof did not pass; inspect {url}.",
             output.getvalue().splitlines(),
+        )
+        self.assertEqual(
+            f"Hosted proof result: FAIL ({url})",
+            output.getvalue().splitlines()[-1],
         )
 
     def test_follow_refuses_non_exact_url_before_github_call(self) -> None:
