@@ -152,6 +152,10 @@ class HostedProofTests(unittest.TestCase):
                     "--exit-status"
                 ),
                 (
+                    "Read the bounded result: "
+                    "gh run view 123 --repo github.com/operator/Lumi-Eggcracker --log"
+                ),
+                (
                     "After it finishes, share the public run or friction: "
                     f"{hosted_proof_module.RESULT_FORM_URL}"
                 ),
@@ -169,6 +173,12 @@ class HostedProofTests(unittest.TestCase):
                 "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
             ),
         )
+        self.assertEqual(
+            "gh run view 123 --repo github.com/operator/Lumi-Eggcracker --log",
+            hosted_proof_module._log_command(
+                "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+            ),
+        )
         rejected = (
             "http://github.com/operator/Lumi-Eggcracker/actions/runs/123",
             "https://gitlab.com/operator/Lumi-Eggcracker/actions/runs/123",
@@ -181,6 +191,7 @@ class HostedProofTests(unittest.TestCase):
         for url in rejected:
             with self.subTest(url=url):
                 self.assertIsNone(hosted_proof_module._watch_command(url))
+                self.assertIsNone(hosted_proof_module._log_command(url))
 
     def test_cli_omits_watch_command_for_fallback_workflow_page(self) -> None:
         url = (
