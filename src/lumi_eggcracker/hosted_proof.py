@@ -54,7 +54,7 @@ def _watch_command(url: str) -> str | None:
     match = RUN_URL.fullmatch(url)
     if match is None:
         return None
-    repository = f"{match.group('owner')}/{REPOSITORY_NAME}"
+    repository = f"{HOST}/{match.group('owner')}/{REPOSITORY_NAME}"
     return f"gh run watch {match.group('run_id')} --repo {repository} --exit-status"
 
 

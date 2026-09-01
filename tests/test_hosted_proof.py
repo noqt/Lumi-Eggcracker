@@ -148,7 +148,8 @@ class HostedProofTests(unittest.TestCase):
                 f"Hosted proof dispatched: {url}",
                 (
                     "Watch from this terminal: "
-                    "gh run watch 123 --repo operator/Lumi-Eggcracker --exit-status"
+                    "gh run watch 123 --repo github.com/operator/Lumi-Eggcracker "
+                    "--exit-status"
                 ),
                 (
                     "After it finishes, share the public run or friction: "
@@ -157,6 +158,29 @@ class HostedProofTests(unittest.TestCase):
             ],
             output.getvalue().splitlines(),
         )
+
+    def test_watch_command_requires_exact_safe_github_run_url(self) -> None:
+        self.assertEqual(
+            (
+                "gh run watch 123 --repo github.com/operator/Lumi-Eggcracker "
+                "--exit-status"
+            ),
+            hosted_proof_module._watch_command(
+                "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+            ),
+        )
+        rejected = (
+            "http://github.com/operator/Lumi-Eggcracker/actions/runs/123",
+            "https://gitlab.com/operator/Lumi-Eggcracker/actions/runs/123",
+            "https://github.com/operator/other/actions/runs/123",
+            "https://github.com/operator/Lumi-Eggcracker/actions/runs/0",
+            "https://github.com/operator/Lumi-Eggcracker/actions/runs/123?x=1",
+            "https://github.com/operator/Lumi-Eggcracker/actions/runs/123#fragment",
+            "https://github.com/bad;name/Lumi-Eggcracker/actions/runs/123",
+        )
+        for url in rejected:
+            with self.subTest(url=url):
+                self.assertIsNone(hosted_proof_module._watch_command(url))
 
     def test_cli_omits_watch_command_for_fallback_workflow_page(self) -> None:
         url = (
