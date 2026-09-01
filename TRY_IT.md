@@ -17,7 +17,8 @@ navigating the repository or Actions UI:
 proof_dir="$(mktemp -d)/Lumi-Eggcracker" &&
 gh repo clone noqt/Lumi-Eggcracker "$proof_dir" -- --depth=1 &&
 python3 "$proof_dir/scripts/start_hosted_proof.py" \
-  --i-understand-this-kills-a-test-tree
+  --i-understand-this-kills-a-test-tree \
+  --wait
 ```
 
 On Windows PowerShell, use the equivalent block:
@@ -29,15 +30,17 @@ $proofDir = Join-Path ([IO.Path]::GetTempPath()) (
 gh repo clone noqt/Lumi-Eggcracker $proofDir -- --depth=1
 if ($LASTEXITCODE -ne 0) { throw "Clone failed" }
 python (Join-Path $proofDir "scripts\start_hosted_proof.py") `
-  --i-understand-this-kills-a-test-tree
+  --i-understand-this-kills-a-test-tree `
+  --wait
 ```
 
 The helper prints the exact workflow-run URL when GitHub returns it directly or
-the helper can uniquely correlate it to this dispatch. For an exact run URL it
-also prints a copyable `gh run watch` command, so you can follow the workflow's
-progress and final status without leaving the terminal, followed by an exact
-`gh run view --log` command for reading the bounded result. The run URL remains
-available for the same result in GitHub's interface.
+the helper can uniquely correlate it to this dispatch. With `--wait`, it follows
+that exact run through completion and prints the bounded public workflow log in
+the same terminal. If exact correlation is unavailable, it does not guess; it
+leaves the fork's workflow page for manual inspection. Without `--wait`, it
+prints separate copyable watch and log commands. The run URL remains available
+for the same result in GitHub's interface.
 
 ### Or use the GitHub interface
 

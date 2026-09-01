@@ -163,6 +163,123 @@ class HostedProofTests(unittest.TestCase):
             output.getvalue().splitlines(),
         )
 
+    def test_cli_waits_for_exact_run_and_prints_bounded_log(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        output = StringIO()
+        with (
+            patch.object(hosted_proof_module.shutil, "which", return_value="gh"),
+            patch.object(hosted_proof_module, "start_hosted_proof", return_value=url),
+            patch.object(
+                hosted_proof_module,
+                "follow_hosted_proof",
+                return_value=('{"result":"TERMINATED"}', True),
+            ) as follower,
+            redirect_stdout(output),
+        ):
+            status = hosted_proof_module.main(
+                ["--i-understand-this-kills-a-test-tree", "--wait"]
+            )
+
+        self.assertEqual(0, status)
+        follower.assert_called_once_with(url)
+        self.assertEqual(
+            [
+                f"Hosted proof dispatched: {url}",
+                "Hosted proof finished. Bounded public workflow log:",
+                '{"result":"TERMINATED"}',
+                (
+                    "After it finishes, share the public run or friction: "
+                    f"{hosted_proof_module.RESULT_FORM_URL}"
+                ),
+            ],
+            output.getvalue().splitlines(),
+        )
+
+    def test_follow_exact_run_waits_then_reads_bounded_log(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        runner = FakeRunner(
+            [
+                result(("watch",)),
+                result(("log",), stdout='{"result":"TERMINATED"}\n'),
+            ]
+        )
+
+        self.assertEqual(
+            ('{"result":"TERMINATED"}', True),
+            hosted_proof_module.follow_hosted_proof(url, runner=runner),
+        )
+        self.assertEqual(
+            [
+                (
+                    "gh",
+                    "run",
+                    "watch",
+                    "123",
+                    "--repo",
+                    "github.com/operator/Lumi-Eggcracker",
+                    "--exit-status",
+                ),
+                (
+                    "gh",
+                    "run",
+                    "view",
+                    "123",
+                    "--repo",
+                    "github.com/operator/Lumi-Eggcracker",
+                    "--log",
+                ),
+            ],
+            runner.commands,
+        )
+
+    def test_follow_failed_run_still_returns_its_bounded_log(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        runner = FakeRunner(
+            [
+                result(("watch",), returncode=1),
+                result(("log",), stdout='{"result":"FAILED"}\n'),
+            ]
+        )
+
+        self.assertEqual(
+            ('{"result":"FAILED"}', False),
+            hosted_proof_module.follow_hosted_proof(url, runner=runner),
+        )
+
+    def test_cli_wait_returns_failure_after_printing_failed_log(self) -> None:
+        url = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
+        output = StringIO()
+        with (
+            patch.object(hosted_proof_module.shutil, "which", return_value="gh"),
+            patch.object(hosted_proof_module, "start_hosted_proof", return_value=url),
+            patch.object(
+                hosted_proof_module,
+                "follow_hosted_proof",
+                return_value=('{"result":"FAILED"}', False),
+            ),
+            redirect_stdout(output),
+        ):
+            status = hosted_proof_module.main(
+                ["--i-understand-this-kills-a-test-tree", "--wait"]
+            )
+
+        self.assertEqual(1, status)
+        self.assertIn('{"result":"FAILED"}', output.getvalue().splitlines())
+        self.assertIn(
+            f"Hosted proof did not pass; inspect {url}.",
+            output.getvalue().splitlines(),
+        )
+
+    def test_follow_refuses_non_exact_url_before_github_call(self) -> None:
+        runner = FakeRunner([])
+        with self.assertRaisesRegex(HostedProofError, "exact hosted-proof run URL"):
+            hosted_proof_module.follow_hosted_proof(
+                "https://github.com/operator/Lumi-Eggcracker/actions/workflows/"
+                "containment-probe.yml",
+                runner=runner,
+            )
+        self.assertEqual([], runner.commands)
+
     def test_watch_command_requires_exact_safe_github_run_url(self) -> None:
         self.assertEqual(
             (
@@ -217,6 +334,29 @@ class HostedProofTests(unittest.TestCase):
                     f"{hosted_proof_module.RESULT_FORM_URL}"
                 ),
             ],
+            output.getvalue().splitlines(),
+        )
+
+    def test_cli_wait_fallback_does_not_guess_a_run(self) -> None:
+        url = (
+            "https://github.com/operator/Lumi-Eggcracker/actions/workflows/"
+            "containment-probe.yml"
+        )
+        output = StringIO()
+        with (
+            patch.object(hosted_proof_module.shutil, "which", return_value="gh"),
+            patch.object(hosted_proof_module, "start_hosted_proof", return_value=url),
+            patch.object(hosted_proof_module, "follow_hosted_proof") as follower,
+            redirect_stdout(output),
+        ):
+            status = hosted_proof_module.main(
+                ["--i-understand-this-kills-a-test-tree", "--wait"]
+            )
+
+        self.assertEqual(0, status)
+        follower.assert_not_called()
+        self.assertIn(
+            "Automatic wait unavailable because the exact run URL was not resolved.",
             output.getvalue().splitlines(),
         )
 

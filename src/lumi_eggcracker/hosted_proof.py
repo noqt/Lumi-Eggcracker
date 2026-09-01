@@ -38,6 +38,8 @@ RUN_LOOKUP_DEADLINE_SECONDS = 17.0
 RUN_LOOKUP_MAX_BYTES = 262_144
 RUN_LOOKUP_RECENCY = timedelta(minutes=5)
 RUN_LOOKUP_FUTURE_TOLERANCE = timedelta(minutes=1)
+FOLLOW_TIMEOUT_SECONDS = 900.0
+FOLLOW_LOG_MAX_BYTES = 262_144
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 Sleeper = Callable[[float], None]
@@ -101,6 +103,54 @@ def _call(
         return runner(command)
     except (OSError, subprocess.SubprocessError, UnicodeError) as error:
         raise HostedProofError("GitHub CLI failed before dispatch completed.") from error
+
+
+def follow_hosted_proof(
+    url: str,
+    *,
+    runner: Runner = _default_runner,
+) -> tuple[str, bool]:
+    """Wait for one exact run and return its bounded public log and pass state."""
+
+    match = RUN_URL.fullmatch(url)
+    if match is None:
+        raise HostedProofError("Automatic wait requires an exact hosted-proof run URL.")
+    repository = f"{HOST}/{match.group('owner')}/{REPOSITORY_NAME}"
+    run_id = match.group("run_id")
+    try:
+        watched = _call(
+            runner,
+            "run",
+            "watch",
+            run_id,
+            "--repo",
+            repository,
+            "--exit-status",
+            timeout_seconds=FOLLOW_TIMEOUT_SECONDS,
+        )
+    except HostedProofError as error:
+        raise HostedProofError("GitHub CLI could not complete the hosted-proof wait.") from error
+    try:
+        viewed = _call(
+            runner,
+            "run",
+            "view",
+            run_id,
+            "--repo",
+            repository,
+            "--log",
+        )
+        encoded_log = viewed.stdout.encode("utf-8")
+    except (HostedProofError, UnicodeError) as error:
+        raise HostedProofError("GitHub CLI could not read the hosted-proof result.") from error
+    if viewed.returncode != 0:
+        raise HostedProofError(f"Hosted proof finished but its log was unavailable; inspect {url}.")
+    if len(encoded_log) > FOLLOW_LOG_MAX_BYTES:
+        raise HostedProofError(f"Hosted-proof log exceeded the safe display bound; inspect {url}.")
+    log = viewed.stdout.rstrip()
+    if not log:
+        raise HostedProofError(f"Hosted-proof log was empty; inspect {url}.")
+    return log, watched.returncode == 0
 
 
 def _fork_metadata(
@@ -425,6 +475,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="acknowledge that the hosted workflow kills a bounded synthetic process tree",
     )
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="wait for an exact run to finish and print its bounded public workflow log",
+    )
     arguments = parser.parse_args(argv)
 
     if shutil.which("gh") is None:
@@ -436,11 +491,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     except HostedProofError as error:
         parser.error(str(error))
     print(f"Hosted proof dispatched: {url}")
-    watch_command = _watch_command(url)
-    if watch_command is not None:
-        print(f"Watch from this terminal: {watch_command}")
-    log_command = _log_command(url)
-    if log_command is not None:
-        print(f"Read the bounded result: {log_command}")
+    status = 0
+    if arguments.wait:
+        if _watch_command(url) is None:
+            print("Automatic wait unavailable because the exact run URL was not resolved.")
+        else:
+            try:
+                log, passed = follow_hosted_proof(url)
+            except HostedProofError as error:
+                parser.error(str(error))
+            print("Hosted proof finished. Bounded public workflow log:")
+            print(log)
+            if not passed:
+                print(f"Hosted proof did not pass; inspect {url}.")
+                status = 1
+    else:
+        watch_command = _watch_command(url)
+        if watch_command is not None:
+            print(f"Watch from this terminal: {watch_command}")
+        log_command = _log_command(url)
+        if log_command is not None:
+            print(f"Read the bounded result: {log_command}")
     print(f"After it finishes, share the public run or friction: {RESULT_FORM_URL}")
-    return 0
+    return status
