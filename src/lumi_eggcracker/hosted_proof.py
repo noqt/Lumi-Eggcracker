@@ -20,7 +20,7 @@ WORKFLOW = "containment-probe.yml"
 RESULT_FORM_URL = (
     "https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml"
 )
-REVIEWED_WORKFLOW_BLOB = "3761d8c3b29f1265e402c788e5340f6eab2c70df"
+REVIEWED_WORKFLOW_BLOB = "2f823c41f487e36196700262f80c8504ed2b885f"
 ACKNOWLEDGEMENT = "i_understand_this_kills_a_test_tree=true"
 RUN_URL = re.compile(
     r"^https://github\.com/"

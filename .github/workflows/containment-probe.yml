@@ -26,7 +26,7 @@ jobs:
       ACKNOWLEDGED: ${{ inputs.i_understand_this_kills_a_test_tree }}
       DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
       REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
-      QUALIFIED_SOURCE_SHA256: fb8abb79cf0c99697d9eb8ab5724ad9fb220ace31b97cff92c4fa270aedf64ad
+      QUALIFIED_SOURCE_SHA256: 78fcc0aeb8c3e5f6713b4db57c70f72a288115cd2d34c38b28f6267a6e12e163
     steps:
       - name: Check out the dispatched default branch
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
