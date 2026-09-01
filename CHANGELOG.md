@@ -11,6 +11,8 @@
   exists in the current kernel epoch, keeping a collision fail closed.
 - Preserve receipt-persistence failures rather than relabelling them as benign
   completion during recovery.
+- Permit an exact in-place upgrade from the immediately preceding 1.0.6
+  candidate.
 
 ## 1.0.6 (release candidate)
 

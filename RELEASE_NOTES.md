@@ -6,6 +6,7 @@ disappears. Recovery now commits the exact empty state, removes ephemeral
 launch provenance, and reclaims the run's identity-checked offline boundary.
 It also reconciles prior-boot active records only when their same-named cgroup
 is absent in the current boot; a collision remains fail closed.
+The in-place upgrader accepts the immediately preceding 1.0.6 candidate.
 
 The candidate retains the qualified root-supervisor product after
 the 0.7 runtime-topology, 0.8 execution-boundary, 0.8.1 deployment-hardening
