@@ -20,7 +20,7 @@ from lumi_eggcracker.records import (
 
 def record() -> dict[str, object]:
     run_id = "a" * 24
-    return {**command_summary(["/bin/true", "--safe"]), "boot_id": "b" * 36, "cgroup": f"/system.slice/lumi-eggcracker-workload-{run_id}.service", "cgroup_device": 1, "cgroup_inode": 2, "cpu_quota_percent": 400, "created_monotonic_ns": 3, "max_memory_mib": 2048, "max_pids": 8, "name": "demo", "operator_uid": 1001, "run_id": run_id, "schema_version": RUN_SCHEMA, "state": "RUNNING", "unit": f"lumi-eggcracker-workload-{run_id}.service", "workload_gid": 2001, "workload_uid": 2001}
+    return {**command_summary(["/bin/true", "--safe"]), "boot_id": "b" * 36, "boundary": None, "cgroup": f"/system.slice/lumi-eggcracker-workload-{run_id}.service", "cgroup_device": 1, "cgroup_inode": 2, "cpu_quota_percent": 400, "created_monotonic_ns": 3, "max_memory_mib": 2048, "max_pids": 8, "name": "demo", "network_mode": "none", "operator_uid": 1001, "run_id": run_id, "schema_version": RUN_SCHEMA, "state": "RUNNING", "unit": f"lumi-eggcracker-workload-{run_id}.service", "workload_gid": 2001, "workload_uid": 2001}
 
 
 class RecordTests(unittest.TestCase):
@@ -36,7 +36,7 @@ class RecordTests(unittest.TestCase):
             EmptyProof(True, 1, 0, [42]),
         ):
             with self.assertRaises(JsonInputError):
-                make_receipt(record=value, trigger="OPERATOR", trigger_ns=10, kill_started_ns=11, kill_complete_ns=12, empty_ns=13, proof=proof, version="0.5.0", source_commit="c" * 40, event_id="d" * 24)
+                make_receipt(record=value, trigger="OPERATOR", trigger_ns=10, kill_started_ns=11, kill_complete_ns=12, empty_ns=13, proof=proof, version="0.6.0", source_commit="c" * 40, event_id="d" * 24)
 
     def test_atomic_record_faults_never_publish_a_partial_record(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -98,3 +98,76 @@ class RecordTests(unittest.TestCase):
         value["extra"] = True
         with self.assertRaises(JsonInputError):
             validate_run(value)
+
+    def test_network_boundary_receipt_requires_bounded_metadata(self) -> None:
+        value = record()
+        receipt = make_receipt(
+            record=value,
+            trigger="NETWORK_BOUNDARY",
+            trigger_ns=10,
+            kill_started_ns=11,
+            kill_complete_ns=12,
+            empty_ns=13,
+            proof=EmptyProof(True, 1, 0, []),
+            version="0.6.0",
+            source_commit="c" * 40,
+            event_id="d" * 24,
+            boundary={
+                "address_family": "INET6",
+                "mode": "offline",
+                "policy_sha256": "a" * 64,
+                "violation": "NON_LOOPBACK_EGRESS",
+            },
+        )
+        self.assertEqual("NETWORK_BOUNDARY", receipt["trigger"]["kind"])
+        self.assertEqual("INET6", receipt["boundary"]["address_family"])
+        with self.assertRaises(JsonInputError):
+            make_receipt(
+                record=value,
+                trigger="NETWORK_BOUNDARY",
+                trigger_ns=10,
+                kill_started_ns=11,
+                kill_complete_ns=12,
+                empty_ns=13,
+                proof=EmptyProof(True, 1, 0, []),
+                version="0.6.0",
+                source_commit="c" * 40,
+                event_id="d" * 24,
+                boundary={
+                    "address_family": "INET",
+                    "mode": "offline",
+                    "policy_sha256": "a" * 64,
+                    "violation": "OTHER",
+                },
+            )
+
+    def test_execution_boundary_receipt_requires_policy_metadata(self) -> None:
+        value = record()
+        receipt = make_receipt(
+            record=value,
+            trigger="EXECUTION_BOUNDARY",
+            trigger_ns=10,
+            kill_started_ns=11,
+            kill_complete_ns=12,
+            empty_ns=13,
+            proof=EmptyProof(True, 1, 0, []),
+            version="0.8.0",
+            source_commit="c" * 40,
+            event_id="d" * 24,
+            execution_boundary={"policy_id": "a" * 24, "policy_sha256": "b" * 64},
+        )
+        self.assertEqual("EXECUTION_BOUNDARY", receipt["trigger"]["kind"])
+        self.assertEqual("a" * 24, receipt["execution_boundary"]["policy_id"])
+        with self.assertRaises(JsonInputError):
+            make_receipt(
+                record=value,
+                trigger="EXECUTION_BOUNDARY",
+                trigger_ns=10,
+                kill_started_ns=11,
+                kill_complete_ns=12,
+                empty_ns=13,
+                proof=EmptyProof(True, 1, 0, []),
+                version="0.8.0",
+                source_commit="c" * 40,
+                event_id="d" * 24,
+            )

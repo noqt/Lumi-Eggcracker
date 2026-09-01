@@ -72,7 +72,7 @@ def main() -> int:
                 try:
                     before = set(DETECTIONS.glob("*.json"))
                     started = time.monotonic_ns()
-                    process = launch(args.user, wrapper, argv, root / "out")
+                    process = launch(args.user, wrapper, argv, root / "out", runner.parent)
                     receipt = receipt_after(before)
                     stop(process)
                     process = None

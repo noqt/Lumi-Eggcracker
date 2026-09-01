@@ -56,6 +56,7 @@ INSTALL_TARGETS = (
     Path("/run/lumi-eggcracker-watchdog"),
     Path("/etc/systemd/system/lumi-eggcracker.service"),
     Path("/etc/systemd/system/lumi-eggcracker-watchdog.service"),
+    Path("/etc/tmpfiles.d/lumi-eggcracker.conf"),
 )
 SUCCESS_KEYS = frozenset(
     {

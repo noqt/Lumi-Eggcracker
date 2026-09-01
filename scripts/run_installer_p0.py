@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import secrets
 import shutil
 import signal
@@ -24,6 +25,7 @@ TARGETS = (
     Path("/etc/lumi-eggcracker"),
     Path("/etc/systemd/system/lumi-eggcracker.service"),
     Path("/etc/systemd/system/lumi-eggcracker-watchdog.service"),
+    Path("/etc/tmpfiles.d/lumi-eggcracker.conf"),
     Path("/var/lib/lumi-eggcracker"),
     Path("/run/lumi-eggcracker"),
     Path("/run/lumi-eggcracker-watchdog"),
@@ -83,16 +85,19 @@ class InstallerCampaign:
         self.release = release.resolve()
         self.operator = operator
         self.output = output
-        self.artifact = self.release / "lumi-eggcracker-0.5.0.pyz"
+        self.manifest = json.loads(
+            (self.release / "release-manifest.json").read_text(encoding="utf-8")
+        )
+        version = self.manifest.get("version")
+        if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+            raise RuntimeError("release fixture version is invalid")
+        self.artifact = self.release / f"lumi-eggcracker-{version}.pyz"
         self.installer = self.release / "scripts" / "install.py"
         self.uninstaller = self.release / "scripts" / "uninstall.py"
         self.verify_uninstalled = self.release / "scripts" / "verify_uninstalled.py"
         self.verifier = self.release / "scripts" / "verify_release.py"
-        self.source = self.release / "lumi-eggcracker-0.5.0-source.zip"
-        self.bundle = self.release.parent / "lumi-eggcracker-0.5.0-linux.zip"
-        self.manifest = json.loads(
-            (self.release / "release-manifest.json").read_text(encoding="utf-8")
-        )
+        self.source = self.release / f"lumi-eggcracker-{version}-source.zip"
+        self.bundle = self.release.parent / f"lumi-eggcracker-{version}-linux.zip"
         self.expected = digest(self.artifact)
         if (
             self.expected != self.manifest.get("sha256")

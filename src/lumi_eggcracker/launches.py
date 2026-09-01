@@ -138,6 +138,45 @@ def load_all(root: Path) -> list[dict[str, Any]]:
     return values
 
 
+def approval_is_active(
+    provenance: dict[str, Any], approvals: list[dict[str, Any]]
+) -> bool:
+    """Require the exact root approval generation that admitted a launch.
+
+    Launch provenance proves what root admitted before exec; it is not a
+    perpetual approval.  Once root revokes that exact approval record, a
+    still-running AI workload must become an autonomous enforcement target.
+    A same-named replacement approval cannot revive the old launch.
+    """
+    validate(provenance)
+    matches = []
+    for approval in approvals:
+        try:
+            bound_input_sha256 = [
+                item["sha256"] for item in approval["bound_inputs"]
+            ]
+            matches.append(
+                approval["name"] == provenance["approval_name"]
+                and approval["created_monotonic_ns"]
+                == provenance["approval_created_monotonic_ns"]
+                and approval["argv_count"] == provenance["argv_count"]
+                and approval["argv_sha256"] == provenance["argv_sha256"]
+                and bound_input_sha256 == provenance["bound_input_sha256"]
+                and approval["executable"] == provenance["executable"]
+                and approval["executable_device"]
+                == provenance["executable_device"]
+                and approval["executable_inode"]
+                == provenance["executable_inode"]
+                and approval["executable_sha256"]
+                == provenance["executable_sha256"]
+                and approval["launch_kind"] == provenance["launch_kind"]
+                and approval["uid"] == provenance["uid"]
+            )
+        except (KeyError, TypeError):
+            return False
+    return matches.count(True) == 1
+
+
 def authorizes(
     snapshot: ProcessSnapshot,
     executable_sha256: str,

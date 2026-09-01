@@ -33,6 +33,14 @@ def call(operator: str, args: list[str], *, check: bool = True) -> dict[str, Any
     return json.loads(result.stdout)
 
 
+def root_call(args: list[str], *, check: bool = True) -> dict[str, Any]:
+    """Call the administrative CLI directly from this root-only qualification."""
+    result = run([CLI, *args], check=check)
+    if not result.stdout.strip():
+        return {}
+    return json.loads(result.stdout)
+
+
 def alive(process: subprocess.Popen[bytes]) -> bool:
     return process.poll() is None
 
@@ -106,13 +114,19 @@ def main() -> int:
     results: dict[str, Any] = {"fork_race": [], "benign": [], "pid_tripwire": [], "restart": [], "socket": {}, "result": "FAIL"}
     latencies: list[float] = []
     canaries = 0
+    hostile_policy_id: str | None = None
     fixture_workspace: tempfile.TemporaryDirectory[str] | None = None
     try:
+        # Keep qualification assets in the shared runtime mount; workload
+        # units deliberately receive an isolated private temporary directory.
         fixture_workspace = tempfile.TemporaryDirectory(
-            prefix="lumi-native-fixtures-", dir="/tmp"
+            prefix="lumi-native-fixtures-", dir="/run/lumi-eggcracker"
         )
         fixture_root = Path(fixture_workspace.name)
         os.chmod(fixture_root, 0o755)
+        result_root = fixture_root / "results"
+        result_root.mkdir()
+        os.chmod(result_root, 0o733)
         fixtures: dict[str, Path] = {}
         for filename in (
             "benign_near_limit.py",
@@ -129,13 +143,16 @@ def main() -> int:
             raise RuntimeError("workload identity accessed supervisor client")
         if call(operator, ["doctor"]).get("result") != "PASS":
             raise RuntimeError("operator supervisor authentication failed")
-        modes = ("fork", "session", "replace", "fork")
+        modes = ("bounded", "bounded-session", "bounded-replace", "bounded")
         for index in range(args.fork_race_repetitions):
             canary = subprocess.Popen(["/usr/sbin/runuser", "-u", workload, "--", "/usr/bin/python3", str(fixtures["canary.py"])], start_new_session=True)
             try:
                 name = f"race-{token}-{index}"
                 start_workload(operator, ["start", "--name", name, "--max-pids", "4096", "--", "/usr/bin/python3", str(fixtures["fork_race.py"]), modes[index % len(modes)]])
-                time.sleep(0.12)
+                # The fixture is intentionally fork-heavy; issue the operator
+                # kill immediately after gated launch so it does not race its
+                # own PID-limit tripwire.
+                time.sleep(0.01)
                 receipt_path = Path("/tmp") / f"lumi-eggcracker-receipt-{token}-{index}.json"
                 receipt = call(operator, ["kill", "--name", name, "--receipt", str(receipt_path)])
                 if receipt.get("result") != "TERMINATED" or receipt["trigger"]["kind"] != "OPERATOR" or receipt["containment"]["surviving_pids"]:
@@ -165,9 +182,42 @@ def main() -> int:
             if state.get("state") != "COMPLETED_ALLOWED":
                 raise RuntimeError("benign near-limit workload was not allowed")
             results["benign"].append(state["state"])
-        hostile_path = Path("/tmp") / f"lumi-eggcracker-hostile-{token}.json"
+        hostile_path = result_root / f"lumi-eggcracker-hostile-{token}.json"
         hostile = f"hostile-{token}"
-        start_workload(operator, ["start", "--name", hostile, "--max-pids", "8", "--", "/usr/bin/python3", str(fixtures["hostile_client.py"]), str(hostile_path), str(args.socket_attempts)])
+        # The hostile fixture must be able to invoke the public client in
+        # order to test the three control sockets.  That client executable is
+        # explicitly included in this test-only root policy; the attempted
+        # replacement still has to pass supervisor authentication and is
+        # expected to fail.
+        hostile_policy = root_call(
+            [
+                "exec-policy",
+                "create",
+                "--name",
+                f"native-hostile-{token}",
+                "--",
+                "/usr/bin/python3",
+                CLI,
+            ]
+        )
+        hostile_policy_id = str(hostile_policy["exec_policy"]["policy_id"])
+        start_workload(
+            operator,
+            [
+                "start",
+                "--name",
+                hostile,
+                "--exec-policy",
+                hostile_policy_id,
+                "--max-pids",
+                "8",
+                "--",
+                "/usr/bin/python3",
+                str(fixtures["hostile_client.py"]),
+                str(hostile_path),
+                str(args.socket_attempts),
+            ],
+        )
         wait_state(operator, hostile, "COMPLETED_ALLOWED", timeout=30)
         hostile_result = json.loads(hostile_path.read_text(encoding="utf-8"))
         hostile_path.unlink(missing_ok=True)
@@ -220,6 +270,8 @@ def main() -> int:
                 run(["/usr/bin/systemctl", "stop", line.split()[0]], check=False)
         if fixture_workspace is not None:
             fixture_workspace.cleanup()
+        if hostile_policy_id is not None:
+            root_call(["exec-policy", "revoke", "--policy-id", hostile_policy_id], check=False)
 
 
 if __name__ == "__main__":

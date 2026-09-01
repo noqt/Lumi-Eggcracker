@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from lumi_eggcracker import incidents
 from lumi_eggcracker.artifacts import ArtifactEvidence
 from lumi_eggcracker.containment import EmptyProof
 from lumi_eggcracker.detectors import load_bundled, match
@@ -23,8 +24,10 @@ from lumi_eggcracker.elfmarkers import (
 from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
 from lumi_eggcracker.supervisor import (
+    MAX_FRAME,
     QUERY_SOCKET,
     Supervisor,
+    _bounded_query_items,
     _EvidenceCandidate,
     _receive,
 )
@@ -32,13 +35,21 @@ from lumi_eggcracker.supervisor import (
 
 def record() -> dict[str, object]:
     run_id = "a" * 24
-    return {**command_summary(["/bin/true"]), "boot_id": "b" * 36, "cgroup": f"/system.slice/lumi-eggcracker-workload-{run_id}.service", "cgroup_device": 1, "cgroup_inode": 2, "cpu_quota_percent": 400, "created_monotonic_ns": 3, "max_memory_mib": 2048, "max_pids": 8, "name": "demo", "operator_uid": 1001, "run_id": run_id, "schema_version": RUN_SCHEMA, "state": "RUNNING", "unit": f"lumi-eggcracker-workload-{run_id}.service", "workload_gid": 2001, "workload_uid": 2001}
+    return {**command_summary(["/bin/true"]), "boot_id": "b" * 36, "boundary": None, "cgroup": f"/system.slice/lumi-eggcracker-workload-{run_id}.service", "cgroup_device": 1, "cgroup_inode": 2, "cpu_quota_percent": 400, "created_monotonic_ns": 3, "max_memory_mib": 2048, "max_pids": 8, "name": "demo", "network_mode": "none", "operator_uid": 1001, "run_id": run_id, "schema_version": RUN_SCHEMA, "state": "RUNNING", "unit": f"lumi-eggcracker-workload-{run_id}.service", "workload_gid": 2001, "workload_uid": 2001}
 
 
 class SupervisorTests(unittest.TestCase):
     def _instance(self) -> Supervisor:
         value = object.__new__(Supervisor)
-        value.policy = {"source_commit": "c" * 40, "workload_uid": 2001}
+        value.policy = {
+            "network_mode": "offline",
+            "operator_gid": 1001,
+            "operator_uid": 1001,
+            "source_commit": "c" * 40,
+            "workload_gid": 2001,
+            "workload_uid": 2001,
+        }
+        value.installation_epoch = "e" * 64
         value.runs = Path(".")
         value.names = Path(".")
         value.receipts = Path(".")
@@ -49,10 +60,97 @@ class SupervisorTests(unittest.TestCase):
         value.operations = []
         value.discovery_active = set()
         value.discovery_done = {}
+        value.discovery_containing_cgroups = set()
+        value.owned_containment_cgroups = set()
         value.discovery_lock = threading.Lock()
         value.content_scan_tick = 0
         value.receipt_persistence_healthy = True
         return value
+
+    def test_live_workload_identity_requires_distinct_exact_uid_gid(self) -> None:
+        supervisor = self._instance()
+        supervisor.policy.update(
+            {
+                "operator_gid": 1000,
+                "operator_uid": 1000,
+                "workload_gid": 988,
+                "workload_uid": 999,
+            }
+        )
+        account = MagicMock(
+            pw_dir="/nonexistent",
+            pw_gid=988,
+            pw_name="lumi-eggcracker-workload",
+            pw_shell="/usr/sbin/nologin",
+            pw_uid=999,
+        )
+        group = MagicMock(gr_name="lumi-eggcracker-workload")
+        with (
+            patch("lumi_eggcracker.supervisor.pwd.getpwnam", return_value=account),
+            patch("lumi_eggcracker.supervisor.grp.getgrgid", return_value=group),
+            patch("lumi_eggcracker.supervisor.os.getgrouplist", return_value=[988]),
+        ):
+            self.assertTrue(supervisor._workload_identity_status()["healthy"])
+            supervisor.policy["workload_gid"] = 999
+            self.assertFalse(supervisor._workload_identity_status()["healthy"])
+
+    def test_gated_process_credentials_reject_foreign_supplementary_group(self) -> None:
+        supervisor = self._instance()
+        supervisor.policy.update({"workload_gid": 988, "workload_uid": 999})
+        process = ProcessIdentity(42, 100)
+        exact = "Uid:\t999\t999\t999\t999\nGid:\t988\t988\t988\t988\nGroups:\t988\n"
+        with patch("lumi_eggcracker.supervisor.Path.read_text", return_value=exact):
+            supervisor._validate_gated_credentials(process)
+        contaminated = exact.replace("Groups:\t988", "Groups:\t988 999")
+        with patch(
+            "lumi_eggcracker.supervisor.Path.read_text",
+            return_value=contaminated,
+        ), self.assertRaisesRegex(JsonInputError, "do not match policy"):
+            supervisor._validate_gated_credentials(process)
+
+    def test_required_approval_rejects_before_launch_side_effects(self) -> None:
+        supervisor = self._instance()
+        supervisor.approval_lock = threading.Lock()
+        supervisor.active_cgroups = set()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supervisor.approvals = root / "approvals"
+            supervisor.approvals.mkdir()
+            supervisor.names = root / "names"
+            supervisor.names.mkdir()
+            with (
+                patch.object(supervisor, "_require_workload_identity"),
+                patch.object(
+                    supervisor,
+                    "_incident_status",
+                    return_value={"healthy": True},
+                ),
+                patch.object(
+                    supervisor,
+                    "_incident_block_for_start",
+                    return_value=None,
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.match_launch",
+                    side_effect=JsonInputError("approval not found"),
+                ),
+                patch("lumi_eggcracker.supervisor.OfflineBoundary.create") as boundary,
+                self.assertRaisesRegex(
+                    JsonInputError,
+                    "^protected launch is not approved$",
+                ),
+            ):
+                supervisor._start(
+                    {
+                        "argv": ["/bin/true"],
+                        "cpu_quota_percent": 400,
+                        "max_memory_mib": 2048,
+                        "max_pids": 8,
+                        "name": "demo",
+                        "require_approval": True,
+                    }
+                )
+            boundary.assert_not_called()
 
     def test_oversized_valid_json_integer_is_rejected_without_escaping(self) -> None:
         server, client = socket.socketpair()
@@ -85,6 +183,39 @@ class SupervisorTests(unittest.TestCase):
             connection, {"ok": False, "value": "bounded validation failure"}
         )
 
+    def test_query_history_is_truncated_before_wire_frame_limit(self) -> None:
+        values = [
+            {
+                "detector": {
+                    "profile": "content.safetensors-pytorch",
+                    "evidence": ["e" * 128, "f" * 128, "g" * 128],
+                },
+                "event_id": f"{index:024x}",
+                "result": "TERMINATED",
+                "trigger": {
+                    "kind": "UNAPPROVED_AI_MATCH",
+                    "observed_monotonic_ns": index,
+                },
+                "version": "1.0.0",
+            }
+            for index in range(130)
+        ]
+
+        response = _bounded_query_items("detections", values, maximum=100)
+        payload = json.dumps(
+            {"ok": True, "value": response},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        self.assertLessEqual(len(payload), MAX_FRAME)
+        self.assertGreater(len(response["detections"]), 0)
+        self.assertLess(len(response["detections"]), 100)
+        self.assertEqual(
+            values[: len(response["detections"])],
+            response["detections"],
+        )
+
     def test_recently_contained_identity_is_not_reenforced(self) -> None:
         supervisor = self._instance()
         identity = object()
@@ -108,6 +239,247 @@ class SupervisorTests(unittest.TestCase):
         )
         self.assertTrue(supervisor._managed(snapshot))
         self.assertFalse(supervisor._discovery_excluded(snapshot))
+
+    def test_topology_closure_requires_live_exact_anchor_in_detection_scope(self) -> None:
+        supervisor = self._instance()
+        cgroup = "/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service"
+        supervisor.active_cgroups = {cgroup}
+        anchor = ProcessSnapshot(
+            ProcessIdentity(10, 100),
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + cgroup,),
+            (),
+            (),
+        )
+        child = ProcessSnapshot(
+            ProcessIdentity(11, 101),
+            2001,
+            "/usr/bin/python3",
+            "python3",
+            ("python3",),
+            ("0::" + cgroup,),
+            (),
+            (),
+        )
+        provenance = {"cgroup": cgroup, "pid": 10, "start_time": 100}
+        anchor_candidate = _EvidenceCandidate(anchor, (), (), 1)
+        child_candidate = _EvidenceCandidate(child, (), (), 1)
+
+        with (
+            patch.object(
+                supervisor, "_cached_executable_digest", return_value="a" * 64
+            ),
+            patch("lumi_eggcracker.supervisor.launch_authorizes", return_value=True),
+        ):
+            self.assertFalse(
+                supervisor._authorizes_protected_scope(
+                    child,
+                    provenance,
+                    profile="content.gguf-llama",
+                    scope=(anchor_candidate, child_candidate),
+                    independently_complete=False,
+                )
+            )
+            self.assertTrue(
+                supervisor._authorizes_protected_scope(
+                    child,
+                    provenance,
+                    profile="content.gguf-ollama",
+                    scope=(anchor_candidate, child_candidate),
+                    independently_complete=False,
+                )
+            )
+            self.assertFalse(
+                supervisor._authorizes_protected_scope(
+                    child,
+                    provenance,
+                    profile="content.gguf-ollama",
+                    scope=(child_candidate,),
+                    independently_complete=False,
+                )
+            )
+            self.assertFalse(
+                supervisor._authorizes_protected_scope(
+                    child,
+                    provenance,
+                    profile="content.gguf-ollama",
+                    scope=(anchor_candidate, child_candidate),
+                    independently_complete=True,
+                )
+            )
+
+    def test_incident_sweep_runs_after_response_lock_release(self) -> None:
+        supervisor = self._instance()
+        supervisor.incidents = Path(".")
+        supervisor.incident_response_lock = threading.Lock()
+        supervisor.catalogue = load_bundled()
+        receipt = {
+            "event_id": "e" * 24,
+            "result": "TERMINATED",
+            "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+        }
+        incident = {"incident_id": "i" * 24, "response": {}}
+
+        def sweep(_incident_id: str) -> None:
+            acquired = supervisor.incident_response_lock.acquire(timeout=0.1)
+            self.assertTrue(acquired)
+            if acquired:
+                supervisor.incident_response_lock.release()
+
+        with (
+            patch.object(
+                supervisor,
+                "_incident_match",
+                return_value={
+                    "argv_sha256": "a" * 64,
+                    "uid": 2001,
+                    "executable_sha256": "b" * 64,
+                    "profile": "content.gguf-llama",
+                },
+            ),
+            patch.object(supervisor, "_incident_values", return_value=[]),
+            patch.object(supervisor, "_incident_workload", return_value={}),
+            patch.object(supervisor, "_revoke_exact_approval", return_value=True),
+            patch.object(supervisor, "_incident_sweep", side_effect=sweep),
+            patch("lumi_eggcracker.supervisor.incident_store.find_match", return_value=None),
+            patch(
+                "lumi_eggcracker.supervisor.incident_store.create",
+                return_value=incident,
+            ),
+            patch(
+                "lumi_eggcracker.supervisor.incident_store.update",
+                return_value=incident,
+            ),
+        ):
+            supervisor._post_containment_response(receipt)
+
+    def test_incident_sweep_reentry_returns_without_lock_deadlock(self) -> None:
+        supervisor = self._instance()
+        supervisor.incident_sweep_lock = threading.Lock()
+        supervisor.incident_sweep_active = True
+        started = time.monotonic()
+        supervisor._incident_sweep("i" * 24)
+        self.assertLess(time.monotonic() - started, 0.1)
+
+    def test_incident_cache_avoids_revalidating_unchanged_records(self) -> None:
+        supervisor = self._instance()
+        supervisor.incident_health_healthy = True
+        supervisor.incident_response_lock = threading.RLock()
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor.incidents = Path(temporary)
+            with patch(
+                "lumi_eggcracker.supervisor.incident_store.compact",
+                wraps=incidents.compact,
+            ) as compact:
+                self.assertEqual([], supervisor._incident_values())
+                self.assertEqual([], supervisor._incident_values())
+            self.assertEqual(1, compact.call_count)
+
+    def test_incident_cache_adopts_atomic_write_without_full_reload(self) -> None:
+        supervisor = self._instance()
+        supervisor.incident_health_healthy = True
+        supervisor.incident_response_lock = threading.RLock()
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor.incidents = Path(temporary)
+            original = incidents.create(
+                supervisor.incidents,
+                receipt={
+                    "event_id": "a" * 24,
+                    "observed": {"argv_sha256": "b" * 64, "uid": 2001},
+                    "executable": {"sha256": "c" * 64},
+                },
+                policy={"version": "1.0.0"},
+                catalogue_sha256="d" * 64,
+                source_commit="e" * 40,
+                version="1.0.0",
+                trigger="UNAPPROVED_AI_MATCH",
+                profile="content.gguf-llama",
+                evidence=["gguf-v3"],
+                match={
+                    "argv_sha256": "b" * 64,
+                    "executable_sha256": "c" * 64,
+                    "profile": "content.gguf-llama",
+                    "uid": 2001,
+                },
+                workload={
+                    "boot_id": "f" * 36,
+                    "cgroup": "/system.slice/lumi-eggcracker-workload-"
+                    + "a" * 24
+                    + ".service",
+                    "cgroup_device": 1,
+                    "cgroup_inode": 2,
+                    "run_id": "a" * 24,
+                    "unit": "lumi-eggcracker-workload-" + "a" * 24 + ".service",
+                    "uid": 2001,
+                },
+                approval=None,
+            )
+            supervisor._incident_values()
+            updated = incidents.update(
+                supervisor.incidents,
+                original,
+                acknowledgement={"monotonic_ns": 1, "uid": 0},
+                state="ACKNOWLEDGED",
+            )
+            supervisor._cache_incident_write(updated)
+            with patch(
+                "lumi_eggcracker.supervisor.incident_store.compact",
+                side_effect=AssertionError("unchanged store was reparsed"),
+            ):
+                self.assertEqual(
+                    "ACKNOWLEDGED", supervisor._incident_values()[0]["state"]
+                )
+
+    def test_incident_cache_revalidates_and_rejects_in_place_tamper(self) -> None:
+        supervisor = self._instance()
+        supervisor.incident_health_healthy = True
+        supervisor.incident_response_lock = threading.RLock()
+        with tempfile.TemporaryDirectory() as temporary:
+            supervisor.incidents = Path(temporary)
+            value = incidents.create(
+                supervisor.incidents,
+                receipt={
+                    "event_id": "a" * 24,
+                    "observed": {"argv_sha256": "b" * 64, "uid": 2001},
+                    "executable": {"sha256": "c" * 64},
+                },
+                policy={"version": "1.0.0"},
+                catalogue_sha256="d" * 64,
+                source_commit="e" * 40,
+                version="1.0.0",
+                trigger="UNAPPROVED_AI_MATCH",
+                profile="content.gguf-llama",
+                evidence=["gguf-v3"],
+                match={
+                    "argv_sha256": "b" * 64,
+                    "executable_sha256": "c" * 64,
+                    "profile": "content.gguf-llama",
+                    "uid": 2001,
+                },
+                workload={
+                    "boot_id": "f" * 36,
+                    "cgroup": "/system.slice/lumi-eggcracker-workload-"
+                    + "a" * 24
+                    + ".service",
+                    "cgroup_device": 1,
+                    "cgroup_inode": 2,
+                    "run_id": "a" * 24,
+                    "unit": "lumi-eggcracker-workload-" + "a" * 24 + ".service",
+                    "uid": 2001,
+                },
+                approval=None,
+            )
+            supervisor._incident_values()
+            path = supervisor.incidents / f"{value['incident_id']}.json"
+            tampered = json.loads(path.read_text(encoding="utf-8"))
+            tampered["state"] = "CLEARED"
+            path.write_text(json.dumps(tampered) + "\n", encoding="utf-8")
+            with self.assertRaises(JsonInputError):
+                supervisor._incident_values()
+            self.assertFalse(supervisor.incident_health_healthy)
 
     def test_group_refresh_replaces_preexec_gate_snapshot_without_losing_evidence(self) -> None:
         identity = ProcessIdentity(10, 100)
@@ -539,8 +911,40 @@ class SupervisorTests(unittest.TestCase):
             result = supervisor._contain(record(), "OPERATOR", 10)
         self.assertEqual("TERMINATED", result["result"])
         self.assertEqual("cgroup.kill", supervisor.operations[0])
+        self.assertLess(
+            supervisor.operations.index("durable-state"),
+            supervisor.operations.index("durable-receipt"),
+        )
         self.assertLess(supervisor.operations.index("cgroup.kill"), supervisor.operations.index("durable-receipt"))
         self.assertLess(supervisor.operations.index("durable-receipt"), supervisor.operations.index("cleanup"))
+
+    def test_owned_containment_claim_covers_kill_and_empty_proof(self) -> None:
+        supervisor = self._instance()
+        item = record()
+
+        def kill_claimed(_path: Path) -> tuple[int, int]:
+            self.assertIn(item["cgroup"], supervisor.owned_containment_cgroups)
+            return 11, 12
+
+        def verify_claimed(_identity: object) -> tuple[int, EmptyProof]:
+            self.assertIn(item["cgroup"], supervisor.owned_containment_cgroups)
+            return 13, EmptyProof(True, 1, 0, [])
+
+        with (
+            patch("lumi_eggcracker.supervisor.validate_identity", return_value=Path("/owned")),
+            patch("lumi_eggcracker.supervisor.kill_path", side_effect=kill_claimed),
+            patch("lumi_eggcracker.supervisor.verify_empty", side_effect=verify_claimed),
+            patch.object(supervisor, "_cleanup", return_value={}),
+            patch(
+                "lumi_eggcracker.supervisor.make_receipt",
+                return_value={"result": "TERMINATED"},
+            ),
+            patch("lumi_eggcracker.supervisor.write_atomic"),
+            patch.object(supervisor, "_store"),
+        ):
+            supervisor._contain(item, "OPERATOR", 10)
+
+        self.assertNotIn(item["cgroup"], supervisor.owned_containment_cgroups)
 
     def test_receipt_persistence_fault_is_terminal_but_never_reports_success(self) -> None:
         supervisor = self._instance()
@@ -573,7 +977,7 @@ class SupervisorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             supervisor.runs = Path(raw)
             (supervisor.runs / ("a" * 24 + ".json")).write_text(__import__("json").dumps(item), encoding="utf-8")
-            with patch.object(supervisor, "_contain", side_effect=JsonInputError("containment failed: owned cgroup is unavailable")), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(1, EmptyProof(True, 0, 0, []))), patch.object(supervisor, "_mark_completed") as completed:
+            with patch("lumi_eggcracker.supervisor.boot_id", return_value="b" * 36), patch.object(supervisor, "_contain", side_effect=JsonInputError("containment failed: owned cgroup is unavailable")), patch("lumi_eggcracker.supervisor.verify_empty", return_value=(1, EmptyProof(True, 0, 0, []))), patch.object(supervisor, "_mark_completed") as completed:
                 supervisor._recover()
         completed.assert_called_once_with(item)
 
@@ -590,13 +994,123 @@ class SupervisorTests(unittest.TestCase):
             (supervisor.runs / ("a" * 24 + ".json")).write_text(
                 __import__("json").dumps(item), encoding="utf-8"
             )
-            with patch.object(supervisor, "_contain", side_effect=fail_containment), patch(
+            with patch("lumi_eggcracker.supervisor.boot_id", return_value="b" * 36), patch.object(supervisor, "_contain", side_effect=fail_containment), patch(
                 "lumi_eggcracker.supervisor.verify_empty",
                 return_value=(1, EmptyProof(True, 0, 0, [])),
             ), patch.object(supervisor, "_mark_completed") as completed:
                 supervisor._recover()
         self.assertEqual("RUNNING", item["state"])
         completed.assert_called_once_with(item)
+
+    def test_recovered_empty_transition_is_durable_and_terminal(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        item["state"] = "CONTAINMENT_FAILED"
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            supervisor.runs.mkdir()
+            supervisor.names.mkdir()
+            with patch.object(supervisor, "_teardown_terminal_boundary"):
+                supervisor._complete_recovered_empty(item)
+            stored = load_run(supervisor.runs, "a" * 24)
+        self.assertEqual("COMPLETED_ALLOWED", stored["state"])
+        self.assertNotIn(stored["cgroup"], supervisor.active_cgroups)
+
+    def test_recovery_reconciles_absent_prior_boot_workload(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(
+                json.dumps(item), encoding="utf-8"
+            )
+            with (
+                patch("lumi_eggcracker.supervisor.boot_id", return_value="c" * 36),
+                patch.object(
+                    supervisor, "_record_cgroup_present", return_value=False
+                ),
+                patch.object(supervisor, "_complete_recovered_empty") as completed,
+                patch.object(supervisor, "_contain") as contain,
+            ):
+                supervisor._recover()
+        completed.assert_called_once_with(item)
+        contain.assert_not_called()
+
+    def test_recovery_rejects_prior_boot_cgroup_name_collision(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(
+                json.dumps(item), encoding="utf-8"
+            )
+            with (
+                patch("lumi_eggcracker.supervisor.boot_id", return_value="c" * 36),
+                patch.object(
+                    supervisor, "_record_cgroup_present", return_value=True
+                ),
+                self.assertRaisesRegex(JsonInputError, "prior-boot workload"),
+            ):
+                supervisor._recover()
+
+    def test_recovery_does_not_erase_receipt_persistence_failure(self) -> None:
+        supervisor = self._instance()
+        item = record()
+
+        def fail_receipt(value: dict[str, object], _trigger: str) -> None:
+            value["state"] = "CONTAINED_RECEIPT_FAILED"
+            raise JsonInputError("contained but receipt persistence failed")
+
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(
+                json.dumps(item), encoding="utf-8"
+            )
+            with (
+                patch("lumi_eggcracker.supervisor.boot_id", return_value="b" * 36),
+                patch.object(supervisor, "_contain", side_effect=fail_receipt),
+                patch("lumi_eggcracker.supervisor.verify_empty") as empty,
+                self.assertRaisesRegex(JsonInputError, "receipt persistence"),
+            ):
+                supervisor._recover()
+        empty.assert_not_called()
+
+    def test_recovery_reclaims_exact_terminal_offline_boundary(self) -> None:
+        supervisor = self._instance()
+        supervisor.boundary_cleanup_healthy = True
+        item = record()
+        item["state"] = "TERMINATED"
+        item["boundary"] = {"recorded": True}
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [Path("a" * 24 + ".json")]
+        with (
+            patch("lumi_eggcracker.supervisor.load_run", return_value=item),
+            patch.object(supervisor, "_teardown_boundary") as teardown,
+        ):
+            supervisor._recover()
+        teardown.assert_called_once_with(item)
+        self.assertTrue(supervisor.boundary_cleanup_healthy)
+
+    def test_recovery_reports_terminal_boundary_identity_cleanup_failure(self) -> None:
+        supervisor = self._instance()
+        supervisor.boundary_cleanup_healthy = True
+        item = record()
+        item["state"] = "CONTAINED_RECEIPT_FAILED"
+        item["boundary"] = {"recorded": True}
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [Path("a" * 24 + ".json")]
+        with (
+            patch("lumi_eggcracker.supervisor.load_run", return_value=item),
+            patch.object(
+                supervisor,
+                "_teardown_boundary",
+                side_effect=JsonInputError("boundary identity drifted"),
+            ),
+        ):
+            supervisor._recover()
+        self.assertFalse(supervisor.boundary_cleanup_healthy)
 
     def test_status_is_read_only(self) -> None:
         supervisor = self._instance()
@@ -606,7 +1120,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual("RUNNING", value["state"])
         stored.assert_not_called()
 
-    def test_status_resolves_the_latest_terminal_run_after_name_reuse_is_enabled(self) -> None:
+    def test_status_resolves_retained_terminal_history(self) -> None:
         supervisor = self._instance()
         item = record()
         item["state"] = "COMPLETED_ALLOWED"
@@ -615,7 +1129,7 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual("COMPLETED_ALLOWED", value["state"])
         stored.assert_not_called()
 
-    def test_run_records_are_keyed_by_run_id_and_name_pointer_is_removed_when_terminal(self) -> None:
+    def test_terminal_run_keeps_name_tombstone(self) -> None:
         supervisor = self._instance()
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -627,7 +1141,201 @@ class SupervisorTests(unittest.TestCase):
             self.assertTrue((supervisor.names / "demo.json").is_file())
             item["state"] = "TERMINATED"
             supervisor._store(item)
-            self.assertFalse((supervisor.names / "demo.json").exists())
+            self.assertEqual(
+                {"run_id": "a" * 24},
+                __import__("json").loads(
+                    (supervisor.names / "demo.json").read_text(encoding="utf-8")
+                ),
+            )
+
+    def test_terminal_name_tombstone_is_not_listed_as_active(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            item = record()
+            supervisor._store(item)
+            item["state"] = "TERMINATED"
+            supervisor._store(item)
+            self.assertEqual({"runs": []}, supervisor.handle({"action": "list", "args": {}}))
+
+    def test_backfill_reserves_names_from_legacy_terminal_records(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            supervisor.runs.mkdir()
+            supervisor.names.mkdir()
+            item = record()
+            item["state"] = "TERMINATED"
+            (supervisor.runs / ("a" * 24 + ".json")).write_text(
+                __import__("json").dumps(item), encoding="utf-8"
+            )
+            supervisor._backfill_name_tombstones()
+            self.assertTrue((supervisor.names / "demo.json").is_file())
+
+    def test_store_rejects_a_second_run_using_a_reserved_name(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            first = record()
+            supervisor._store(first)
+            first["state"] = "TERMINATED"
+            supervisor._store(first)
+            replacement_id = "c" * 24
+            replacement = {
+                **record(),
+                "cgroup": f"/system.slice/lumi-eggcracker-workload-{replacement_id}.service",
+                "run_id": replacement_id,
+                "unit": f"lumi-eggcracker-workload-{replacement_id}.service",
+            }
+            with self.assertRaisesRegex(JsonInputError, "name index collision"):
+                supervisor._store(replacement)
+            self.assertFalse((supervisor.runs / ("c" * 24 + ".json")).exists())
+
+    def test_terminal_pruning_never_removes_the_record_just_persisted(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            historical = {
+                **record(),
+                "cgroup": "/system.slice/lumi-eggcracker-workload-"
+                + "b" * 24
+                + ".service",
+                "created_monotonic_ns": 10_000,
+                "name": "historical",
+                "run_id": "b" * 24,
+                "state": "TERMINATED",
+                "unit": "lumi-eggcracker-workload-" + "b" * 24 + ".service",
+            }
+            current = {
+                **record(),
+                "created_monotonic_ns": 1,
+                "state": "TERMINATED",
+            }
+            with patch("lumi_eggcracker.supervisor.MAX_TERMINAL_RECORDS", 1):
+                supervisor._store(historical)
+                supervisor._store(current)
+
+            self.assertTrue((supervisor.runs / ("a" * 24 + ".json")).is_file())
+            self.assertFalse((supervisor.runs / ("b" * 24 + ".json")).exists())
+
+    def test_terminal_pruning_retains_boundary_cleanup_authority(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            pending_path = supervisor.runs / ("a" * 24 + ".json")
+            clean_path = supervisor.runs / ("b" * 24 + ".json")
+            pending_path.write_text("{}", encoding="utf-8")
+            clean_path.write_text("{}", encoding="utf-8")
+            pending = {
+                **record(),
+                "boundary": {"recorded": True},
+                "created_monotonic_ns": 1,
+                "state": "TERMINATED",
+            }
+            clean = {
+                **record(),
+                "created_monotonic_ns": 2,
+                "run_id": "b" * 24,
+                "state": "TERMINATED",
+            }
+            boundary = MagicMock()
+            boundary.namespace_mounts_present.return_value = True
+
+            with (
+                patch("lumi_eggcracker.supervisor.MAX_TERMINAL_RECORDS", 0),
+                patch(
+                    "lumi_eggcracker.supervisor.load_run",
+                    side_effect=lambda _root, run_id: (
+                        pending if run_id == "a" * 24 else clean
+                    ),
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.OfflineBoundary.from_record",
+                    return_value=boundary,
+                ),
+            ):
+                supervisor._prune_terminal_records()
+
+            self.assertTrue(pending_path.is_file())
+            self.assertFalse(clean_path.exists())
+
+    def test_terminal_boundary_teardown_retries_pruning_after_identity_release(
+        self,
+    ) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            supervisor.runs = Path(raw)
+            current_path = supervisor.runs / ("a" * 24 + ".json")
+            historical_path = supervisor.runs / ("b" * 24 + ".json")
+            current_path.write_text("{}", encoding="utf-8")
+            historical_path.write_text("{}", encoding="utf-8")
+            current = {
+                **record(),
+                "boundary": {"recorded": True},
+                "created_monotonic_ns": 1,
+                "state": "TERMINATED",
+            }
+            historical = {
+                **record(),
+                "boundary": {"recorded": True},
+                "created_monotonic_ns": 10_000,
+                "name": "historical",
+                "run_id": "b" * 24,
+                "state": "TERMINATED",
+                "unit": "lumi-eggcracker-workload-" + "b" * 24 + ".service",
+            }
+            boundary = MagicMock()
+            boundary.namespace_mounts_present.return_value = False
+
+            with (
+                patch("lumi_eggcracker.supervisor.MAX_TERMINAL_RECORDS", 1),
+                patch.object(
+                    supervisor,
+                    "_teardown_boundary",
+                    return_value={"removed": True},
+                ) as teardown,
+                patch(
+                    "lumi_eggcracker.supervisor.load_run",
+                    side_effect=lambda _root, run_id: (
+                        current if run_id == "a" * 24 else historical
+                    ),
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.OfflineBoundary.from_record",
+                    return_value=boundary,
+                ),
+            ):
+                result = supervisor._teardown_terminal_boundary(current)
+
+            self.assertEqual({"removed": True}, result)
+            teardown.assert_called_once_with(current)
+            self.assertTrue(current_path.is_file())
+            self.assertFalse(historical_path.exists())
+
+    def test_terminal_boundary_teardown_does_not_prune_after_cleanup_failure(
+        self,
+    ) -> None:
+        supervisor = self._instance()
+        item = {**record(), "boundary": {"recorded": True}, "state": "TERMINATED"}
+        with (
+            patch.object(
+                supervisor,
+                "_teardown_boundary",
+                side_effect=JsonInputError("boundary identity drifted"),
+            ),
+            patch.object(supervisor, "_prune_terminal_records") as prune,
+            self.assertRaisesRegex(JsonInputError, "identity drifted"),
+        ):
+            supervisor._teardown_terminal_boundary(item)
+        prune.assert_not_called()
 
     def test_autonomous_kill_terminal_state_wins_completion_race(self) -> None:
         supervisor = self._instance()
@@ -638,13 +1346,363 @@ class SupervisorTests(unittest.TestCase):
             item = record()
             supervisor._store(item)
             stale_watcher_record = item.copy()
-            supervisor._mark_discovered_runs_terminated({str(item["cgroup"])})
+            terminated = supervisor._mark_discovered_runs_terminated(
+                {str(item["cgroup"])}
+            )
+            self.assertEqual(1, len(terminated))
+            self.assertEqual(item["run_id"], terminated[0]["run_id"])
+            self.assertEqual("TERMINATED", terminated[0]["state"])
             self.assertEqual(
                 "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
             )
             self.assertFalse(supervisor._mark_completed(stale_watcher_record))
             self.assertEqual(
                 "TERMINATED", load_run(supervisor.runs, str(item["run_id"]))["state"]
+            )
+
+    def test_live_admitted_pid_outside_empty_cgroup_cannot_complete_allowed(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            supervisor.launches = root / "launches"
+            item = record()
+            supervisor._store(item)
+            provenance = {
+                "cgroup": item["cgroup"],
+                "pid": 42,
+                "run_id": item["run_id"],
+                "start_time": 100,
+            }
+            with (
+                patch(
+                    "lumi_eggcracker.supervisor.load_launch_provenance",
+                    return_value=[provenance],
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.process_identity",
+                    return_value=ProcessIdentity(42, 100),
+                ),
+            ):
+                self.assertFalse(supervisor._mark_completed(item.copy()))
+            self.assertEqual(
+                "RUNNING", load_run(supervisor.runs, str(item["run_id"]))["state"]
+            )
+
+    def test_discovery_attributes_moved_exact_launch_identity_to_owned_run(self) -> None:
+        supervisor = self._instance()
+        supervisor.launches = Path("launches")
+        item = record()
+        snapshot = MagicMock(
+            identity=ProcessIdentity(42, 100),
+            cgroups=("0::/r2-43-escape",),
+        )
+        provenance = {
+            "cgroup": item["cgroup"],
+            "pid": 42,
+            "run_id": item["run_id"],
+            "start_time": 100,
+        }
+        with patch(
+            "lumi_eggcracker.supervisor.load_launch_provenance",
+            return_value=[provenance],
+        ):
+            self.assertEqual(
+                {item["cgroup"]}, supervisor._discovered_run_cgroups(snapshot, ())
+            )
+
+    def test_affected_approval_is_captured_from_the_exact_owned_run(self) -> None:
+        supervisor = self._instance()
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            supervisor.launches = root / "launches"
+            item = record()
+            supervisor._store(item)
+            approval = {"name": "exact-approval"}
+            with patch.object(
+                supervisor, "_approval_identity", return_value=approval
+            ) as approval_identity:
+                self.assertIs(
+                    approval,
+                    supervisor._approval_for_discovered_cgroups(
+                        {str(item["cgroup"])}
+                    ),
+                )
+            approval_identity.assert_called_once_with(item["run_id"])
+
+    def test_autonomous_kill_reclaims_owned_boundary_after_receipt_publish(self) -> None:
+        supervisor = self._instance()
+        supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
+        target = ProcessIdentity(42, 100)
+        snapshot = MagicMock(identity=target)
+        detected = MagicMock(profile="content.gguf-llama")
+        terminated_record = record()
+        terminated_record["state"] = "TERMINATED"
+        terminated_record["boundary"] = {"recorded": True}
+        order: list[str] = []
+
+        with (
+            patch.object(
+                supervisor,
+                "_discovered_run_cgroups",
+                return_value={str(terminated_record["cgroup"])},
+            ),
+            patch("lumi_eggcracker.supervisor.contain_many", return_value=MagicMock()),
+            patch.object(
+                supervisor,
+                "_detection_receipt",
+                return_value={
+                    "event_id": "e" * 24,
+                    "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+                },
+            ),
+            patch.object(
+                supervisor,
+                "_mark_discovered_runs_terminated",
+                return_value=(terminated_record,),
+            ),
+            patch.object(
+                supervisor,
+                "_store_detection",
+                side_effect=lambda _receipt: order.append("publish"),
+            ),
+            patch.object(
+                supervisor,
+                "_teardown_boundary",
+                side_effect=lambda _record: order.append("teardown"),
+            ) as teardown,
+            patch.object(supervisor, "_post_containment_response"),
+        ):
+            supervisor._enforce_discovery(
+                snapshot,
+                detected,
+                (),
+                (),
+                1,
+                2,
+                None,
+                "e" * 24,
+                targets={target},
+            )
+
+        self.assertEqual(["publish", "teardown"], order)
+        teardown.assert_called_once_with(terminated_record)
+
+    def test_autonomous_boundary_cleanup_failure_fails_health_not_kill(self) -> None:
+        supervisor = self._instance()
+        supervisor.boundary_cleanup_healthy = True
+        item = record()
+        item["state"] = "TERMINATED"
+        item["boundary"] = {"recorded": True}
+        with patch.object(
+            supervisor,
+            "_teardown_boundary",
+            side_effect=JsonInputError("boundary identity drifted"),
+        ):
+            supervisor._cleanup_discovered_run_boundaries((item,))
+        self.assertFalse(supervisor.boundary_cleanup_healthy)
+
+    def test_health_rejects_terminal_run_with_namespace_mounts(self) -> None:
+        supervisor = self._instance()
+        item = record()
+        item["state"] = "TERMINATED"
+        item["boundary"] = {"recorded": True}
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [Path("a" * 24 + ".json")]
+        boundary = MagicMock()
+        boundary.namespace_mounts_present.return_value = True
+        with (
+            patch("lumi_eggcracker.supervisor.load_run", return_value=item),
+            patch(
+                "lumi_eggcracker.supervisor.OfflineBoundary.from_record",
+                return_value=boundary,
+            ),
+        ):
+            self.assertFalse(supervisor._stored_boundary_cleanup_healthy())
+
+    def test_autonomous_kill_marks_owned_run_before_publishing_receipt(self) -> None:
+        supervisor = self._instance()
+        supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
+        target = ProcessIdentity(42, 100)
+        snapshot = MagicMock(identity=target)
+        detected = MagicMock(profile="content.gguf-llama")
+        containment = MagicMock()
+        order: list[str] = []
+        terminated_record = record()
+        terminated_record["state"] = "TERMINATED"
+        affected_approval = {
+            "argv_sha256": "a" * 64,
+            "bound_input_sha256": ["b" * 64],
+            "created_monotonic_ns": 1,
+            "executable_sha256": "c" * 64,
+            "name": "approved-run",
+            "uid": 2001,
+        }
+
+        def mark(cgroups: set[str]) -> tuple[dict[str, object], ...]:
+            order.append("mark")
+            self.assertEqual({str(terminated_record["cgroup"])}, cgroups)
+            return (terminated_record,)
+
+        with (
+            patch.object(
+                supervisor,
+                "_discovered_run_cgroups",
+                return_value={
+                    "/system.slice/lumi-eggcracker-workload-"
+                    + "a" * 24
+                    + ".service"
+                },
+            ),
+            patch(
+                "lumi_eggcracker.supervisor.contain_many",
+                side_effect=lambda *_args, **_kwargs: order.append("contain")
+                or containment,
+            ),
+            patch.object(
+                supervisor,
+                "_detection_receipt",
+                return_value={
+                    "event_id": "e" * 24,
+                    "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+                },
+            ),
+            patch.object(
+                supervisor,
+                "_approval_for_discovered_cgroups",
+                side_effect=lambda _cgroups: order.append("approval")
+                or affected_approval,
+            ),
+            patch.object(
+                supervisor,
+                "_mark_discovered_runs_terminated",
+                side_effect=mark,
+            ),
+            patch.object(
+                supervisor,
+                "_store_detection",
+                side_effect=lambda _receipt: order.append("publish"),
+            ),
+            patch.object(supervisor, "_post_containment_response") as respond,
+        ):
+            supervisor._enforce_discovery(
+                snapshot,
+                detected,
+                (),
+                (),
+                1,
+                2,
+                None,
+                "e" * 24,
+                targets={target},
+            )
+
+        self.assertEqual(["contain", "approval", "mark", "publish"], order)
+        response_receipt = respond.call_args.args[0]
+        self.assertEqual("e" * 24, response_receipt["event_id"])
+        self.assertIs(terminated_record, respond.call_args.kwargs["record"])
+        self.assertIs(affected_approval, respond.call_args.kwargs["approval"])
+
+    def test_owned_containment_claim_suppresses_redundant_autonomous_kill(self) -> None:
+        supervisor = self._instance()
+        supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
+        target = ProcessIdentity(42, 100)
+        snapshot = MagicMock(identity=target)
+        detected = MagicMock(profile="content.gguf-llama")
+        cgroup = "/system.slice/lumi-eggcracker-workload-" + "a" * 24 + ".service"
+        supervisor.owned_containment_cgroups.add(cgroup)
+        supervisor.discovery_active.add(target)
+
+        with (
+            patch.object(
+                supervisor,
+                "_discovered_run_cgroups",
+                return_value={cgroup},
+            ),
+            patch("lumi_eggcracker.supervisor.contain_many") as contain,
+            patch.object(supervisor, "_store_detection") as store_detection,
+        ):
+            supervisor._enforce_discovery(
+                snapshot,
+                detected,
+                (),
+                (),
+                1,
+                2,
+                None,
+                "e" * 24,
+                targets={target},
+            )
+
+        contain.assert_not_called()
+        store_detection.assert_not_called()
+        self.assertNotIn(target, supervisor.discovery_active)
+        self.assertIn(cgroup, supervisor.owned_containment_cgroups)
+
+    def test_autonomous_kill_barrier_blocks_transient_allowed_completion(self) -> None:
+        supervisor = self._instance()
+        supervisor.quarantine_root = Path("/sys/fs/cgroup/quarantine")
+        target = ProcessIdentity(42, 100)
+        snapshot = MagicMock(identity=target)
+        detected = MagicMock(profile="content.gguf-llama")
+        containment = MagicMock()
+        completion_results: list[bool] = []
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            supervisor.runs = root / "runs"
+            supervisor.names = root / "names"
+            item = record()
+            supervisor._store(item)
+
+            def contain_while_watcher_observes_empty(*_args: object, **_kwargs: object) -> object:
+                completion_results.append(supervisor._mark_completed(item.copy()))
+                self.assertEqual(
+                    "RUNNING",
+                    load_run(supervisor.runs, str(item["run_id"]))["state"],
+                )
+                return containment
+
+            with (
+                patch.object(
+                    supervisor,
+                    "_discovered_run_cgroups",
+                    return_value={str(item["cgroup"])},
+                ),
+                patch(
+                    "lumi_eggcracker.supervisor.contain_many",
+                    side_effect=contain_while_watcher_observes_empty,
+                ),
+                patch.object(
+                    supervisor,
+                    "_detection_receipt",
+                    return_value={
+                        "event_id": "e" * 24,
+                        "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+                    },
+                ),
+                patch.object(supervisor, "_store_detection"),
+                patch.object(supervisor, "_post_containment_response"),
+            ):
+                supervisor._enforce_discovery(
+                    snapshot,
+                    detected,
+                    (),
+                    (),
+                    1,
+                    2,
+                    None,
+                    "e" * 24,
+                    targets={target},
+                )
+
+            self.assertEqual([False], completion_results)
+            self.assertEqual(
+                "TERMINATED",
+                load_run(supervisor.runs, str(item["run_id"]))["state"],
             )
 
     def test_correlation_requires_live_same_uid_parent_or_sibling_relation(self) -> None:

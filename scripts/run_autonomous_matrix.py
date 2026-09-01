@@ -19,6 +19,7 @@ from smoke_content_ai import assets, command
 CLI = "/usr/local/bin/eggcracker"
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 RUNS = Path("/var/lib/lumi-eggcracker/runs")
+NETNS = Path("/run/netns")
 
 
 def run(argv: list[str], *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
@@ -34,6 +35,78 @@ def call(operator: str, argv: list[str]) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError("invalid Eggcracker response")
     return value
+
+
+def root_call(argv: list[str]) -> dict[str, Any]:
+    value = json.loads(run([CLI, *argv]).stdout)
+    if not isinstance(value, dict):
+        raise TypeError("invalid root Eggcracker response")
+    return value
+
+
+def incident_ids() -> set[str]:
+    value = root_call(["incidents"])
+    incidents = value.get("incidents", [])
+    if not isinstance(incidents, list):
+        raise TypeError("invalid Eggcracker incident response")
+    return {
+        item["incident_id"]
+        for item in incidents
+        if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+    }
+
+
+def clear_new_incidents(
+    previous: set[str],
+    *,
+    expected_event_id: str,
+    timeout: float = 8.0,
+    settle_seconds: float = 1.0,
+) -> int:
+    """Wait for post-receipt response persistence, then clear this phase.
+
+    The containment receipt is intentionally durable before local active
+    response.  Polling once immediately after the final receipt can therefore
+    miss the incident and let its lockdown race the following approved phase.
+    """
+    if not expected_event_id or expected_event_id in previous:
+        raise ValueError("expected event identity is invalid")
+    deadline = time.monotonic() + timeout
+    observed_response = False
+    quiet_since: float | None = None
+    cleared: set[str] = set()
+    while time.monotonic() < deadline:
+        incidents = root_call(["incidents"]).get("incidents", [])
+        if not isinstance(incidents, list):
+            raise TypeError("invalid Eggcracker incident response")
+        current_ids = {
+            item["incident_id"]
+            for item in incidents
+            if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+        }
+        new_active = {
+            item["incident_id"]
+            for item in incidents
+            if isinstance(item, dict)
+            and item.get("state") == "ACTIVE"
+            and isinstance(item.get("incident_id"), str)
+            and item["incident_id"] not in previous
+        }
+        observed_response = observed_response or expected_event_id in current_ids or bool(
+            new_active
+        )
+        if new_active:
+            for incident_id in sorted(new_active):
+                root_call(["incident", "clear", incident_id])
+                cleared.add(incident_id)
+            quiet_since = None
+        elif observed_response:
+            now = time.monotonic()
+            quiet_since = now if quiet_since is None else quiet_since
+            if now - quiet_since >= settle_seconds:
+                return len(cleared)
+        time.sleep(0.01)
+    raise RuntimeError("autonomous incident response did not settle before approval")
 
 
 def wait_for_armed_doctor(operator: str, *, timeout: float = 45) -> dict[str, Any]:
@@ -84,6 +157,63 @@ def percentile(values: list[float], percent: int) -> float:
 
 def approved_outcome(state: object) -> bool:
     return state in {"RUNNING", "COMPLETED_ALLOWED"}
+
+
+def supervisor_pid() -> int:
+    value = run(
+        [
+            "/usr/bin/systemctl",
+            "show",
+            "--property=MainPID",
+            "--value",
+            "lumi-eggcracker.service",
+        ]
+    ).stdout.strip()
+    if not value.isdecimal() or int(value) < 2:
+        raise RuntimeError("supervisor main PID is unavailable")
+    return int(value)
+
+
+def wait_selected_state(
+    operator: str, name: str, expected: str, *, timeout: float = 8.0
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    latest: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        try:
+            latest = call(operator, ["status", "--name", name])
+        except RuntimeError:
+            time.sleep(0.01)
+            continue
+        if latest.get("state") == expected:
+            return latest
+        time.sleep(0.01)
+    raise RuntimeError(f"protected workload did not reach {expected}: {latest}")
+
+
+def wait_owned_namespace_cleanup(run_id: str, *, timeout: float = 5.0) -> dict[str, Any]:
+    if len(run_id) != 24 or any(character not in "0123456789abcdef" for character in run_id):
+        raise ValueError("owned run identity is invalid")
+    names = (
+        f"lumi-eggcracker-w-{run_id}",
+        f"lumi-eggcracker-s-{run_id}",
+    )
+    paths = tuple(NETNS / name for name in names)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        mountinfo = Path("/proc/1/mountinfo").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        existing = [
+            str(path) for path in paths if path.exists() or path.is_symlink()
+        ]
+        mounted = [name for name in names if name in mountinfo]
+        if not existing and not mounted:
+            return {"mount_entries": 0, "namespace_paths": 0}
+        time.sleep(0.01)
+    raise RuntimeError(
+        f"autonomous owned-run cleanup retained namespaces: paths={existing}, mounts={mounted}"
+    )
 
 
 def launch(user: str, argv: list[str]) -> subprocess.Popen[bytes]:
@@ -140,7 +270,14 @@ def main() -> int:
     if account.pw_uid != int(install["workload_uid"]) or account.pw_uid == pwd.getpwnam(operator).pw_uid:
         raise RuntimeError("installed workload identity is not isolated from the operator")
     uid = account.pw_uid
-    results: dict[str, Any] = {"approved": [], "benign": 0, "canary_survival": 0, "discoveries": [], "result": "FAIL"}
+    results: dict[str, Any] = {
+        "approved": [],
+        "benign": 0,
+        "canary_survival": 0,
+        "discoveries": [],
+        "owned_autonomous_cleanup": None,
+        "result": "FAIL",
+    }
     starts: list[float] = []
     empties: list[float] = []
     try:
@@ -148,6 +285,8 @@ def main() -> int:
         argv = command(runner, model)
         try:
             wait_for_armed_doctor(operator)
+            before_incidents = incident_ids()
+            last_event_id = ""
             for index in range(args.discoveries):
                 canary = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
                 process: subprocess.Popen[bytes] | None = None
@@ -162,17 +301,79 @@ def main() -> int:
                     starts.append((receipt["containment"]["first_stop_monotonic_ns"] - started) / 1_000_000)
                     empties.append(float(receipt["containment"]["trigger_to_empty_ms"]))
                     results["discoveries"].append(receipt["event_id"])
+                    last_event_id = str(receipt["event_id"])
                     results["canary_survival"] += 1
                 finally:
                     if process is not None:
                         stop(process)
                     stop(canary)
+            # The discovery phase deliberately leaves an exact lockdown
+            # incident.  Root-clear only this run's incident before the
+            # independent approved-survival phase; protected relaunch blocking
+            # remains covered by the dedicated incident/lockdown tests.
+            clear_new_incidents(
+                before_incidents,
+                expected_event_id=last_event_id,
+            )
+            # Recreate the C8 failure mode inside an Eggcracker-owned offline
+            # workload. Autonomous containment must terminate the run and
+            # reclaim both exact namespace mounts without relying on a
+            # supervisor restart.
+            wait_for_armed_doctor(operator)
+            owned_before_incidents = incident_ids()
+            owned_before_detections = set(DETECTIONS.glob("*.json"))
+            owned_name = f"owned-unapproved-{secrets.token_hex(6)}"
+            pid_before = supervisor_pid()
+            owned = call(
+                operator,
+                [
+                    "start",
+                    "--name",
+                    owned_name,
+                    "--max-pids",
+                    "64",
+                    "--max-memory-mib",
+                    "4096",
+                    "--cpu-quota-percent",
+                    "1200",
+                    "--",
+                    *argv,
+                ],
+            )
+            owned_run_id = str(owned.get("run_id", ""))
+            owned_receipt = new_receipt(owned_before_detections)
+            wait_selected_state(operator, owned_name, "TERMINATED")
+            namespace_cleanup = wait_owned_namespace_cleanup(owned_run_id)
+            pid_after = supervisor_pid()
+            if (
+                owned_receipt.get("detector", {}).get("profile")
+                != "content.gguf-llama"
+                or pid_before != pid_after
+                or call(operator, ["doctor"]).get("result") != "PASS"
+            ):
+                raise RuntimeError(
+                    "owned autonomous containment required restart or failed health"
+                )
+            clear_new_incidents(
+                owned_before_incidents,
+                expected_event_id=str(owned_receipt.get("event_id", "")),
+            )
+            results["owned_autonomous_cleanup"] = {
+                **namespace_cleanup,
+                "profile": "content.gguf-llama",
+                "state": "TERMINATED",
+                "supervisor_restarted": False,
+            }
             for index in range(args.approved):
                 approval_name = f"allow-{secrets.token_hex(6)}"
                 run_name = f"approved-{secrets.token_hex(6)}"
                 call(
                     operator,
-                    ["approve", "--name", approval_name, "--uid", str(uid), "--", *argv],
+                    [
+                        "approve", "--name", approval_name, "--uid", str(uid),
+                        "--max-pids", "64", "--max-memory-mib", "4096",
+                        "--cpu-quota-percent", "1200", "--", *argv,
+                    ],
                 )
                 before = set(DETECTIONS.glob("*.json"))
                 started = False

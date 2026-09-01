@@ -71,6 +71,49 @@ class DetectorTests(unittest.TestCase):
             ),
         )
 
+    def test_topology_profiles_require_their_topology_group(self) -> None:
+        catalogue = load_bundled()
+        sample = Sample("opaque", ("opaque",))
+        self.assertIsNone(
+            match(
+                catalogue,
+                sample,
+                evidence={
+                    "MODEL_CONTENT": {"gguf-v3"},
+                    "MODEL_RUNTIME": {"ollama-runner-pinned"},
+                },
+            )
+        )
+        result = match(
+            catalogue,
+            sample,
+            evidence={
+                "MODEL_CONTENT": {"gguf-v3"},
+                "MODEL_RUNTIME": {"ollama-runner-pinned"},
+                "MODEL_TOPOLOGY": {"ollama-launcher-pinned"},
+            },
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual("content.gguf-ollama", result.profile)
+
+    def test_vllm_profile_precedes_generic_pytorch_when_full_topology_is_present(self) -> None:
+        catalogue = load_bundled()
+        result = match(
+            catalogue,
+            Sample("opaque", ("opaque",)),
+            evidence={
+                "MODEL_CONTENT": {"safetensors-v1"},
+                "MODEL_RUNTIME": {
+                    "pytorch-bridge-aten-pair-pinned-cpu",
+                },
+                "MODEL_TOPOLOGY": {"vllm-python-extension-pair-pinned-cpu"},
+            },
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual("content.safetensors-vllm", result.profile)
+
     def test_catalogue_rejects_unknown_predicate_and_incomplete_content_group(self) -> None:
         unknown = b'{"schema_version":"lumi-eggcracker.detectors.v2","profiles":[{"id":"bad","path":"FAST_NAME","all":[{"kind":"unknown","values":["x"]}]}]}'
         incomplete = b'{"schema_version":"lumi-eggcracker.detectors.v3","profiles":[{"id":"bad","path":"CONTENT","require_all_groups":[{"group":"MODEL_CONTENT","any":["gguf-v3"]}]}]}'

@@ -59,6 +59,30 @@ def control(argv: list[str], *, operator: str | None = None) -> dict[str, Any]:
     return value
 
 
+def clear_new_incident(previous: set[str]) -> str:
+    """Clear only this smoke's incident before its approved phase."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        current = control(["incidents"]).get("incidents", [])
+        if not isinstance(current, list):
+            raise TypeError("Eggcracker incident response is invalid")
+        new_active = [
+            item["incident_id"]
+            for item in current
+            if isinstance(item, dict)
+            and item.get("state") == "ACTIVE"
+            and isinstance(item.get("incident_id"), str)
+            and item["incident_id"] not in previous
+        ]
+        if len(new_active) == 1:
+            control(["incident", "clear", new_active[0]])
+            return new_active[0]
+        if len(new_active) > 1:
+            raise RuntimeError("Safetensors smoke created multiple local incidents")
+        time.sleep(0.05)
+    raise RuntimeError("Safetensors smoke incident was not persisted")
+
+
 def rejected_control(argv: list[str], *, operator: str) -> dict[str, Any]:
     result = subprocess.run(
         ["/usr/sbin/runuser", "-u", operator, "--", CLI, *argv],
@@ -142,7 +166,12 @@ def one(
     operator: str,
     index: int,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="lumi-safetensors-smoke-", dir="/tmp") as raw:
+    # Keep the fixture below the root-controlled asset tree.  Safetensors
+    # weights can be large, while /run is a small tmpfs on many native hosts;
+    # the disk-backed asset parent avoids a staging-space false failure.
+    with tempfile.TemporaryDirectory(
+        prefix="lumi-safetensors-smoke-", dir=str(model.parent.parent)
+    ) as raw:
         root = Path(raw)
         # Approval-bound inputs live below a root-controlled directory.  Only
         # the separate output directory is writable by the workload identity.
@@ -168,6 +197,11 @@ def one(
         run_name = f"safetensors-run-{index}-{secrets.token_hex(4)}"
         argv = [str(python), str(wrapper), str(weights), str(config_copy), str(output)]
         try:
+            before_incidents = {
+                item["incident_id"]
+                for item in control(["incidents"]).get("incidents", [])
+                if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+            }
             before = set(DETECTIONS.glob("*.json"))
             first_process = launch(python, user, wrapper, weights, config_copy, output)
             first = receipt_after(before)
@@ -182,7 +216,14 @@ def one(
             if any(secret in json.dumps(first, sort_keys=True) for secret in (str(weights), str(wrapper))):
                 raise RuntimeError("Safetensors receipt leaked local paths")
             output.unlink(missing_ok=True)
-            approval = control(["approve", "--name", name, "--uid", str(user_uid), "--", *argv])
+            clear_new_incident(before_incidents)
+            approval = control(
+                [
+                    "approve", "--name", name, "--uid", str(user_uid),
+                    "--max-pids", "64", "--max-memory-mib", "4096",
+                    "--cpu-quota-percent", "1200", "--", *argv,
+                ]
+            )
             if approval.get("result") != "APPROVED":
                 raise RuntimeError("exact Safetensors approval failed")
             approved_source = wrapper.read_bytes()
@@ -241,6 +282,11 @@ def one(
             if any(Path("/run/lumi-eggcracker/staged").iterdir()):
                 raise RuntimeError("approved script stage survived workload termination")
             control(["revoke", "--name", name])
+            before_second_incidents = {
+                item["incident_id"]
+                for item in control(["incidents"]).get("incidents", [])
+                if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+            }
             before = set(DETECTIONS.glob("*.json"))
             first_process = launch(python, user, wrapper, weights, config_copy, output)
             second = receipt_after(before)
@@ -248,6 +294,9 @@ def one(
             first_process = None
             if second.get("detector", {}).get("profile") != "content.safetensors-pytorch" or canary.poll() is not None:
                 raise RuntimeError("revoked Safetensors/PyTorch model was not terminated")
+            # Keep the next self-validation job independent while retaining
+            # the receipt and relaunch-lockdown proof in this result.
+            clear_new_incident(before_second_incidents)
             return {"approved_generated_bytes": generated, "first_receipt": first, "mutable_script_rejection": mutation_rejection, "result": "PASS", "second_receipt": second}
         finally:
             stop(first_process)

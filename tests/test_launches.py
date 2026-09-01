@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from lumi_eggcracker.discovery import ProcessIdentity, ProcessSnapshot
-from lumi_eggcracker.launches import authorizes, create, load_all
+from lumi_eggcracker.launches import approval_is_active, authorizes, create, load_all
 
 
 class LaunchProvenanceTests(unittest.TestCase):
@@ -67,3 +67,17 @@ class LaunchProvenanceTests(unittest.TestCase):
                 self.assertFalse(
                     authorizes(replacement, "b" * 64, (9, 10), provenance)
                 )
+
+            self.assertTrue(approval_is_active(provenance, [approval]))
+            self.assertFalse(approval_is_active(provenance, []))
+
+            replacement_approval = {**approval, "created_monotonic_ns": 2}
+            self.assertFalse(
+                approval_is_active(provenance, [replacement_approval])
+            )
+
+            changed_material = {
+                **approval,
+                "bound_inputs": [{"sha256": "d" * 64}],
+            }
+            self.assertFalse(approval_is_active(provenance, [changed_material]))

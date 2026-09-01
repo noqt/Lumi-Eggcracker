@@ -57,6 +57,49 @@ def call(operator: str, argv: list[str]) -> dict[str, Any]:
     return value
 
 
+def root_control(argv: list[str]) -> dict[str, Any]:
+    """Use root-admin only for bounded smoke-test incident cleanup."""
+    result = subprocess.run(
+        [CLI, *argv], capture_output=True, text=True, check=False, timeout=30
+    )
+    if result.returncode:
+        raise RuntimeError(
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "Eggcracker root control command failed"
+        )
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise TypeError("Eggcracker root control command returned invalid JSON")
+    return value
+
+
+def clear_new_incident(previous: set[str]) -> None:
+    """Clear only the lockdown incident created by this smoke repetition."""
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        current = root_control(["incidents"]).get("incidents", [])
+        if not isinstance(current, list):
+            raise TypeError("Eggcracker incident response is invalid")
+        new_active = [
+            item["incident_id"]
+            for item in current
+            if (
+                isinstance(item, dict)
+                and item.get("state") == "ACTIVE"
+                and isinstance(item.get("incident_id"), str)
+                and item["incident_id"] not in previous
+            )
+        ]
+        if len(new_active) == 1:
+            root_control(["incident", "clear", new_active[0]])
+            return
+        if len(new_active) > 1:
+            raise RuntimeError("autonomous smoke created multiple local incidents")
+        time.sleep(0.05)
+    raise RuntimeError("autonomous smoke incident was not persisted")
+
+
 def stop(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         os.killpg(process.pid, signal.SIGKILL)
@@ -131,16 +174,32 @@ def one(
         canary = subprocess.Popen(["/bin/sleep", "180"], start_new_session=True)
         unapproved: subprocess.Popen[bytes] | None = None
         allowed_started = False
-        name = f"real-qwen-{index}"
+        # Approval names must remain unique after an interrupted smoke.  A
+        # fixed name can strand a prior exact approval and make the next
+        # repetition fail before it exercises the product.
+        name = f"real-qwen-{index}-{os.urandom(4).hex()}"
         run_name = f"real-qwen-run-{index}-{os.urandom(4).hex()}"
         try:
+            before_incidents = {
+                item["incident_id"]
+                for item in root_control(["incidents"]).get("incidents", [])
+                if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+            }
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, argv, output)
             receipt = receipt_after(before)
             stop(unapproved)
             unapproved = None
-            if receipt.get("trigger", {}).get("kind") != "UNAPPROVED_AI_MATCH" or receipt.get("detector", {}).get("profile") != "llama.cpp" or canary.poll() is not None:
+            if (
+                receipt.get("trigger", {}).get("kind") != "UNAPPROVED_AI_MATCH"
+                or receipt.get("detector", {}).get("profile") != "content.gguf-llama"
+                or canary.poll() is not None
+            ):
                 raise RuntimeError("unapproved real AI result or canary is invalid")
+            # The first unapproved launch intentionally enters lockdown.  Use
+            # root-admin to clear only this repetition's incident before the
+            # independent exact-approval phase.
+            clear_new_incident(before_incidents)
             approval = call(
                 operator,
                 [
@@ -149,6 +208,12 @@ def one(
                     name,
                     "--uid",
                     str(pwd.getpwnam(user).pw_uid),
+                    "--max-pids",
+                    "64",
+                    "--max-memory-mib",
+                    "4096",
+                    "--cpu-quota-percent",
+                    "1200",
                     "--",
                     *argv,
                 ],
@@ -191,6 +256,11 @@ def one(
             stop_selected(operator, run_name)
             allowed_started = False
             call(operator, ["revoke", "--name", name])
+            before_second_incidents = {
+                item["incident_id"]
+                for item in root_control(["incidents"]).get("incidents", [])
+                if isinstance(item, dict) and isinstance(item.get("incident_id"), str)
+            }
             before = set(DETECTIONS.glob("*.json"))
             unapproved = launch(user, argv, output)
             receipt_after_revoke = receipt_after(before)
@@ -198,6 +268,7 @@ def one(
             unapproved = None
             if receipt_after_revoke.get("result") != "TERMINATED" or canary.poll() is not None:
                 raise RuntimeError("revoked real AI was not autonomously terminated")
+            clear_new_incident(before_second_incidents)
             return {"asset_model_sha256": provenance["model"]["sha256"], "asset_runner_sha256": provenance["llama"]["sha256"], "approved_generated_bytes": approved_bytes, "first_receipt": receipt, "result": "PASS", "second_receipt": receipt_after_revoke}
         finally:
             if unapproved is not None:

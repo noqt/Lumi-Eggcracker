@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
-[v0.5.0 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v0.5.0)
+[v1.0.10 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v1.0.10)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
 · [Run the first kill](#run-the-first-kill)
@@ -23,9 +23,10 @@ that AI agents in a cybersecurity test broke out of their intended environment
 and breached Hugging Face. That incident made the point: the kill switch can't
 live inside the thing it's meant to stop.
 
-Eggcracker works on native Linux today and supports two qualified workload
-profiles. It's early and intentionally limited; the exact boundary is in
-[Current boundary](#current-boundary).
+Eggcracker works on native Linux today and supports four qualified AI workload
+profiles plus an offline boundary for every explicitly selected workload. The
+1.0.10 release is intentionally limited; the exact boundary is in [Current
+boundary](#current-boundary).
 
 **Want to see the core idea work?** [Try the hosted proof](TRY_IT.md). You don't
 need to install Eggcracker, own a GPU or download a model. The test kills a
@@ -35,12 +36,14 @@ harmless synthetic process tree and shows whether the kill mechanism worked.
 
 > **Run the kill. Find the miss.**
 >
-> On a disposable native Ubuntu host, the first-kill path verifies the signed
-> v0.5.0 Release, launches a pinned real Qwen workload, and shows whether
+> On a disposable native Ubuntu host, the first-kill path verifies a release
+> artifact, launches a pinned real Qwen workload inside an offline
+> boundary, and shows whether
 > Eggcracker terminates the complete process tree while an unrelated canary
 > survives. Run the supported disposable path and report the observed pass,
-> redacted failure, friction, or reproducible miss from that exact run. There
-> is no telemetry, paid plan or sales call.
+> redacted failure, friction, or reproducible miss from that exact run. We are
+> opening three design-partner places for people who will challenge the four
+> supported profiles. There is no telemetry, paid plan or sales call.
 
 **Start with the read-only host check.** It makes no network request and creates
 no workspace, build, installation or service. [Check compatibility
@@ -59,10 +62,11 @@ llama.cpp runner, shows it running, lets Eggcracker recognise the unapproved
 workload, and prints the post-kill receipt. It also checks that an unrelated
 canary survives.
 
-The recorded 62-second run produced this bounded result:
+The release demonstration prints a bounded result like this after native
+qualification:
 
 ```text
-[eggcracker] signature and release identity verified: v0.5.0 -> eb342808f56cdc213c0861726d5309a146965bef
+[eggcracker] signature and release identity verified: v1.0.10 -> 27cb6dfa0884896025976f8583398c9db7ac9a30
 {
   "primitive": "pidfd-stop+cgroup.kill",
   "profile": "content.gguf-llama",
@@ -102,10 +106,15 @@ sudo /usr/bin/python3 -I -S scripts/first_kill.py \
 
 The preflight is read-only: it checks the operator, supported host features,
 empty installation targets, required tool availability, and that the local
-annotated `v0.5.0` tag resolves to the qualified commit. It makes no network
-request and creates no workspace, GPG home, build, installation or service.
-It does not verify the release signature, downloaded assets, functional build,
-installation or containment; those checks happen only in the full run.
+published-release reference is an annotated tag resolving to a commit. It makes
+no network request and creates no workspace, GPG home, build, installation or
+service. It does not verify the tag signature, downloaded assets, functional
+build, installation or containment. The full run verifies both the annotated
+tag signature and the detached `SHA256SUMS.asc` signature with the pinned
+release-key fingerprint, requires the downloaded bundle to match that signed
+checksum list, and requires the signed tag commit to match the release
+manifest. It rejects duplicate, link, special and unsafe archive members before
+extraction.
 
 ### Probe the containment primitive
 
@@ -133,8 +142,25 @@ an executed-source digest. Systemd journal metadata may persist until normal
 log rotation.
 
 This is a proof of the deterministic containment primitive, not a test of AI
-workload recognition, the two supported profiles, installation, or universal
+workload recognition, the four supported profiles, installation, or universal
 product effectiveness. A pass does not replace the full first-kill path.
+
+### Qualify the offline boundary
+
+On the disposable native Ubuntu host, qualify the offline network primitive
+before installing the supervisor:
+
+```sh
+sudo /usr/bin/python3 -I -S scripts/qualify_offline_boundary.py \
+  --output ./offline-boundary.json
+```
+
+The harness creates only transient, run-ID-owned namespaces and a veth pair,
+allows loopback, counts and drops synthetic IPv4/IPv6 output, checks an
+unprivileged rule/link/namespace modification attempt, verifies a same-host
+canary survives, hashes bounded host state before and after, and removes every
+transient object. Its JSON is qualification evidence, not a promise of general
+network isolation.
 
 #### Run it in a disposable GitHub-hosted fork
 
@@ -174,10 +200,11 @@ sudo /usr/bin/python3 -I -S scripts/first_kill.py \
   --accept-third-party-downloads
 ```
 
-The command checks host compatibility, downloads and verifies the signed
-release assets, installs the root-controlled supervisor, downloads the pinned
-demo model only after the explicit acceptance flag, launches the real model,
-prints the kill receipt, and offers clean removal. Use `--remove` for a
+The command checks host compatibility, authenticates the tag and detached
+release checksums, verifies the exact downloaded bundle, installs the
+root-controlled supervisor, downloads the pinned demo model only after the
+explicit acceptance flag, launches the real model, prints the kill receipt,
+and offers clean removal. Use `--remove` for a
 non-interactive removal or `--keep` to inspect the installation after the
 demonstration. Share a passing, refused, or confusing supported-path run through
 the [redacted result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=first_kill_result.yml).
@@ -189,14 +216,26 @@ with a redacted support bundle; route security-sensitive findings through
 ## What Eggcracker does
 
 - observes local Linux processes with a root supervisor;
-- recognises the two qualified content profiles in this release:
-  `content.gguf-llama` and `content.safetensors-pytorch`;
+- recognises the four qualified native content profiles in this release:
+  `content.gguf-llama`, `content.gguf-ollama`, `content.safetensors-pytorch`,
+  and `content.safetensors-vllm`;
 - treats a complete match without an exact root approval as a kill condition;
 - enforces first with pidfds and direct cgroup-v2 `cgroup.kill`;
 - proves the owned cgroup and descendants are empty before writing the receipt;
 - keeps an unrelated canary outside the owned cgroup alive;
-- supports exact root approvals for protected launches, plus operator-triggered
-  kills and status, list, doctor, detections and version queries.
+- launches every selected workload in a root-controlled offline namespace where
+  loopback is allowed and non-loopback IPv4/IPv6 egress is denied and counted;
+- automatically kills the complete selected workload tree when that boundary
+  counter trips, then writes a post-containment receipt;
+- records a bounded local lockdown after an autonomous, network-boundary or
+  execution-boundary kill, revokes only the exact affected approval, and
+  suppresses an exact protected relaunch until root clears it;
+- supports exact root approvals bound to the protected launch's command,
+  workload identity and PID, memory and CPU limits, plus operator-triggered
+  kills and status, list, doctor, detections, incidents and version queries.
+- lets approval-sensitive automation add `--require-approval` to `start`, so a
+  missing or concurrently revoked approval rejects the launch before Eggcracker
+  creates any workload boundary or process.
 
 The product is intentionally a kill switch, not an alerting dashboard. It
 does not wait for an operator after an unapproved complete match.
@@ -204,21 +243,25 @@ does not wait for an operator after an unapproved complete match.
 ## Current boundary
 
 This public alpha is deliberately narrow. It supports native Linux with
-systemd, unified cgroup v2, `cgroup.kill`, pidfds and Python 3.11+. The
-qualified content profiles are CPU-first and require the published runtime
-and artifact evidence. It does not claim universal AI recognition, inference
-proof, container or remote-service coverage, network isolation, credential
-isolation, behavioural detection, malware prevention or EDR replacement.
+systemd, unified cgroup v2, `cgroup.kill`, pidfds, Python 3.11+, iproute2 and
+nftables. The qualified content profiles are CPU-first and require the
+published runtime and artifact evidence. Selected workloads are offline-only:
+loopback works, while non-loopback IPv4 and IPv6 output is denied and triggers
+whole-tree containment. This does not claim general host network isolation,
+universal AI recognition, inference proof, container or remote-service
+coverage, credential isolation, behavioural detection, malware prevention or
+EDR replacement.
 
-Ollama, vLLM, TGI, LocalAI, llamafile and agent launchers are not claimed as
-covered profiles yet. That is a qualification boundary, not an alert-only
-fallback.
+TGI, LocalAI, llamafile, GPU-specific deployments, containers and remote API
+workloads are not claimed as covered profiles. Ollama and vLLM support is
+limited to the exact native CPU fixtures and identities qualified for this
+release; names alone never trigger a kill.
 
 ## Support bundle
 
 To make a report reproducible, create a local JSON bundle containing host
 compatibility, supervisor health, workload counts and redacted detection
-summaries:
+summaries after Eggcracker is installed:
 
 ```sh
 sudo /usr/bin/python3 -I -S scripts/support_bundle.py \
@@ -231,14 +274,24 @@ file before attaching it to an issue or discussion.
 
 ## Install and remove
 
-The first-kill command is the recommended campaign path. For a controlled
-installation, use the signed Linux bundle and its `SHA256SUMS`, then run the
-bundled installer as root with a non-root operator. Remove every product-owned
-unit, socket, account and state file with:
+The first-kill command is the recommended campaign path. A release is complete
+only when it carries `SHA256SUMS`, its detached `SHA256SUMS.asc` signature and
+`eggcracker-release-key.asc`; the pinned fingerprint is
+`53786DEB001459956A2E1B86A3F29F7A27636DC7`. For a controlled manual
+installation, verify that signature and the Linux bundle checksum before
+running the bundled installer as root with a non-root operator. Remove every
+product-owned unit, socket, account and state file with:
 
 ```sh
 sudo /usr/bin/python3 -I -S scripts/uninstall.py
 ```
+
+Install, upgrade and uninstall operations are serialized. If power loss or a
+killed process interrupts a first installation or removal, rerun the same exact
+release installer and operator, or rerun the same bundled uninstall command.
+Eggcracker validates its root-owned recovery journal before converging to a
+complete installation or complete removal; do not edit or delete that journal
+by hand.
 
 Read [SECURITY_MODEL.md](SECURITY_MODEL.md), [LIMITATIONS.md](LIMITATIONS.md),
 and [QUALIFICATION.md](QUALIFICATION.md) before installing on a machine that
