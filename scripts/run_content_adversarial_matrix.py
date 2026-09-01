@@ -46,10 +46,69 @@ def wait_service(*, timeout: float = 10) -> None:
     raise RuntimeError("supervisor did not become active")
 
 
-def child_pids(path: Path) -> list[int]:
+def process_identity(pid: int) -> tuple[str, int]:
+    raw = (Path("/proc") / str(pid) / "stat").read_text(encoding="ascii")
+    close = raw.rfind(")")
+    if close < 1:
+        raise RuntimeError("process stat is malformed")
+    fields = raw[close + 2 :].split()
+    return fields[0], int(fields[19])
+
+
+def child_identities(path: Path) -> list[tuple[int, int]]:
     if not path.is_file():
         return []
-    return [int(item) for item in path.read_text(encoding="ascii").split() if item.isdigit()]
+    identities: list[tuple[int, int]] = []
+    for item in path.read_text(encoding="ascii").split():
+        fields = item.split(":", maxsplit=1)
+        if len(fields) != 2 or not all(field.isdigit() for field in fields):
+            raise RuntimeError("descendant identity marker is malformed")
+        pid, start_time = (int(field) for field in fields)
+        if pid < 2 or start_time < 1:
+            raise RuntimeError("descendant identity marker is invalid")
+        identities.append((pid, start_time))
+    if len({pid for pid, _start_time in identities}) != len(identities):
+        raise RuntimeError("descendant identity marker contains a duplicate PID")
+    return identities
+
+
+def identity_alive(identity: tuple[int, int]) -> bool:
+    pid, expected_start_time = identity
+    try:
+        state, start_time = process_identity(pid)
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return False
+    return start_time == expected_start_time and state not in {"X", "Z"}
+
+
+def wait_identities_terminated(identities: list[tuple[int, int]], *, timeout: float = 5) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(identity_alive(identity) for identity in identities):
+            return True
+        time.sleep(0.01)
+    return not any(identity_alive(identity) for identity in identities)
+
+
+def descendant_wrapper(pid_file: Path) -> str:
+    return (
+        "import os,sys,time\n"
+        f"p=open({str(pid_file)!r},'w')\n"
+        "def identity(pid):\n"
+        " for _ in range(1000):\n"
+        "  try:\n"
+        "   raw=open(f'/proc/{pid}/stat').read()\n"
+        "   close=raw.rfind(')')\n"
+        "   return int(raw[close+2:].split()[19])\n"
+        "  except FileNotFoundError: time.sleep(0.001)\n"
+        " raise RuntimeError('descendant identity unavailable')\n"
+        "for _ in range(32):\n"
+        " c=os.fork()\n"
+        " if c==0: time.sleep(30); os._exit(0)\n"
+        " print(f'{c}:{identity(c)}',file=p,flush=True)\n"
+        "p.close()\n"
+        "os.execv(sys.argv[1],sys.argv[1:])\n"
+    )
 
 
 def main() -> int:
@@ -86,12 +145,7 @@ def main() -> int:
             except OSError:
                 shutil.copyfile(model, disguised_model)
             wrapper = root / f"{secrets.token_hex(8)}.py"
-            wrapper.write_text(
-                "import os,sys,time\np=open('"
-                + str(pid_file)
-                + "','w')\nfor _ in range(32):\n c=os.fork()\n if c==0: time.sleep(30); os._exit(0)\n print(c,file=p,flush=True)\nos.execv(sys.argv[1],sys.argv[1:])\n",
-                encoding="utf-8",
-            )
+            wrapper.write_text(descendant_wrapper(pid_file), encoding="utf-8")
             argv = command(disguised_runner, disguised_model)
             for index in range(args.tree_repetitions):
                 pid_file.unlink(missing_ok=True)
@@ -101,13 +155,14 @@ def main() -> int:
                     before = set(DETECTIONS.glob("*.json"))
                     process = launch(args.user, wrapper, argv, root / f"out-{index}")
                     receipt = receipt_after(before)
-                    pids = child_pids(pid_file)
+                    identities = child_identities(pid_file)
                     if receipt.get("detector", {}).get("profile") != "content.gguf-llama":
                         raise RuntimeError("content profile did not qualify")
                     if (
                         receipt["capture"]["captured_processes"] < 33
+                        or len(identities) != 32
                         or canary.poll() is not None
-                        or any(Path(f"/proc/{pid}").exists() for pid in pids)
+                        or not wait_identities_terminated(identities)
                     ):
                         raise RuntimeError("content descendants or canary proof failed")
                     result["tree"] += 1

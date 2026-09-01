@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.10 (release candidate)
+
+- Bind every adversarial descendant check to its PID and kernel start time.
+- Treat a killed zombie as terminated while still failing on a runnable original
+  identity or an exact identity that remains live after the bounded wait.
+- Reject malformed or duplicate descendant identity evidence in the native
+  qualification harness.
+- Permit an exact in-place upgrade from the preceding 1.0.9 candidate.
+
 ## 1.0.9 (release candidate)
 
 - Keep an exact admitted run active when its launch PID still exists after

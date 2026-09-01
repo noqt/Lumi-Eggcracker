@@ -27,6 +27,7 @@ prepare = load_script("prepare_ai_smoke")
 sys.path.insert(0, str(ROOT / "scripts"))
 try:
     autonomous_matrix = load_script("run_autonomous_matrix")
+    content_adversarial = load_script("run_content_adversarial_matrix")
 finally:
     sys.path.pop(0)
 
@@ -110,12 +111,23 @@ class AiSmokeTests(unittest.TestCase):
             runner.chmod(0o755)
             model.write_bytes(b"model")
             manifest = root / "assets.json"
-            manifest.write_text(json.dumps({
-                "schema_version": smoke.ASSET_SCHEMA,
-                "platform": {},
-                "llama": {"path": str(runner), "sha256": hashlib.sha256(b"runner").hexdigest()},
-                "model": {"path": str(model), "sha256": hashlib.sha256(b"model").hexdigest()},
-            }), encoding="utf-8")
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": smoke.ASSET_SCHEMA,
+                        "platform": {},
+                        "llama": {
+                            "path": str(runner),
+                            "sha256": hashlib.sha256(b"runner").hexdigest(),
+                        },
+                        "model": {
+                            "path": str(model),
+                            "sha256": hashlib.sha256(b"model").hexdigest(),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
             loaded_runner, loaded_model, _ = smoke.assets_from_manifest(manifest)
             self.assertEqual(runner, loaded_runner)
             self.assertEqual(model, loaded_model)
@@ -144,8 +156,26 @@ class AiSmokeTests(unittest.TestCase):
         worker = (ROOT / "scripts" / "ai_smoke_worker.py").read_text(encoding="utf-8")
         self.assertNotIn("/bin/sh", source)
         self.assertIn("ai_smoke_worker.py", source)
-        self.assertIn('raise SystemExit(main())', worker)
+        self.assertIn("raise SystemExit(main())", worker)
 
     def test_content_smoke_keeps_real_model_alive_until_containment(self) -> None:
         command = content_smoke.command(Path("/runner"), Path("/model"))
         self.assertIn("--ignore-eos", command)
+
+    def test_adversarial_descendant_marker_binds_pid_and_start_time(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            marker = Path(raw) / "children"
+            marker.write_text("41:101 42:102\n", encoding="ascii")
+            self.assertEqual([(41, 101), (42, 102)], content_adversarial.child_identities(marker))
+
+    def test_adversarial_zombie_is_not_an_executing_survivor(self) -> None:
+        with mock.patch.object(content_adversarial, "process_identity", return_value=("Z", 101)):
+            self.assertFalse(content_adversarial.identity_alive((41, 101)))
+
+    def test_adversarial_pid_reuse_is_not_the_original_survivor(self) -> None:
+        with mock.patch.object(content_adversarial, "process_identity", return_value=("S", 202)):
+            self.assertFalse(content_adversarial.identity_alive((41, 101)))
+
+    def test_adversarial_live_original_identity_blocks_empty_proof(self) -> None:
+        with mock.patch.object(content_adversarial, "process_identity", return_value=("S", 101)):
+            self.assertTrue(content_adversarial.identity_alive((41, 101)))

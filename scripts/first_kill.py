@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - first-kill is a native Linux command
 
 
 REPOSITORY = "noqt/Lumi-Eggcracker"
-DEFAULT_TAG = "v1.0.9"
+DEFAULT_TAG = "v1.0.10"
 RELEASE_KEY_FINGERPRINT = "53786DEB001459956A2E1B86A3F29F7A27636DC7"
 WORKLOAD_USER = "lumi-eggcracker-workload"
 INSTALL_TARGETS = (
@@ -466,7 +466,7 @@ def verify_bundle_checksum(bundle: Path, sums: Path) -> None:
 def release_files(tag: str, workspace: Path) -> tuple[Path, Path, Path, Path]:
     version = tag.removeprefix("v")
     if not version.replace(".", "").isdigit() or version.count(".") != 2:
-        raise FirstKillError("tag must look like v1.0.9")
+        raise FirstKillError("tag must look like v1.0.10")
     base = f"https://github.com/{REPOSITORY}/releases/download/{tag}"
     sums = workspace / "SHA256SUMS"
     signature = workspace / "SHA256SUMS.asc"
