@@ -29,6 +29,8 @@ RUN_URL = re.compile(
 )
 CORRELATION_ID = re.compile(r"^[0-9a-f]{32}$")
 RUN_NAME_PREFIX = "Containment probe"
+FORK_READY_ATTEMPTS = 5
+FORK_READY_DELAY_SECONDS = 1.0
 RUN_LOOKUP_ATTEMPTS = 3
 RUN_LOOKUP_DELAY_SECONDS = 1.0
 RUN_LOOKUP_COMMAND_TIMEOUT_SECONDS = 5.0
@@ -313,7 +315,12 @@ def start_hosted_proof(
             "--clone=false",
             "--default-branch-only",
         )
-        metadata = _fork_metadata(runner, repository)
+        for attempt in range(FORK_READY_ATTEMPTS):
+            metadata = _fork_metadata(runner, repository)
+            if metadata.returncode == 0:
+                break
+            if attempt + 1 < FORK_READY_ATTEMPTS:
+                sleeper(FORK_READY_DELAY_SECONDS)
         if fork.returncode != 0 and metadata.returncode != 0:
             raise HostedProofError("GitHub could not find or create the expected personal fork.")
     if metadata.returncode != 0:
