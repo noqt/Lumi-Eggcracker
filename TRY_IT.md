@@ -37,10 +37,11 @@ python (Join-Path $proofDir "scripts\start_hosted_proof.py") `
 The helper prints the exact workflow-run URL when GitHub returns it directly or
 the helper can uniquely correlate it to this dispatch. With `--wait`, it follows
 that exact run through completion and prints the bounded public workflow log in
-the same terminal. If exact correlation is unavailable, it does not guess; it
-leaves the fork's workflow page for manual inspection. Without `--wait`, it
-prints separate copyable watch and log commands. The run URL remains available
-for the same result in GitHub's interface.
+the same terminal, then ends with an explicit `PASS` or `FAIL` and the exact run
+URL so the outcome is visible without searching the log. If exact correlation
+is unavailable, it does not guess; it leaves the fork's workflow page for manual
+inspection. Without `--wait`, it prints separate copyable watch and log commands.
+The run URL remains available for the same result in GitHub's interface.
 
 ### Or use the GitHub interface
 

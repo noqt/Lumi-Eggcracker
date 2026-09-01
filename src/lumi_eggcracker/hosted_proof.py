@@ -523,6 +523,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(error))
     print(f"Hosted proof dispatched: {url}")
     status = 0
+    result_line: str | None = None
     if arguments.wait:
         if _watch_command(url) is None:
             print("Automatic wait unavailable because the exact run URL was not resolved.")
@@ -534,6 +535,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 parser.error(str(error))
             print("Hosted proof finished. Bounded public workflow log:")
             print(log)
+            result = "PASS" if passed else "FAIL"
+            result_line = f"Hosted proof result: {result} ({url})"
             if not passed:
                 print(f"Hosted proof did not pass; inspect {url}.")
                 status = 1
@@ -545,4 +548,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if log_command is not None:
             print(f"Read the bounded result: {log_command}")
     print(f"After it finishes, share the public run or friction: {RESULT_FORM_URL}")
+    if result_line is not None:
+        print(result_line)
     return status
