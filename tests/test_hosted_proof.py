@@ -393,6 +393,57 @@ class HostedProofTests(unittest.TestCase):
             url,
         )
 
+    def test_new_fork_metadata_propagation_is_retried_before_dispatch(self) -> None:
+        sleeps: list[float] = []
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), returncode=1),
+                result(("fork",)),
+                result(("metadata",), returncode=1),
+                result(("metadata",), returncode=1),
+                result(("metadata",), stdout="true\tnoqt/Lumi-Eggcracker\tmain\n"),
+                result(("workflow-identity",), stdout=f"{REVIEWED_WORKFLOW_BLOB}\n"),
+                result(("enable",)),
+                result(("dispatch",)),
+                run_list(returncode=1),
+            ]
+        )
+
+        url = start_hosted_proof(
+            acknowledged=True,
+            runner=runner,
+            sleeper=sleeps.append,
+        )
+
+        self.assertEqual(
+            "https://github.com/operator/Lumi-Eggcracker/actions/workflows/containment-probe.yml",
+            url,
+        )
+        self.assertEqual([1.0, 1.0], sleeps)
+
+    def test_new_fork_metadata_readiness_wait_is_bounded(self) -> None:
+        sleeps: list[float] = []
+        runner = FakeRunner(
+            [
+                result(("auth",)),
+                result(("identity",), stdout="operator\n"),
+                result(("metadata",), returncode=1),
+                result(("fork",)),
+                *[result(("metadata",), returncode=1) for _ in range(5)],
+            ]
+        )
+
+        with self.assertRaisesRegex(HostedProofError, "not ready"):
+            start_hosted_proof(
+                acknowledged=True,
+                runner=runner,
+                sleeper=sleeps.append,
+            )
+
+        self.assertEqual([1.0, 1.0, 1.0, 1.0], sleeps)
+
     def test_unrelated_repository_collision_is_refused(self) -> None:
         runner = FakeRunner(
             [
