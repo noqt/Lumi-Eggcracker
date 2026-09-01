@@ -1,0 +1,19 @@
+{
+  "canary_survived": true,
+  "changes_made": true,
+  "cleanup_complete": true,
+  "descendant_cgroups_checked": 1,
+  "installation_performed": false,
+  "journal_history_may_persist": true,
+  "mode": "containment-primitive-probe",
+  "network_requests_made": false,
+  "primitive": "pidfd-stop+cgroup.kill",
+  "result": "TERMINATED",
+  "root_populated": 0,
+  "source_commit": "0000000000000000000000000000000000000000",
+  "source_tree_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "target_processes": 2,
+  "target_survivors": 0,
+  "trigger_to_empty_ms": 1.25,
+  "workload_detection_performed": false
+}

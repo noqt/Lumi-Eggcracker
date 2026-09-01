@@ -74,6 +74,9 @@ run prints a JSON receipt with `"result":"TERMINATED"`,
 
 Automations can validate that current PASS receipt, or a redacted refusal or
 failure receipt, against the versioned [hosted-proof receipt v1 schema](schemas/hosted-proof-receipt-v1.schema.json).
+The [synthetic success example](schemas/examples/hosted-proof-receipt-v1-success.json)
+is a copy-ready shape for integration tests; its all-zero source identities are
+placeholders and must never be treated as evidence of a run.
 Schema validation checks structure only. It does not authenticate the run,
 source commit or tree, workflow or host, and it does not claim that the host is
 suitable for production or that Eggcracker detected a real workload. The v1
