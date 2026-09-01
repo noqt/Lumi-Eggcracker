@@ -1,0 +1,26 @@
+name: Validate Lumi Eggcracker hosted-proof receipt
+
+on:
+  workflow_call:
+    inputs:
+      receipt:
+        description: Path to one local hosted-proof receipt JSON object
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate the local v1 receipt structure
+        uses: noqt/Lumi-Eggcracker/actions/validate-hosted-proof-receipt@7cbd20d936e37531eb020d11ec3d4ddc9f1d8245
+        with:
+          receipt: ${{ inputs.receipt }}
