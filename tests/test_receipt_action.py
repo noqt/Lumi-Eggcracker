@@ -7,6 +7,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTION = ROOT / "actions" / "validate-hosted-proof-receipt" / "action.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 class HostedProofReceiptActionTests(unittest.TestCase):
@@ -37,6 +38,29 @@ class HostedProofReceiptActionTests(unittest.TestCase):
             step["run"],
         )
         self.assertNotIn("inputs.receipt", step["run"])
+
+    def test_ci_replays_the_local_action_with_the_public_success_shape(self) -> None:
+        workflow = yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+        action_steps = [
+            step
+            for step in workflow["jobs"]["test-and-package"]["steps"]
+            if step.get("uses") == "./actions/validate-hosted-proof-receipt"
+        ]
+        self.assertEqual(
+            [
+                {
+                    "name": "Replay the local hosted-proof receipt action",
+                    "if": "matrix.python-version == '3.11'",
+                    "uses": "./actions/validate-hosted-proof-receipt",
+                    "with": {
+                        "receipt": (
+                            "schemas/examples/hosted-proof-receipt-v1-success.json"
+                        )
+                    },
+                }
+            ],
+            action_steps,
+        )
 
 
 if __name__ == "__main__":

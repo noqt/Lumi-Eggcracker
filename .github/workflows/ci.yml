@@ -45,6 +45,12 @@ jobs:
       - name: Install test tooling
         run: python -m pip install jsonschema==4.26.0 ruff==0.16.1 PyYAML==6.0.3
 
+      - name: Replay the local hosted-proof receipt action
+        if: matrix.python-version == '3.11'
+        uses: ./actions/validate-hosted-proof-receipt
+        with:
+          receipt: schemas/examples/hosted-proof-receipt-v1-success.json
+
       - name: Lint
         if: matrix.python-version == '3.11'
         run: ruff check src tests scripts
