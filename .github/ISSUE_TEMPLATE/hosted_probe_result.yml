@@ -30,6 +30,16 @@ body:
     attributes:
       label: What should be easier or clearer?
       description: One sentence is enough. Leave this blank if the path was clear.
+  - type: dropdown
+    id: follow_up
+    attributes:
+      label: Do you want one public next step?
+      description: Choose whether NOQT should reply publicly with one exact supported next step for this current run. This is current-product support, not a request for product direction or a promise of private support.
+      options:
+        - Yes - reply publicly with one exact supported next step
+        - No - record this current-use result without follow-up
+    validations:
+      required: true
   - type: checkboxes
     id: safety
     attributes:
