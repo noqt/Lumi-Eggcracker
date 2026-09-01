@@ -27,6 +27,12 @@ jobs:
           PYTHONPATH: src
         run: python -m unittest discover -s tests -p test_hosted_proof.py -v
 
+  receipt-action-consumer:
+    name: receipt-action-consumer
+    uses: ./.github/workflows/validate-hosted-proof-receipt.yml
+    with:
+      receipt: schemas/examples/hosted-proof-receipt-v1-success.json
+
   test-and-package:
     runs-on: ubuntu-24.04
     strategy:

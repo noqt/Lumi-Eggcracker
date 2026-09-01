@@ -118,6 +118,22 @@ receipt path is passed as an environment value rather than interpolated into a
 shell command. The action uploads nothing and prints only the bounded validator
 result; it still validates structure rather than authenticating a run.
 
+For a complete read-only job, a partner repository can instead call the reusable
+workflow with the same local receipt path:
+
+```yaml
+jobs:
+  validate-eggcracker-receipt:
+    uses: noqt/Lumi-Eggcracker/.github/workflows/validate-hosted-proof-receipt.yml@<40-character-commit-sha>
+    with:
+      receipt: receipt.json
+```
+
+Pin the workflow to an immutable commit containing it. The job checks out the
+caller repository with persisted credentials disabled, then invokes the pinned
+local validator action. It requests read-only contents permission, exposes no
+outputs or secrets and uploads no receipt.
+
 If it passes, returns a redacted failure or gives you confusing friction,
 [send the public run](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
 The short form asks for the workflow URL and what happened. That is useful
