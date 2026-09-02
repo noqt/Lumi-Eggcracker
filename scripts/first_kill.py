@@ -73,6 +73,7 @@ MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_ZIP_COMMENT_BYTES = 65_535
 MIN_TOTAL_MEMORY_BYTES = 7 * 1024 * 1024 * 1024
+MIN_FREE_ROOT_BYTES = 8 * 1024 * 1024 * 1024
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 DEFAULT_AI_SMOKE_WORKSPACE = Path("/opt/lumi-eggcracker-ai-smoke")
 QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
@@ -325,6 +326,17 @@ def total_memory_bytes() -> int:
     return pages * page_size
 
 
+def free_root_bytes() -> int:
+    """Return free root-filesystem bytes, or refuse an unverifiable host."""
+    try:
+        free = shutil.disk_usage("/").free
+    except OSError as error:
+        raise FirstKillError("first-kill could not verify free root disk space") from error
+    if not isinstance(free, int) or free < 0:
+        raise FirstKillError("first-kill could not verify free root disk space")
+    return free
+
+
 def compatibility(operator: str) -> None:
     if os.geteuid() != 0:
         raise FirstKillError("run as root, for example: sudo python3 scripts/first_kill.py ...")
@@ -336,6 +348,10 @@ def compatibility(operator: str) -> None:
         raise FirstKillError(
             "first-kill requires at least 7 GiB of kernel-reported memory "
             "(normally an 8 GiB provisioned VM)"
+        )
+    if free_root_bytes() < MIN_FREE_ROOT_BYTES:
+        raise FirstKillError(
+            "first-kill requires at least 8 GiB free on the root filesystem"
         )
     controllers = Path("/sys/fs/cgroup/cgroup.controllers")
     if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split():
