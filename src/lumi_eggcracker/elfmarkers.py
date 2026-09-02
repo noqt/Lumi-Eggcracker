@@ -607,25 +607,35 @@ def inspect_pytorch_path(path: Path) -> RuntimeEvidence | None:
 
 def inspect_ollama_path(path: Path) -> RuntimeEvidence | None:
     """Recognise one exact pinned Ollama launcher or runner binary."""
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError:
         return None
     try:
-        return next(
-            (
-                evidence
-                for inspector in (
-                    _inspect_ollama_launcher_descriptor,
-                    _inspect_ollama_runner_descriptor,
-                )
-                if (evidence := inspector(descriptor)) is not None
-            ),
-            None,
-        )
+        return inspect_ollama_descriptor(descriptor)
     finally:
         os.close(descriptor)
+
+
+def inspect_ollama_descriptor(descriptor: int) -> RuntimeEvidence | None:
+    """Recognise one exact Ollama identity from an already-open descriptor."""
+    return next(
+        (
+            evidence
+            for inspector in (
+                _inspect_ollama_launcher_descriptor,
+                _inspect_ollama_runner_descriptor,
+            )
+            if (evidence := inspector(descriptor)) is not None
+        ),
+        None,
+    )
 
 
 def inspect_vllm_path(path: Path) -> RuntimeEvidence | None:

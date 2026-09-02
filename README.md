@@ -86,6 +86,25 @@ with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.types
 
 ### Check host compatibility
 
+If you already have the exact native Ollama launcher and runner files, check
+their compatibility before installing or starting anything:
+
+```sh
+/usr/bin/python3 -B -I -S scripts/check_ollama_compatibility.py \
+  --launcher /absolute/path/to/ollama-launcher \
+  --runner /absolute/path/to/ollama-runner
+```
+
+The checker makes no network request, needs no root access, starts no Ollama or
+Eggcracker process, and does not install Eggcracker. It authenticates both
+complete files against the release's exact pinned identities and prints
+`SUPPORTED` only when they satisfy the launcher and runner binary-identity
+roles required by `content.gguf-ollama`. It does not inspect a GGUF model,
+prove a live bounded launcher/runner topology, or qualify the host, container
+or remote execution context. Names, paths, partial pairs, other builds and GPU
+variants do not qualify. A passing compatibility check is not containment
+evidence; run the full demonstration only on a disposable supported host.
+
 Use a disposable, supported native Ubuntu machine whose loss is acceptable.
 The first-kill campaign runner rejects WSL2; WSL2 remains a secondary
 qualification environment and does not replace the ordinary-VM gate.
