@@ -160,12 +160,60 @@ class AiSmokeTests(unittest.TestCase):
     def test_prepare_build_parallelism_has_a_ceiling(self) -> None:
         with mock.patch.object(prepare.os, "cpu_count", return_value=128):
             command = prepare.build_command(Path("/tmp/build"))
-        self.assertEqual(str(prepare.MAX_BUILD_JOBS), command[-1])
+        self.assertEqual(8, prepare.MAX_BUILD_JOBS)
+        self.assertEqual("8", command[-1])
 
     def test_prepare_build_parallelism_defaults_to_one(self) -> None:
         with mock.patch.object(prepare.os, "cpu_count", return_value=None):
             command = prepare.build_command(Path("/tmp/build"))
         self.assertEqual("1", command[-1])
+
+    def test_prepare_uses_the_bounded_build_command(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            workspace = Path(raw) / "assets"
+            commands: list[list[str]] = []
+
+            def run(argv: list[str]) -> str:
+                commands.append(argv)
+                if argv[:2] == ["git", "clone"]:
+                    source = Path(argv[-1])
+                    source.mkdir()
+                    (source / "LICENSE").write_text("fixture", encoding="utf-8")
+                elif argv[:2] == ["cmake", "--build"]:
+                    runner = workspace / "llama-build" / "bin" / "llama-cli"
+                    runner.parent.mkdir(parents=True)
+                    runner.write_bytes(b"runner")
+                    runner.chmod(0o755)
+                elif "rev-parse" in argv:
+                    return prepare.LLAMA_COMMIT
+                return ""
+
+            def download(destination: Path) -> None:
+                destination.write_bytes(b"model")
+
+            with (
+                mock.patch.object(prepare, "run", side_effect=run),
+                mock.patch.object(prepare, "download_model", side_effect=download),
+                mock.patch.object(prepare, "verify_manifest", return_value={"verified": True}),
+                mock.patch.object(prepare.os, "cpu_count", return_value=2),
+            ):
+                self.assertEqual({"verified": True}, prepare.prepare(workspace))
+
+            builds = [command for command in commands if command[:2] == ["cmake", "--build"]]
+            self.assertEqual(
+                [
+                    "cmake",
+                    "--build",
+                    str(workspace / "llama-build"),
+                    "--target",
+                    "llama-cli",
+                    "--parallel",
+                    "2",
+                ],
+                builds[0],
+            )
+            self.assertEqual(1, len(builds))
+            self.assertNotIn("-j", builds[0])
 
     def test_smoke_path_does_not_use_a_shell_wrapper(self) -> None:
         source = (ROOT / "scripts" / "smoke_local_ai.py").read_text(encoding="utf-8")
