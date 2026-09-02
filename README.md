@@ -89,7 +89,7 @@ with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.types
 Use a disposable, supported native Ubuntu machine whose loss is acceptable.
 The first-kill campaign runner rejects WSL2; WSL2 remains a secondary
 qualification environment and does not replace the ordinary-VM gate.
-The path requires at least 3 GiB of kernel-reported memory (normally a 4 GiB
+The path requires at least 7 GiB of kernel-reported memory (normally an 8 GiB
 provisioned VM) and at least 8 GiB free on the root filesystem; preflight
 rejects undersized hosts before downloads or mutation.
 The demonstration requires root, systemd, unified cgroup v2 with `cgroup.kill`,

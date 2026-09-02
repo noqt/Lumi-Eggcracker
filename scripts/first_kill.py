@@ -72,7 +72,7 @@ MAX_ARCHIVE_MEMBERS = 256
 MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_ZIP_COMMENT_BYTES = 65_535
-MIN_TOTAL_MEMORY_BYTES = 3 * 1024 * 1024 * 1024
+MIN_TOTAL_MEMORY_BYTES = 7 * 1024 * 1024 * 1024
 MIN_FREE_ROOT_BYTES = 8 * 1024 * 1024 * 1024
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 DEFAULT_AI_SMOKE_WORKSPACE = Path("/opt/lumi-eggcracker-ai-smoke")
@@ -346,8 +346,8 @@ def compatibility(operator: str) -> None:
         raise FirstKillError("first-kill requires native Linux; WSL2 is unsupported")
     if total_memory_bytes() < MIN_TOTAL_MEMORY_BYTES:
         raise FirstKillError(
-            "first-kill requires at least 3 GiB of kernel-reported memory "
-            "(normally a 4 GiB provisioned VM)"
+            "first-kill requires at least 7 GiB of kernel-reported memory "
+            "(normally an 8 GiB provisioned VM)"
         )
     if free_root_bytes() < MIN_FREE_ROOT_BYTES:
         raise FirstKillError(
