@@ -42,10 +42,29 @@ SPEC.loader.exec_module(first_kill)
 
 
 class FirstKillTests(unittest.TestCase):
-    def assert_entrypoint_refuses_before_side_effects(self) -> None:
+    def assert_entrypoint_refuses_before_side_effects(
+        self,
+        expected_error: str,
+        passwd=None,
+        group=None,
+    ) -> None:
+        if passwd is None:
+            passwd = mock.Mock()
+
+            def clean_passwd_lookup(name: str):
+                if name == first_kill.WORKLOAD_USER:
+                    raise KeyError(name)
+                return object()
+
+            passwd.getpwnam.side_effect = clean_passwd_lookup
+        if group is None:
+            group = mock.Mock()
+            group.getgrnam.side_effect = KeyError(first_kill.WORKLOAD_USER)
         errors = io.StringIO()
         with (
             mock.patch.object(first_kill, "operator_name", return_value="tester"),
+            mock.patch.object(first_kill, "pwd", passwd),
+            mock.patch.object(first_kill, "grp", group),
             mock.patch.object(first_kill.os, "geteuid", return_value=0),
             mock.patch.object(first_kill.os, "pidfd_open", create=True),
             mock.patch.object(first_kill.signal, "pidfd_send_signal", create=True),
@@ -70,6 +89,7 @@ class FirstKillTests(unittest.TestCase):
 
         self.assertEqual(2, result)
         self.assertIn("eggcracker first-kill:", errors.getvalue())
+        self.assertIn(expected_error, errors.getvalue())
         for forbidden in (
             repository_root,
             prepare_workspace,
@@ -116,7 +136,9 @@ class FirstKillTests(unittest.TestCase):
                 with mock.patch.object(
                     first_kill.Path, "is_file", autospec=True, side_effect=present
                 ):
-                    self.assert_entrypoint_refuses_before_side_effects()
+                    self.assert_entrypoint_refuses_before_side_effects(
+                        f"required host command is missing or not executable: {missing}"
+                    )
 
     def test_preflight_rejects_residual_workload_identity(self) -> None:
         passwd = mock.Mock()
@@ -147,17 +169,24 @@ class FirstKillTests(unittest.TestCase):
                 if residual == "account":
                     passwd.getpwnam.return_value = object()
                 else:
-                    passwd.getpwnam.side_effect = KeyError(first_kill.WORKLOAD_USER)
+                    def passwd_lookup(name: str):
+                        if name == first_kill.WORKLOAD_USER:
+                            raise KeyError(name)
+                        return object()
+
+                    passwd.getpwnam.side_effect = passwd_lookup
                     group.getgrnam.return_value = object()
 
                 with (
-                    mock.patch.object(first_kill, "pwd", passwd),
-                    mock.patch.object(first_kill, "grp", group),
                     mock.patch.object(
                         first_kill.Path, "is_file", autospec=True, return_value=True
                     ),
                 ):
-                    self.assert_entrypoint_refuses_before_side_effects()
+                    self.assert_entrypoint_refuses_before_side_effects(
+                        f"refusing a pre-existing Eggcracker workload {residual}",
+                        passwd,
+                        group,
+                    )
 
     def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
         output = io.StringIO()
