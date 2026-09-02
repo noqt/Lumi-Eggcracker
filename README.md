@@ -87,6 +87,8 @@ with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.types
 ### Check host compatibility
 
 Use a disposable, supported native Ubuntu machine whose loss is acceptable.
+The first-kill campaign runner rejects WSL2; WSL2 remains a secondary
+qualification environment and does not replace the ordinary-VM gate.
 The demonstration requires root, systemd, unified cgroup v2 with `cgroup.kill`,
 pidfds, Python 3.11+, Git, GnuPG, CMake, a native C/C++ build toolchain,
 iproute2, nftables, util-linux `nsenter`, standard account-management and

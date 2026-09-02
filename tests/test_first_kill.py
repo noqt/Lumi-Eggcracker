@@ -47,6 +47,7 @@ class FirstKillTests(unittest.TestCase):
         expected_error: str,
         passwd=None,
         group=None,
+        platform_release: str = "6.8.0-generic",
     ) -> None:
         if passwd is None:
             passwd = mock.Mock()
@@ -68,7 +69,11 @@ class FirstKillTests(unittest.TestCase):
             mock.patch.object(first_kill.os, "geteuid", return_value=0),
             mock.patch.object(first_kill.os, "pidfd_open", create=True),
             mock.patch.object(first_kill.signal, "pidfd_send_signal", create=True),
-            mock.patch.object(first_kill.platform, "system", return_value="Linux"),
+            mock.patch.multiple(
+                first_kill.platform,
+                system=mock.Mock(return_value="Linux"),
+                release=mock.Mock(return_value=platform_release),
+            ),
             mock.patch.object(first_kill.Path, "read_text", autospec=True, return_value="pids"),
             mock.patch.object(first_kill.Path, "exists", autospec=True, return_value=False),
             mock.patch.object(first_kill.Path, "is_symlink", autospec=True, return_value=False),
@@ -100,6 +105,15 @@ class FirstKillTests(unittest.TestCase):
             make_temporary,
         ):
             forbidden.assert_not_called()
+
+    def test_wsl_refusal_precedes_entrypoint_side_effects(self) -> None:
+        with mock.patch.object(
+            first_kill.Path, "is_file", autospec=True, return_value=True
+        ):
+            self.assert_entrypoint_refuses_before_side_effects(
+                "first-kill requires native Linux; WSL2 is unsupported",
+                platform_release="6.18.33.1-microsoft-standard-WSL2",
+            )
 
     def test_default_release_identity_is_the_1_0_candidate(self) -> None:
         self.assertEqual("v1.0.10", first_kill.DEFAULT_TAG)
