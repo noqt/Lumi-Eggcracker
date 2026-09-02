@@ -88,9 +88,10 @@ with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.types
 
 Use a disposable, supported native Ubuntu machine whose loss is acceptable.
 The demonstration requires root, systemd, unified cgroup v2 with `cgroup.kill`,
-pidfds, Python 3.11+, Git, GnuPG, CMake, a native C/C++ build toolchain and
-network access. It changes root-owned system services, compiles the pinned
-llama.cpp runner, downloads signed release assets, and—only after the explicit
+pidfds, Python 3.11+, Git, GnuPG, CMake, a native C/C++ build toolchain,
+iproute2, nftables, util-linux `nsenter` and network access. It changes
+root-owned system services, compiles the pinned llama.cpp runner, downloads
+signed release assets, and—only after the explicit
 flag—downloads the third-party Qwen model. Do not begin on a workstation,
 shared host, production server, or machine carrying private data.
 

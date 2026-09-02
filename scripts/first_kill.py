@@ -28,8 +28,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
+    import grp
     import pwd
 except ImportError:  # pragma: no cover - first-kill is a native Linux command
+    grp = None  # type: ignore[assignment]
     pwd = None  # type: ignore[assignment]
 
 
@@ -47,6 +49,17 @@ INSTALL_TARGETS = (
     Path("/etc/systemd/system/lumi-eggcracker.service"),
     Path("/etc/systemd/system/lumi-eggcracker-watchdog.service"),
     Path("/etc/tmpfiles.d/lumi-eggcracker.conf"),
+)
+REQUIRED_HOST_COMMANDS = (
+    "/usr/bin/python3",
+    "/usr/bin/systemctl",
+    "/usr/bin/systemd-run",
+    "/usr/sbin/runuser",
+    "/usr/bin/gpg",
+    "/usr/bin/git",
+    "/usr/sbin/ip",
+    "/usr/sbin/nft",
+    "/usr/bin/nsenter",
 )
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 256
@@ -265,6 +278,29 @@ def operator_name(explicit: str | None) -> str:
     return value
 
 
+def require_host_commands() -> None:
+    """Reject a host missing commands required later by the signed installer."""
+    for binary in REQUIRED_HOST_COMMANDS:
+        path = Path(binary)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise FirstKillError(f"required host command is missing or not executable: {binary}")
+
+
+def require_clean_workload_identity() -> None:
+    """Reject residue that a clean demonstration cannot safely claim or remove."""
+    if pwd is None or grp is None:
+        raise FirstKillError("first-kill requires the POSIX account databases")
+    for lookup, identity in (
+        (pwd.getpwnam, "account"),
+        (grp.getgrnam, "group"),
+    ):
+        try:
+            lookup(WORKLOAD_USER)
+        except KeyError:
+            continue
+        raise FirstKillError(f"refusing a pre-existing Eggcracker workload {identity}")
+
+
 def compatibility(operator: str) -> None:
     if os.geteuid() != 0:
         raise FirstKillError("run as root, for example: sudo python3 scripts/first_kill.py ...")
@@ -275,9 +311,7 @@ def compatibility(operator: str) -> None:
         raise FirstKillError("unified cgroup v2 with the pids controller is required")
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         raise FirstKillError("this Python/Linux host lacks the required pidfd primitives")
-    for binary in ("/usr/bin/python3", "/usr/bin/systemctl", "/usr/bin/systemd-run", "/usr/sbin/runuser", "/usr/bin/gpg", "/usr/bin/git"):
-        if not Path(binary).is_file():
-            raise FirstKillError(f"required host command is missing: {binary}")
+    require_host_commands()
     required_tool_groups = (
         (("cmake",), "CMake"),
         (("c++", "g++", "clang++"), "a C++ compiler (c++, g++ or clang++)"),
@@ -289,6 +323,7 @@ def compatibility(operator: str) -> None:
     for target in INSTALL_TARGETS:
         if target.exists() or target.is_symlink():
             raise FirstKillError(f"refusing to overwrite an existing installation target: {target}")
+    require_clean_workload_identity()
     try:
         if pwd is None:
             raise FirstKillError("first-kill requires the POSIX passwd database")

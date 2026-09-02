@@ -26,6 +26,43 @@ class FirstKillTests(unittest.TestCase):
     def test_default_release_identity_is_the_1_0_candidate(self) -> None:
         self.assertEqual("v1.0.10", first_kill.DEFAULT_TAG)
 
+    def test_preflight_requires_every_fixed_installer_command(self) -> None:
+        missing = "/usr/sbin/nft"
+
+        def present(path: Path) -> bool:
+            return str(path) != missing
+
+        with (
+            mock.patch.object(first_kill.Path, "is_file", autospec=True, side_effect=present),
+            mock.patch.object(first_kill.os, "access", return_value=True),
+            self.assertRaisesRegex(first_kill.FirstKillError, missing),
+        ):
+            first_kill.require_host_commands()
+
+        for required in ("/usr/sbin/ip", "/usr/sbin/nft", "/usr/bin/nsenter"):
+            self.assertIn(required, first_kill.REQUIRED_HOST_COMMANDS)
+
+    def test_preflight_rejects_residual_workload_identity(self) -> None:
+        passwd = mock.Mock()
+        group = mock.Mock()
+        passwd.getpwnam.return_value = object()
+
+        with (
+            mock.patch.object(first_kill, "pwd", passwd),
+            mock.patch.object(first_kill, "grp", group),
+            self.assertRaisesRegex(first_kill.FirstKillError, "workload account"),
+        ):
+            first_kill.require_clean_workload_identity()
+
+        passwd.getpwnam.side_effect = KeyError(first_kill.WORKLOAD_USER)
+        group.getgrnam.return_value = object()
+        with (
+            mock.patch.object(first_kill, "pwd", passwd),
+            mock.patch.object(first_kill, "grp", group),
+            self.assertRaisesRegex(first_kill.FirstKillError, "workload group"),
+        ):
+            first_kill.require_clean_workload_identity()
+
     def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
         output = io.StringIO()
         with (
