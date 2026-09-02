@@ -35,18 +35,25 @@ systemd/cgroup-v2 capabilities, operator, commit, artifacts, and cleanup result.
 Never run destructive qualification on a workstation, server, shared host, or
 non-disposable environment.
 
-Exactly two profiles are active in version 0.5.0:
+Exactly four profiles are active in version 1.0.10:
 
 - `content.gguf-llama`: a bounded plausible GGUF v2/v3 header plus either the
   qualified llama.cpp/GGML ELF marker pair or the exact pinned launcher build
   ID.
+- `content.gguf-ollama`: the same bounded GGUF content evidence plus the exact
+  pinned Ollama runner and launcher topology identities.
 - `content.safetensors-pytorch`: a structurally valid contiguous Safetensors
   artifact plus the exact pinned CPU PyTorch bridge-and-ATen ELF build-ID pair,
   observed in one process or the documented bounded related workload using the
   dedicated workload UID.
+- `content.safetensors-vllm`: the same bounded Safetensors and CPU PyTorch
+  evidence plus the exact pinned vLLM CPython and native-extension topology
+  identities.
 
-Name-only Ollama, vLLM, TGI, LocalAI, llamafile, agent-CLI, and other catalogue
-entries are inactive research until separately qualified. Do not claim
+Only the exact pinned native CPU Ollama and vLLM topology fixtures are active;
+names alone never trigger a kill. TGI, LocalAI, llamafile, agent-CLI, GPU,
+container, remote, and other unqualified variants remain inactive research.
+Do not claim
 universal or arbitrary AI/agent/runtime identification, proof of inference,
 malware prevention or detection, IDS/EDR capability, sandboxing, network,
 credential, or filesystem isolation, container/cloud/remote-API protection,
@@ -71,20 +78,20 @@ Do not generalise a fixture, internal Windows control run, one Linux host, CI
 run, or receipt into universal capability, native qualification on another
 host, independent installation, adoption, demand, or safety assurance.
 
-Current release snapshot, recorded 25 August 2026 and requiring exact-identity
+Current release snapshot, recorded 3 September 2026 and requiring exact-identity
 revalidation before a new external claim:
 
-- signed public tag `v0.5.0` points to
-  `eb342808f56cdc213c0861726d5309a146965bef` and has a matching GitHub Release
+- signed public tag `v1.0.10` points to
+  `27cb6dfa0884896025976f8583398c9db7ac9a30` and has a matching GitHub Release
   with the published Linux bundle, source archive, zipapp, manifest, checksums
   and release public key;
-- public `main` at
-  `636050879bba56baea2d724b62f61544e48b48d1` incorporates the v0.5.0 line and
-  the bounded first-kill campaign surface; and
-- v0.5.0 has accepted commit- and host-bound internal qualification evidence,
-  including the release gates in `QUALIFICATION.md`. It remains a public alpha,
-  not an independent external audit, customer adoption, universal coverage or
-  safety assurance.
+- public `main` incorporates the v1.0.10 release line and the bounded llama.cpp
+  first-kill reliability repairs; resolve its exact GitHub commit at action
+  time rather than treating this snapshot as current `main` identity; and
+- v1.0.10 has accepted commit- and host-bound internal qualification evidence
+  for the four exact profiles above, including the release gates in
+  `QUALIFICATION.md`. It remains a public alpha, not an independent external
+  audit, customer adoption, universal coverage or safety assurance.
 
 ## Proportional verification
 
