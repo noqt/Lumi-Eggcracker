@@ -23,24 +23,75 @@ SPEC.loader.exec_module(first_kill)
 
 
 class FirstKillTests(unittest.TestCase):
+    def assert_entrypoint_refuses_before_side_effects(self, compatibility_check) -> None:
+        errors = io.StringIO()
+        with (
+            mock.patch.object(first_kill, "operator_name", return_value="tester"),
+            mock.patch.object(first_kill, "compatibility", side_effect=compatibility_check),
+            mock.patch.object(first_kill, "repository_root") as repository_root,
+            mock.patch.object(first_kill, "prepare_workspace") as prepare_workspace,
+            mock.patch.object(first_kill, "release_files") as release_files,
+            mock.patch.object(first_kill, "install_release") as install_release,
+            mock.patch.object(first_kill, "run_real_smoke") as run_real_smoke,
+            mock.patch.object(first_kill, "remove_installation") as remove_installation,
+            mock.patch.object(first_kill.tempfile, "mkdtemp") as make_temporary,
+            contextlib.redirect_stderr(errors),
+        ):
+            result = first_kill.main(
+                ["--operator", "tester", "--accept-third-party-downloads"]
+            )
+
+        self.assertEqual(2, result)
+        self.assertIn("eggcracker first-kill:", errors.getvalue())
+        for forbidden in (
+            repository_root,
+            prepare_workspace,
+            release_files,
+            install_release,
+            run_real_smoke,
+            remove_installation,
+            make_temporary,
+        ):
+            forbidden.assert_not_called()
+
     def test_default_release_identity_is_the_1_0_candidate(self) -> None:
         self.assertEqual("v1.0.10", first_kill.DEFAULT_TAG)
 
     def test_preflight_requires_every_fixed_installer_command(self) -> None:
-        missing = "/usr/sbin/nft"
+        for missing in first_kill.REQUIRED_HOST_COMMANDS:
+            with self.subTest(missing=missing):
 
-        def present(path: Path) -> bool:
-            return str(path) != missing
+                def present(path: Path, expected: str = missing) -> bool:
+                    return str(path) != expected
 
-        with (
-            mock.patch.object(first_kill.Path, "is_file", autospec=True, side_effect=present),
-            mock.patch.object(first_kill.os, "access", return_value=True),
-            self.assertRaisesRegex(first_kill.FirstKillError, missing),
-        ):
-            first_kill.require_host_commands()
+                with (
+                    mock.patch.object(
+                        first_kill.Path, "is_file", autospec=True, side_effect=present
+                    ),
+                    mock.patch.object(first_kill.os, "access", return_value=True),
+                    self.assertRaisesRegex(
+                        first_kill.FirstKillError, missing.replace("/", r"\/")
+                    ),
+                ):
+                    first_kill.require_host_commands()
 
-        for required in ("/usr/sbin/ip", "/usr/sbin/nft", "/usr/bin/nsenter"):
-            self.assertIn(required, first_kill.REQUIRED_HOST_COMMANDS)
+    def test_each_missing_command_refusal_precedes_entrypoint_side_effects(self) -> None:
+        for missing in first_kill.REQUIRED_HOST_COMMANDS:
+            with self.subTest(missing=missing):
+
+                def present(path: Path, expected: str = missing) -> bool:
+                    return str(path) != expected
+
+                def compatibility_check(_operator: str) -> None:
+                    first_kill.require_host_commands()
+
+                with (
+                    mock.patch.object(
+                        first_kill.Path, "is_file", autospec=True, side_effect=present
+                    ),
+                    mock.patch.object(first_kill.os, "access", return_value=True),
+                ):
+                    self.assert_entrypoint_refuses_before_side_effects(compatibility_check)
 
     def test_preflight_rejects_residual_workload_identity(self) -> None:
         passwd = mock.Mock()
@@ -62,6 +113,26 @@ class FirstKillTests(unittest.TestCase):
             self.assertRaisesRegex(first_kill.FirstKillError, "workload group"),
         ):
             first_kill.require_clean_workload_identity()
+
+    def test_each_residual_identity_refusal_precedes_entrypoint_side_effects(self) -> None:
+        for residual in ("account", "group"):
+            with self.subTest(residual=residual):
+                passwd = mock.Mock()
+                group = mock.Mock()
+                if residual == "account":
+                    passwd.getpwnam.return_value = object()
+                else:
+                    passwd.getpwnam.side_effect = KeyError(first_kill.WORKLOAD_USER)
+                    group.getgrnam.return_value = object()
+
+                def compatibility_check(_operator: str) -> None:
+                    first_kill.require_clean_workload_identity()
+
+                with (
+                    mock.patch.object(first_kill, "pwd", passwd),
+                    mock.patch.object(first_kill, "grp", group),
+                ):
+                    self.assert_entrypoint_refuses_before_side_effects(compatibility_check)
 
     def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
         output = io.StringIO()

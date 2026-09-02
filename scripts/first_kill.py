@@ -51,10 +51,16 @@ INSTALL_TARGETS = (
     Path("/etc/tmpfiles.d/lumi-eggcracker.conf"),
 )
 REQUIRED_HOST_COMMANDS = (
+    "/bin/sleep",
+    "/usr/bin/env",
     "/usr/bin/python3",
     "/usr/bin/systemctl",
     "/usr/bin/systemd-run",
+    "/usr/bin/journalctl",
     "/usr/sbin/runuser",
+    "/usr/sbin/useradd",
+    "/usr/sbin/userdel",
+    "/usr/sbin/groupdel",
     "/usr/bin/gpg",
     "/usr/bin/git",
     "/usr/sbin/ip",
