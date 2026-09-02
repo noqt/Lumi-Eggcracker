@@ -172,14 +172,18 @@ class AiSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             workspace = Path(raw) / "assets"
             commands: list[list[str]] = []
+            build_timeouts: list[float] = []
 
-            def run(argv: list[str]) -> str:
+            def run(
+                argv: list[str], *, timeout: float = prepare.DEFAULT_COMMAND_TIMEOUT_SECONDS
+            ) -> str:
                 commands.append(argv)
                 if argv[:2] == ["git", "clone"]:
                     source = Path(argv[-1])
                     source.mkdir()
                     (source / "LICENSE").write_text("fixture", encoding="utf-8")
                 elif argv[:2] == ["cmake", "--build"]:
+                    build_timeouts.append(timeout)
                     runner = workspace / "llama-build" / "bin" / "llama-cli"
                     runner.parent.mkdir(parents=True)
                     runner.write_bytes(b"runner")
@@ -213,6 +217,11 @@ class AiSmokeTests(unittest.TestCase):
                 builds[0],
             )
             self.assertEqual(1, len(builds))
+            self.assertEqual([prepare.BUILD_TIMEOUT_SECONDS], build_timeouts)
+            self.assertGreater(
+                prepare.BUILD_TIMEOUT_SECONDS,
+                prepare.DEFAULT_COMMAND_TIMEOUT_SECONDS,
+            )
             self.assertNotIn("-j", builds[0])
 
     def test_smoke_path_does_not_use_a_shell_wrapper(self) -> None:

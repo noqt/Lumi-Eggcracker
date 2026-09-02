@@ -25,8 +25,10 @@ MODEL_SHA256 = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
 MODEL_NAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
 MAX_MODEL_BYTES = 600 * 1024 * 1024
-# A serial build avoids exhausting the disposable 4 GiB native replay host.
+# A serial build avoids exhausting the minimum qualified native host.
 MAX_BUILD_JOBS = 1
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 900
+BUILD_TIMEOUT_SECONDS = 1800
 
 
 def digest(path: Path) -> str:
@@ -37,8 +39,8 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
-def run(argv: list[str]) -> str:
-    result = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=900)
+def run(argv: list[str], *, timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS) -> str:
+    result = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "asset preparation command failed")
     return result.stdout.strip()
@@ -183,7 +185,7 @@ def prepare(workspace: Path) -> dict[str, Any]:
     if run(["git", "-C", str(source), "rev-parse", "HEAD"]) != LLAMA_COMMIT:
         raise RuntimeError("runner source did not resolve to the pinned commit")
     run(["cmake", "-S", str(source), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release"])
-    run(build_command(build))
+    run(build_command(build), timeout=BUILD_TIMEOUT_SECONDS)
     runner = build / "bin" / "llama-cli"
     regular(runner, executable=True)
     model.parent.mkdir(mode=0o755)
