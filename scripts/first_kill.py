@@ -312,7 +312,7 @@ def compatibility(operator: str) -> None:
         raise FirstKillError("run as root, for example: sudo python3 scripts/first_kill.py ...")
     if platform.system() != "Linux":
         raise FirstKillError("first-kill requires native Linux; Windows and macOS are unsupported")
-    if "microsoft" in platform.release().lower():
+    if "microsoft" in platform.release().lower() or os.environ.get("WSL_DISTRO_NAME"):
         raise FirstKillError("first-kill requires native Linux; WSL2 is unsupported")
     controllers = Path("/sys/fs/cgroup/cgroup.controllers")
     if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split():

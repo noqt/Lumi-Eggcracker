@@ -48,6 +48,7 @@ class FirstKillTests(unittest.TestCase):
         passwd=None,
         group=None,
         platform_release: str = "6.8.0-generic",
+        wsl_distro_name: str | None = None,
     ) -> None:
         if passwd is None:
             passwd = mock.Mock()
@@ -61,31 +62,52 @@ class FirstKillTests(unittest.TestCase):
         if group is None:
             group = mock.Mock()
             group.getgrnam.side_effect = KeyError(first_kill.WORKLOAD_USER)
+        operator_name = mock.Mock(return_value="tester")
+        repository_root = mock.Mock()
+        prepare_workspace = mock.Mock()
+        release_files = mock.Mock()
+        install_release = mock.Mock()
+        run_real_smoke = mock.Mock()
+        remove_installation = mock.Mock()
+        make_temporary = mock.Mock()
+        environment = {}
+        if wsl_distro_name is not None:
+            environment["WSL_DISTRO_NAME"] = wsl_distro_name
         errors = io.StringIO()
         with (
-            mock.patch.object(first_kill, "operator_name", return_value="tester"),
-            mock.patch.object(first_kill, "pwd", passwd),
-            mock.patch.object(first_kill, "grp", group),
-            mock.patch.object(first_kill.os, "geteuid", return_value=0),
-            mock.patch.object(first_kill.os, "pidfd_open", create=True),
+            mock.patch.multiple(
+                first_kill,
+                operator_name=operator_name,
+                pwd=passwd,
+                grp=group,
+                repository_root=repository_root,
+                prepare_workspace=prepare_workspace,
+                release_files=release_files,
+                install_release=install_release,
+                run_real_smoke=run_real_smoke,
+                remove_installation=remove_installation,
+            ),
+            mock.patch.multiple(
+                first_kill.os,
+                geteuid=mock.Mock(return_value=0),
+                pidfd_open=mock.Mock(),
+                access=mock.Mock(return_value=True),
+                environ=environment,
+            ),
             mock.patch.object(first_kill.signal, "pidfd_send_signal", create=True),
             mock.patch.multiple(
                 first_kill.platform,
                 system=mock.Mock(return_value="Linux"),
                 release=mock.Mock(return_value=platform_release),
             ),
-            mock.patch.object(first_kill.Path, "read_text", autospec=True, return_value="pids"),
-            mock.patch.object(first_kill.Path, "exists", autospec=True, return_value=False),
-            mock.patch.object(first_kill.Path, "is_symlink", autospec=True, return_value=False),
-            mock.patch.object(first_kill.os, "access", return_value=True),
+            mock.patch.multiple(
+                first_kill.Path,
+                read_text=mock.Mock(return_value="pids"),
+                exists=mock.Mock(return_value=False),
+                is_symlink=mock.Mock(return_value=False),
+            ),
             mock.patch.object(first_kill.shutil, "which", return_value="/usr/bin/tool"),
-            mock.patch.object(first_kill, "repository_root") as repository_root,
-            mock.patch.object(first_kill, "prepare_workspace") as prepare_workspace,
-            mock.patch.object(first_kill, "release_files") as release_files,
-            mock.patch.object(first_kill, "install_release") as install_release,
-            mock.patch.object(first_kill, "run_real_smoke") as run_real_smoke,
-            mock.patch.object(first_kill, "remove_installation") as remove_installation,
-            mock.patch.object(first_kill.tempfile, "mkdtemp") as make_temporary,
+            mock.patch.object(first_kill.tempfile, "mkdtemp", make_temporary),
             contextlib.redirect_stderr(errors),
         ):
             result = first_kill.main(
@@ -113,6 +135,16 @@ class FirstKillTests(unittest.TestCase):
             self.assert_entrypoint_refuses_before_side_effects(
                 "first-kill requires native Linux; WSL2 is unsupported",
                 platform_release="6.18.33.1-microsoft-standard-WSL2",
+            )
+
+    def test_wsl_environment_refusal_precedes_entrypoint_side_effects(self) -> None:
+        with mock.patch.object(
+            first_kill.Path, "is_file", autospec=True, return_value=True
+        ):
+            self.assert_entrypoint_refuses_before_side_effects(
+                "first-kill requires native Linux; WSL2 is unsupported",
+                platform_release="6.8.0-custom",
+                wsl_distro_name="test-wsl",
             )
 
     def test_default_release_identity_is_the_1_0_candidate(self) -> None:
