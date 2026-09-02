@@ -15,6 +15,25 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 TAG_COMMIT = "a" * 40
+EXPECTED_FIRST_KILL_COMMANDS = frozenset(
+    {
+        "/bin/sleep",
+        "/usr/bin/env",
+        "/usr/bin/git",
+        "/usr/bin/gpg",
+        "/usr/bin/journalctl",
+        "/usr/bin/nsenter",
+        "/usr/bin/python3",
+        "/usr/bin/systemctl",
+        "/usr/bin/systemd-run",
+        "/usr/sbin/groupdel",
+        "/usr/sbin/ip",
+        "/usr/sbin/nft",
+        "/usr/sbin/runuser",
+        "/usr/sbin/useradd",
+        "/usr/sbin/userdel",
+    }
+)
 SPEC = importlib.util.spec_from_file_location("first_kill", ROOT / "scripts" / "first_kill.py")
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("cannot load first-kill script")
@@ -23,11 +42,19 @@ SPEC.loader.exec_module(first_kill)
 
 
 class FirstKillTests(unittest.TestCase):
-    def assert_entrypoint_refuses_before_side_effects(self, compatibility_check) -> None:
+    def assert_entrypoint_refuses_before_side_effects(self) -> None:
         errors = io.StringIO()
         with (
             mock.patch.object(first_kill, "operator_name", return_value="tester"),
-            mock.patch.object(first_kill, "compatibility", side_effect=compatibility_check),
+            mock.patch.object(first_kill.os, "geteuid", return_value=0),
+            mock.patch.object(first_kill.os, "pidfd_open", create=True),
+            mock.patch.object(first_kill.signal, "pidfd_send_signal", create=True),
+            mock.patch.object(first_kill.platform, "system", return_value="Linux"),
+            mock.patch.object(first_kill.Path, "read_text", autospec=True, return_value="pids"),
+            mock.patch.object(first_kill.Path, "exists", autospec=True, return_value=False),
+            mock.patch.object(first_kill.Path, "is_symlink", autospec=True, return_value=False),
+            mock.patch.object(first_kill.os, "access", return_value=True),
+            mock.patch.object(first_kill.shutil, "which", return_value="/usr/bin/tool"),
             mock.patch.object(first_kill, "repository_root") as repository_root,
             mock.patch.object(first_kill, "prepare_workspace") as prepare_workspace,
             mock.patch.object(first_kill, "release_files") as release_files,
@@ -58,7 +85,11 @@ class FirstKillTests(unittest.TestCase):
         self.assertEqual("v1.0.10", first_kill.DEFAULT_TAG)
 
     def test_preflight_requires_every_fixed_installer_command(self) -> None:
-        for missing in first_kill.REQUIRED_HOST_COMMANDS:
+        self.assertEqual(
+            EXPECTED_FIRST_KILL_COMMANDS,
+            frozenset(first_kill.REQUIRED_HOST_COMMANDS),
+        )
+        for missing in EXPECTED_FIRST_KILL_COMMANDS:
             with self.subTest(missing=missing):
 
                 def present(path: Path, expected: str = missing) -> bool:
@@ -76,22 +107,16 @@ class FirstKillTests(unittest.TestCase):
                     first_kill.require_host_commands()
 
     def test_each_missing_command_refusal_precedes_entrypoint_side_effects(self) -> None:
-        for missing in first_kill.REQUIRED_HOST_COMMANDS:
+        for missing in EXPECTED_FIRST_KILL_COMMANDS:
             with self.subTest(missing=missing):
 
                 def present(path: Path, expected: str = missing) -> bool:
                     return str(path) != expected
 
-                def compatibility_check(_operator: str) -> None:
-                    first_kill.require_host_commands()
-
-                with (
-                    mock.patch.object(
-                        first_kill.Path, "is_file", autospec=True, side_effect=present
-                    ),
-                    mock.patch.object(first_kill.os, "access", return_value=True),
+                with mock.patch.object(
+                    first_kill.Path, "is_file", autospec=True, side_effect=present
                 ):
-                    self.assert_entrypoint_refuses_before_side_effects(compatibility_check)
+                    self.assert_entrypoint_refuses_before_side_effects()
 
     def test_preflight_rejects_residual_workload_identity(self) -> None:
         passwd = mock.Mock()
@@ -125,14 +150,14 @@ class FirstKillTests(unittest.TestCase):
                     passwd.getpwnam.side_effect = KeyError(first_kill.WORKLOAD_USER)
                     group.getgrnam.return_value = object()
 
-                def compatibility_check(_operator: str) -> None:
-                    first_kill.require_clean_workload_identity()
-
                 with (
                     mock.patch.object(first_kill, "pwd", passwd),
                     mock.patch.object(first_kill, "grp", group),
+                    mock.patch.object(
+                        first_kill.Path, "is_file", autospec=True, return_value=True
+                    ),
                 ):
-                    self.assert_entrypoint_refuses_before_side_effects(compatibility_check)
+                    self.assert_entrypoint_refuses_before_side_effects()
 
     def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
         output = io.StringIO()
