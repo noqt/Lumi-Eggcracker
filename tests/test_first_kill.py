@@ -49,6 +49,7 @@ class FirstKillTests(unittest.TestCase):
         group=None,
         platform_release: str = "6.8.0-generic",
         wsl_distro_name: str | None = None,
+        total_memory_bytes: int | None = None,
     ) -> None:
         if passwd is None:
             passwd = mock.Mock()
@@ -74,6 +75,13 @@ class FirstKillTests(unittest.TestCase):
         if wsl_distro_name is not None:
             environment["WSL_DISTRO_NAME"] = wsl_distro_name
         errors = io.StringIO()
+        memory = mock.Mock(
+            return_value=(
+                first_kill.MIN_TOTAL_MEMORY_BYTES
+                if total_memory_bytes is None
+                else total_memory_bytes
+            )
+        )
         with (
             mock.patch.multiple(
                 first_kill,
@@ -86,6 +94,7 @@ class FirstKillTests(unittest.TestCase):
                 install_release=install_release,
                 run_real_smoke=run_real_smoke,
                 remove_installation=remove_installation,
+                total_memory_bytes=memory,
             ),
             mock.patch.multiple(
                 first_kill.os,
@@ -127,6 +136,18 @@ class FirstKillTests(unittest.TestCase):
             make_temporary,
         ):
             forbidden.assert_not_called()
+
+    def test_minimum_memory_is_seven_gibibytes(self) -> None:
+        self.assertEqual(7 * 1024 * 1024 * 1024, first_kill.MIN_TOTAL_MEMORY_BYTES)
+
+    def test_low_memory_refusal_precedes_entrypoint_side_effects(self) -> None:
+        with mock.patch.object(
+            first_kill.Path, "is_file", autospec=True, return_value=True
+        ):
+            self.assert_entrypoint_refuses_before_side_effects(
+                "first-kill requires at least 7 GiB of kernel-reported memory",
+                total_memory_bytes=first_kill.MIN_TOTAL_MEMORY_BYTES - 1,
+            )
 
     def test_wsl_refusal_precedes_entrypoint_side_effects(self) -> None:
         with mock.patch.object(

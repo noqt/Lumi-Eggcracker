@@ -72,6 +72,7 @@ MAX_ARCHIVE_MEMBERS = 256
 MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_ZIP_COMMENT_BYTES = 65_535
+MIN_TOTAL_MEMORY_BYTES = 7 * 1024 * 1024 * 1024
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 DEFAULT_AI_SMOKE_WORKSPACE = Path("/opt/lumi-eggcracker-ai-smoke")
 QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
@@ -307,6 +308,23 @@ def require_clean_workload_identity() -> None:
         raise FirstKillError(f"refusing a pre-existing Eggcracker workload {identity}")
 
 
+def total_memory_bytes() -> int:
+    """Return kernel-reported physical memory, or refuse an unverifiable host."""
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError) as error:
+        raise FirstKillError("first-kill could not verify host memory") from error
+    if (
+        not isinstance(pages, int)
+        or not isinstance(page_size, int)
+        or pages < 1
+        or page_size < 1
+    ):
+        raise FirstKillError("first-kill could not verify host memory")
+    return pages * page_size
+
+
 def compatibility(operator: str) -> None:
     if os.geteuid() != 0:
         raise FirstKillError("run as root, for example: sudo python3 scripts/first_kill.py ...")
@@ -314,6 +332,11 @@ def compatibility(operator: str) -> None:
         raise FirstKillError("first-kill requires native Linux; Windows and macOS are unsupported")
     if "microsoft" in platform.release().lower() or os.environ.get("WSL_DISTRO_NAME"):
         raise FirstKillError("first-kill requires native Linux; WSL2 is unsupported")
+    if total_memory_bytes() < MIN_TOTAL_MEMORY_BYTES:
+        raise FirstKillError(
+            "first-kill requires at least 7 GiB of kernel-reported memory "
+            "(normally an 8 GiB provisioned VM)"
+        )
     controllers = Path("/sys/fs/cgroup/cgroup.controllers")
     if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split():
         raise FirstKillError("unified cgroup v2 with the pids controller is required")
