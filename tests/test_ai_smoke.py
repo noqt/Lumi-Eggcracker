@@ -173,7 +173,9 @@ class AiSmokeTests(unittest.TestCase):
             workspace = Path(raw) / "assets"
             commands: list[list[str]] = []
 
-            def run(argv: list[str]) -> str:
+            def run(
+                argv: list[str], *, timeout: float = prepare.DEFAULT_COMMAND_TIMEOUT_SECONDS
+            ) -> str:
                 commands.append(argv)
                 if argv[:2] == ["git", "clone"]:
                     source = Path(argv[-1])
@@ -192,7 +194,7 @@ class AiSmokeTests(unittest.TestCase):
                 destination.write_bytes(b"model")
 
             with (
-                mock.patch.object(prepare, "run", side_effect=run),
+                mock.patch.object(prepare, "run", side_effect=run) as run_mock,
                 mock.patch.object(prepare, "download_model", side_effect=download),
                 mock.patch.object(prepare, "verify_manifest", return_value={"verified": True}),
                 mock.patch.object(prepare.os, "cpu_count", return_value=4),
@@ -200,6 +202,16 @@ class AiSmokeTests(unittest.TestCase):
                 self.assertEqual({"verified": True}, prepare.prepare(workspace))
 
             builds = [command for command in commands if command[:2] == ["cmake", "--build"]]
+            build_calls = [
+                call
+                for call in run_mock.call_args_list
+                if call.args[0][:2] == ["cmake", "--build"]
+            ]
+            ordinary_calls = [
+                call
+                for call in run_mock.call_args_list
+                if call.args[0][:2] != ["cmake", "--build"]
+            ]
             self.assertEqual(
                 [
                     "cmake",
@@ -213,6 +225,15 @@ class AiSmokeTests(unittest.TestCase):
                 builds[0],
             )
             self.assertEqual(1, len(builds))
+            self.assertEqual(900, prepare.DEFAULT_COMMAND_TIMEOUT_SECONDS)
+            self.assertEqual(1800, prepare.BUILD_TIMEOUT_SECONDS)
+            self.assertEqual(1, len(build_calls))
+            self.assertEqual(
+                {"timeout": 1800},
+                build_calls[0].kwargs,
+            )
+            self.assertTrue(ordinary_calls)
+            self.assertTrue(all(not call.kwargs for call in ordinary_calls))
             self.assertNotIn("-j", builds[0])
 
     def test_smoke_path_does_not_use_a_shell_wrapper(self) -> None:
