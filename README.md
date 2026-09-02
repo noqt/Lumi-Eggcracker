@@ -84,7 +84,7 @@ The complete terminal capture is in
 [`campaign/first-kill.timing`](campaign/first-kill.timing). Replay it on Linux
 with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.typescript`.
 
-### Check host compatibility
+### Check Ollama binary compatibility
 
 If you already have the exact native Ollama launcher and runner files, check
 their compatibility before installing or starting anything:
@@ -104,6 +104,28 @@ prove a live bounded launcher/runner topology, or qualify the host, container
 or remote execution context. Names, paths, partial pairs, other builds and GPU
 variants do not qualify. A passing compatibility check is not containment
 evidence; run the full demonstration only on a disposable supported host.
+
+### Check vLLM binary compatibility
+
+If you already have the exact native PyTorch and vLLM files, check their four
+binary-identity roles before installing or starting anything:
+
+```sh
+/usr/bin/python3 -B -I -S scripts/check_vllm_compatibility.py \
+  --pytorch-bridge /absolute/path/to/libtorch-python \
+  --pytorch-aten /absolute/path/to/libtorch-cpu \
+  --vllm-python /absolute/path/to/python \
+  --vllm-extension /absolute/path/to/vllm-extension
+```
+
+The checker makes no network request, needs no root access, starts no vLLM,
+PyTorch or Eggcracker process, and does not install Eggcracker. It prints
+`SUPPORTED` only when all four complete files satisfy the exact native CPU
+binary-identity roles required by `content.safetensors-vllm`. It does not
+inspect a Safetensors model, prove a live related-workload topology, qualify an
+execution context, or provide containment evidence. Names, paths, partial or
+swapped sets, other builds, GPU variants, containers and remote workloads do
+not qualify. A pass is neither containment nor adoption evidence.
 
 Use a disposable, supported native Ubuntu machine whose loss is acceptable.
 The first-kill campaign runner rejects WSL2; WSL2 remains a secondary
