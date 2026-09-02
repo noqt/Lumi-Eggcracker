@@ -160,8 +160,8 @@ class AiSmokeTests(unittest.TestCase):
     def test_prepare_build_parallelism_has_a_ceiling(self) -> None:
         with mock.patch.object(prepare.os, "cpu_count", return_value=128):
             command = prepare.build_command(Path("/tmp/build"))
-        self.assertEqual(8, prepare.MAX_BUILD_JOBS)
-        self.assertEqual("8", command[-1])
+        self.assertEqual(2, prepare.MAX_BUILD_JOBS)
+        self.assertEqual("2", command[-1])
 
     def test_prepare_build_parallelism_defaults_to_one(self) -> None:
         with mock.patch.object(prepare.os, "cpu_count", return_value=None):
@@ -195,7 +195,7 @@ class AiSmokeTests(unittest.TestCase):
                 mock.patch.object(prepare, "run", side_effect=run),
                 mock.patch.object(prepare, "download_model", side_effect=download),
                 mock.patch.object(prepare, "verify_manifest", return_value={"verified": True}),
-                mock.patch.object(prepare.os, "cpu_count", return_value=2),
+                mock.patch.object(prepare.os, "cpu_count", return_value=4),
             ):
                 self.assertEqual({"verified": True}, prepare.prepare(workspace))
 
