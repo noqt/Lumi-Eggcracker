@@ -155,13 +155,13 @@ class AiSmokeTests(unittest.TestCase):
         with mock.patch.object(prepare.os, "cpu_count", return_value=2):
             command = prepare.build_command(Path("/tmp/build"))
         self.assertEqual("--parallel", command[-2])
-        self.assertEqual("2", command[-1])
+        self.assertEqual("1", command[-1])
 
     def test_prepare_build_parallelism_has_a_ceiling(self) -> None:
         with mock.patch.object(prepare.os, "cpu_count", return_value=128):
             command = prepare.build_command(Path("/tmp/build"))
-        self.assertEqual(2, prepare.MAX_BUILD_JOBS)
-        self.assertEqual("2", command[-1])
+        self.assertEqual(1, prepare.MAX_BUILD_JOBS)
+        self.assertEqual("1", command[-1])
 
     def test_prepare_build_parallelism_defaults_to_one(self) -> None:
         with mock.patch.object(prepare.os, "cpu_count", return_value=None):
@@ -208,7 +208,7 @@ class AiSmokeTests(unittest.TestCase):
                     "--target",
                     "llama-cli",
                     "--parallel",
-                    "2",
+                    "1",
                 ],
                 builds[0],
             )
