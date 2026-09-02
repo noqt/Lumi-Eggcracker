@@ -15,6 +15,25 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 TAG_COMMIT = "a" * 40
+EXPECTED_FIRST_KILL_COMMANDS = frozenset(
+    {
+        "/bin/sleep",
+        "/usr/bin/env",
+        "/usr/bin/git",
+        "/usr/bin/gpg",
+        "/usr/bin/journalctl",
+        "/usr/bin/nsenter",
+        "/usr/bin/python3",
+        "/usr/bin/systemctl",
+        "/usr/bin/systemd-run",
+        "/usr/sbin/groupdel",
+        "/usr/sbin/ip",
+        "/usr/sbin/nft",
+        "/usr/sbin/runuser",
+        "/usr/sbin/useradd",
+        "/usr/sbin/userdel",
+    }
+)
 SPEC = importlib.util.spec_from_file_location("first_kill", ROOT / "scripts" / "first_kill.py")
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("cannot load first-kill script")
@@ -23,8 +42,239 @@ SPEC.loader.exec_module(first_kill)
 
 
 class FirstKillTests(unittest.TestCase):
+    def assert_entrypoint_refuses_before_side_effects(
+        self,
+        expected_error: str,
+        passwd=None,
+        group=None,
+        platform_release: str = "6.8.0-generic",
+        wsl_distro_name: str | None = None,
+        total_memory_bytes: int | None = None,
+        free_root_bytes: int | None = None,
+    ) -> None:
+        if passwd is None:
+            passwd = mock.Mock()
+
+            def clean_passwd_lookup(name: str):
+                if name == first_kill.WORKLOAD_USER:
+                    raise KeyError(name)
+                return object()
+
+            passwd.getpwnam.side_effect = clean_passwd_lookup
+        if group is None:
+            group = mock.Mock()
+            group.getgrnam.side_effect = KeyError(first_kill.WORKLOAD_USER)
+        operator_name = mock.Mock(return_value="tester")
+        repository_root = mock.Mock()
+        prepare_workspace = mock.Mock()
+        release_files = mock.Mock()
+        install_release = mock.Mock()
+        run_real_smoke = mock.Mock()
+        remove_installation = mock.Mock()
+        make_temporary = mock.Mock()
+        environment = {}
+        if wsl_distro_name is not None:
+            environment["WSL_DISTRO_NAME"] = wsl_distro_name
+        errors = io.StringIO()
+        memory = mock.Mock(
+            return_value=(
+                first_kill.MIN_TOTAL_MEMORY_BYTES
+                if total_memory_bytes is None
+                else total_memory_bytes
+            )
+        )
+        disk = mock.Mock(
+            return_value=(
+                first_kill.MIN_FREE_ROOT_BYTES
+                if free_root_bytes is None
+                else free_root_bytes
+            )
+        )
+        with (
+            mock.patch.multiple(
+                first_kill,
+                operator_name=operator_name,
+                pwd=passwd,
+                grp=group,
+                repository_root=repository_root,
+                prepare_workspace=prepare_workspace,
+                release_files=release_files,
+                install_release=install_release,
+                run_real_smoke=run_real_smoke,
+                remove_installation=remove_installation,
+                total_memory_bytes=memory,
+                free_root_bytes=disk,
+            ),
+            mock.patch.multiple(
+                first_kill.os,
+                geteuid=mock.Mock(return_value=0),
+                pidfd_open=mock.Mock(),
+                access=mock.Mock(return_value=True),
+                environ=environment,
+            ),
+            mock.patch.object(first_kill.signal, "pidfd_send_signal", create=True),
+            mock.patch.multiple(
+                first_kill.platform,
+                system=mock.Mock(return_value="Linux"),
+                release=mock.Mock(return_value=platform_release),
+            ),
+            mock.patch.multiple(
+                first_kill.Path,
+                read_text=mock.Mock(return_value="pids"),
+                exists=mock.Mock(return_value=False),
+                is_symlink=mock.Mock(return_value=False),
+            ),
+            mock.patch.object(first_kill.shutil, "which", return_value="/usr/bin/tool"),
+            mock.patch.object(first_kill.tempfile, "mkdtemp", make_temporary),
+            contextlib.redirect_stderr(errors),
+        ):
+            result = first_kill.main(
+                ["--operator", "tester", "--accept-third-party-downloads"]
+            )
+
+        self.assertEqual(2, result)
+        self.assertIn("eggcracker first-kill:", errors.getvalue())
+        self.assertIn(expected_error, errors.getvalue())
+        for forbidden in (
+            repository_root,
+            prepare_workspace,
+            release_files,
+            install_release,
+            run_real_smoke,
+            remove_installation,
+            make_temporary,
+        ):
+            forbidden.assert_not_called()
+
+    def test_minimum_memory_is_seven_gibibytes(self) -> None:
+        self.assertEqual(7 * 1024 * 1024 * 1024, first_kill.MIN_TOTAL_MEMORY_BYTES)
+
+    def test_minimum_free_root_disk_is_eight_gibibytes(self) -> None:
+        self.assertEqual(8 * 1024 * 1024 * 1024, first_kill.MIN_FREE_ROOT_BYTES)
+
+    def test_low_memory_refusal_precedes_entrypoint_side_effects(self) -> None:
+        with mock.patch.object(
+            first_kill.Path, "is_file", autospec=True, return_value=True
+        ):
+            self.assert_entrypoint_refuses_before_side_effects(
+                "first-kill requires at least 7 GiB of kernel-reported memory",
+                total_memory_bytes=first_kill.MIN_TOTAL_MEMORY_BYTES - 1,
+            )
+
+    def test_low_disk_refusal_precedes_entrypoint_side_effects(self) -> None:
+        with mock.patch.object(
+            first_kill.Path, "is_file", autospec=True, return_value=True
+        ):
+            self.assert_entrypoint_refuses_before_side_effects(
+                "first-kill requires at least 8 GiB free on the root filesystem",
+                free_root_bytes=first_kill.MIN_FREE_ROOT_BYTES - 1,
+            )
+
+    def test_wsl_refusal_precedes_entrypoint_side_effects(self) -> None:
+        with mock.patch.object(
+            first_kill.Path, "is_file", autospec=True, return_value=True
+        ):
+            self.assert_entrypoint_refuses_before_side_effects(
+                "first-kill requires native Linux; WSL2 is unsupported",
+                platform_release="6.18.33.1-microsoft-standard-WSL2",
+            )
+
+    def test_wsl_environment_refusal_precedes_entrypoint_side_effects(self) -> None:
+        with mock.patch.object(
+            first_kill.Path, "is_file", autospec=True, return_value=True
+        ):
+            self.assert_entrypoint_refuses_before_side_effects(
+                "first-kill requires native Linux; WSL2 is unsupported",
+                platform_release="6.8.0-custom",
+                wsl_distro_name="test-wsl",
+            )
+
     def test_default_release_identity_is_the_1_0_candidate(self) -> None:
         self.assertEqual("v1.0.10", first_kill.DEFAULT_TAG)
+
+    def test_preflight_requires_every_fixed_installer_command(self) -> None:
+        self.assertEqual(
+            EXPECTED_FIRST_KILL_COMMANDS,
+            frozenset(first_kill.REQUIRED_HOST_COMMANDS),
+        )
+        for missing in EXPECTED_FIRST_KILL_COMMANDS:
+            with self.subTest(missing=missing):
+
+                def present(path: Path, expected: str = missing) -> bool:
+                    return str(path) != expected
+
+                with (
+                    mock.patch.object(
+                        first_kill.Path, "is_file", autospec=True, side_effect=present
+                    ),
+                    mock.patch.object(first_kill.os, "access", return_value=True),
+                    self.assertRaisesRegex(
+                        first_kill.FirstKillError, missing.replace("/", r"\/")
+                    ),
+                ):
+                    first_kill.require_host_commands()
+
+    def test_each_missing_command_refusal_precedes_entrypoint_side_effects(self) -> None:
+        for missing in EXPECTED_FIRST_KILL_COMMANDS:
+            with self.subTest(missing=missing):
+
+                def present(path: Path, expected: str = missing) -> bool:
+                    return str(path) != expected
+
+                with mock.patch.object(
+                    first_kill.Path, "is_file", autospec=True, side_effect=present
+                ):
+                    self.assert_entrypoint_refuses_before_side_effects(
+                        f"required host command is missing or not executable: {missing}"
+                    )
+
+    def test_preflight_rejects_residual_workload_identity(self) -> None:
+        passwd = mock.Mock()
+        group = mock.Mock()
+        passwd.getpwnam.return_value = object()
+
+        with (
+            mock.patch.object(first_kill, "pwd", passwd),
+            mock.patch.object(first_kill, "grp", group),
+            self.assertRaisesRegex(first_kill.FirstKillError, "workload account"),
+        ):
+            first_kill.require_clean_workload_identity()
+
+        passwd.getpwnam.side_effect = KeyError(first_kill.WORKLOAD_USER)
+        group.getgrnam.return_value = object()
+        with (
+            mock.patch.object(first_kill, "pwd", passwd),
+            mock.patch.object(first_kill, "grp", group),
+            self.assertRaisesRegex(first_kill.FirstKillError, "workload group"),
+        ):
+            first_kill.require_clean_workload_identity()
+
+    def test_each_residual_identity_refusal_precedes_entrypoint_side_effects(self) -> None:
+        for residual in ("account", "group"):
+            with self.subTest(residual=residual):
+                passwd = mock.Mock()
+                group = mock.Mock()
+                if residual == "account":
+                    passwd.getpwnam.return_value = object()
+                else:
+                    def passwd_lookup(name: str):
+                        if name == first_kill.WORKLOAD_USER:
+                            raise KeyError(name)
+                        return object()
+
+                    passwd.getpwnam.side_effect = passwd_lookup
+                    group.getgrnam.return_value = object()
+
+                with (
+                    mock.patch.object(
+                        first_kill.Path, "is_file", autospec=True, return_value=True
+                    ),
+                ):
+                    self.assert_entrypoint_refuses_before_side_effects(
+                        f"refusing a pre-existing Eggcracker workload {residual}",
+                        passwd,
+                        group,
+                    )
 
     def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
         output = io.StringIO()
@@ -136,7 +386,9 @@ class FirstKillTests(unittest.TestCase):
             mock.patch.object(
                 first_kill, "installed_workload_user", return_value="workload"
             ),
-            mock.patch.object(first_kill, "run_real_smoke", return_value=receipt),
+            mock.patch.object(
+                first_kill, "run_real_smoke", return_value=receipt
+            ) as run_real_smoke,
             mock.patch.object(first_kill, "remove_installation"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -152,6 +404,38 @@ class FirstKillTests(unittest.TestCase):
             )
         self.assertEqual(0, result)
         self.assertEqual(["signature", "checksum", "extract", "install"], events)
+        smoke_args = run_real_smoke.call_args.args
+        self.assertEqual(Path("/checkout"), smoke_args[0])
+        self.assertNotEqual(Path("/release"), smoke_args[0])
+        self.assertEqual(
+            (
+                Path("/private-workspace"),
+                "workload",
+                first_kill.DEFAULT_AI_SMOKE_WORKSPACE.absolute(),
+                0,
+            ),
+            smoke_args[1:],
+        )
+
+    def test_real_smoke_uses_current_campaign_preparer(self) -> None:
+        campaign_root = Path("/campaign-checkout")
+        expected = campaign_root / "scripts" / "prepare_ai_smoke.py"
+        stop = first_kill.FirstKillError("stop after selecting preparer")
+        with (
+            mock.patch.object(first_kill, "require_regular") as require_regular,
+            mock.patch.object(first_kill, "run", side_effect=stop) as run,
+            self.assertRaisesRegex(first_kill.FirstKillError, "stop after selecting preparer"),
+        ):
+            first_kill.run_real_smoke(
+                campaign_root,
+                Path("/workspace"),
+                "workload",
+                Path("/assets"),
+            )
+
+        require_regular.assert_called_once_with(expected, "AI smoke preparer")
+        self.assertEqual(str(expected), run.call_args.args[0][3])
+        self.assertNotIn("release", str(run.call_args.args[0][3]))
 
     def test_preflight_rejects_mutation_only_flags(self) -> None:
         with (

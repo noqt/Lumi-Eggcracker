@@ -87,12 +87,21 @@ with `scriptreplay --timing=campaign/first-kill.timing campaign/first-kill.types
 ### Check host compatibility
 
 Use a disposable, supported native Ubuntu machine whose loss is acceptable.
+The first-kill campaign runner rejects WSL2; WSL2 remains a secondary
+qualification environment and does not replace the ordinary-VM gate.
+The path requires at least 7 GiB of kernel-reported memory (normally an 8 GiB
+provisioned VM) and at least 8 GiB free on the root filesystem; preflight
+rejects undersized hosts before downloads or mutation.
 The demonstration requires root, systemd, unified cgroup v2 with `cgroup.kill`,
-pidfds, Python 3.11+, Git, GnuPG, CMake, a native C/C++ build toolchain and
-network access. It changes root-owned system services, compiles the pinned
-llama.cpp runner, downloads signed release assets, and—only after the explicit
+pidfds, Python 3.11+, Git, GnuPG, CMake, a native C/C++ build toolchain,
+iproute2, nftables, util-linux `nsenter`, standard account-management and
+systemd journal tools, coreutils `env` and `sleep`, and network access. It changes
+root-owned system services, compiles the pinned llama.cpp runner serially, downloads
+signed release assets, and—only after the explicit
 flag—downloads the third-party Qwen model. Do not begin on a workstation,
 shared host, production server, or machine carrying private data.
+The campaign checkout's co-located preparer governs that build; the runner's
+qualified digest is checked before it can be executed.
 
 Clone public `main` and run the read-only preflight:
 

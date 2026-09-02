@@ -28,8 +28,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 try:
+    import grp
     import pwd
 except ImportError:  # pragma: no cover - first-kill is a native Linux command
+    grp = None  # type: ignore[assignment]
     pwd = None  # type: ignore[assignment]
 
 
@@ -48,11 +50,30 @@ INSTALL_TARGETS = (
     Path("/etc/systemd/system/lumi-eggcracker-watchdog.service"),
     Path("/etc/tmpfiles.d/lumi-eggcracker.conf"),
 )
+REQUIRED_HOST_COMMANDS = (
+    "/bin/sleep",
+    "/usr/bin/env",
+    "/usr/bin/python3",
+    "/usr/bin/systemctl",
+    "/usr/bin/systemd-run",
+    "/usr/bin/journalctl",
+    "/usr/sbin/runuser",
+    "/usr/sbin/useradd",
+    "/usr/sbin/userdel",
+    "/usr/sbin/groupdel",
+    "/usr/bin/gpg",
+    "/usr/bin/git",
+    "/usr/sbin/ip",
+    "/usr/sbin/nft",
+    "/usr/bin/nsenter",
+)
 MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 256
 MAX_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_ZIP_COMMENT_BYTES = 65_535
+MIN_TOTAL_MEMORY_BYTES = 7 * 1024 * 1024 * 1024
+MIN_FREE_ROOT_BYTES = 8 * 1024 * 1024 * 1024
 DETECTIONS = Path("/var/lib/lumi-eggcracker/detections")
 DEFAULT_AI_SMOKE_WORKSPACE = Path("/opt/lumi-eggcracker-ai-smoke")
 QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
@@ -265,19 +286,79 @@ def operator_name(explicit: str | None) -> str:
     return value
 
 
+def require_host_commands() -> None:
+    """Reject a host missing commands required later by the signed installer."""
+    for binary in REQUIRED_HOST_COMMANDS:
+        path = Path(binary)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise FirstKillError(f"required host command is missing or not executable: {binary}")
+
+
+def require_clean_workload_identity() -> None:
+    """Reject residue that a clean demonstration cannot safely claim or remove."""
+    if pwd is None or grp is None:
+        raise FirstKillError("first-kill requires the POSIX account databases")
+    for lookup, identity in (
+        (pwd.getpwnam, "account"),
+        (grp.getgrnam, "group"),
+    ):
+        try:
+            lookup(WORKLOAD_USER)
+        except KeyError:
+            continue
+        raise FirstKillError(f"refusing a pre-existing Eggcracker workload {identity}")
+
+
+def total_memory_bytes() -> int:
+    """Return kernel-reported physical memory, or refuse an unverifiable host."""
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError) as error:
+        raise FirstKillError("first-kill could not verify host memory") from error
+    if (
+        not isinstance(pages, int)
+        or not isinstance(page_size, int)
+        or pages < 1
+        or page_size < 1
+    ):
+        raise FirstKillError("first-kill could not verify host memory")
+    return pages * page_size
+
+
+def free_root_bytes() -> int:
+    """Return free root-filesystem bytes, or refuse an unverifiable host."""
+    try:
+        free = shutil.disk_usage("/").free
+    except OSError as error:
+        raise FirstKillError("first-kill could not verify free root disk space") from error
+    if not isinstance(free, int) or free < 0:
+        raise FirstKillError("first-kill could not verify free root disk space")
+    return free
+
+
 def compatibility(operator: str) -> None:
     if os.geteuid() != 0:
         raise FirstKillError("run as root, for example: sudo python3 scripts/first_kill.py ...")
     if platform.system() != "Linux":
         raise FirstKillError("first-kill requires native Linux; Windows and macOS are unsupported")
+    if "microsoft" in platform.release().lower() or os.environ.get("WSL_DISTRO_NAME"):
+        raise FirstKillError("first-kill requires native Linux; WSL2 is unsupported")
+    if total_memory_bytes() < MIN_TOTAL_MEMORY_BYTES:
+        raise FirstKillError(
+            "first-kill requires at least 7 GiB of kernel-reported memory "
+            "(normally an 8 GiB provisioned VM)"
+        )
+    if free_root_bytes() < MIN_FREE_ROOT_BYTES:
+        raise FirstKillError(
+            "first-kill requires at least 8 GiB free on the root filesystem"
+        )
     controllers = Path("/sys/fs/cgroup/cgroup.controllers")
     if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split():
         raise FirstKillError("unified cgroup v2 with the pids controller is required")
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         raise FirstKillError("this Python/Linux host lacks the required pidfd primitives")
-    for binary in ("/usr/bin/python3", "/usr/bin/systemctl", "/usr/bin/systemd-run", "/usr/sbin/runuser", "/usr/bin/gpg", "/usr/bin/git"):
-        if not Path(binary).is_file():
-            raise FirstKillError(f"required host command is missing: {binary}")
+    require_host_commands()
     required_tool_groups = (
         (("cmake",), "CMake"),
         (("c++", "g++", "clang++"), "a C++ compiler (c++, g++ or clang++)"),
@@ -289,6 +370,7 @@ def compatibility(operator: str) -> None:
     for target in INSTALL_TARGETS:
         if target.exists() or target.is_symlink():
             raise FirstKillError(f"refusing to overwrite an existing installation target: {target}")
+    require_clean_workload_identity()
     try:
         if pwd is None:
             raise FirstKillError("first-kill requires the POSIX passwd database")
@@ -565,13 +647,16 @@ def wait_for_receipt(before: set[Path], *, timeout: float = 240) -> dict[str, An
 
 
 def run_real_smoke(
-    release_root: Path,
+    campaign_root: Path,
     workspace: Path,
     workload_user: str,
     assets_workspace: Path,
     demo_delay_seconds: float = 0,
 ) -> dict[str, Any]:
-    assets_script = release_root / "scripts" / "prepare_ai_smoke.py"
+    # Run the campaign checkout's preparer so its current resource safeguards
+    # govern the build. The qualified runner digest below still binds output.
+    assets_script = campaign_root / "scripts" / "prepare_ai_smoke.py"
+    require_regular(assets_script, "AI smoke preparer")
     run(
         [
             "/usr/bin/python3",
@@ -896,7 +981,7 @@ def main(argv: list[str] | None = None) -> int:
         say("preparing the pinned real local-AI smoke assets (explicit third-party download)")
         say("launching an unapproved model and waiting for the complete-tree kill")
         receipt = run_real_smoke(
-            release_root,
+            root,
             workspace,
             workload_user,
             ai_workspace,
