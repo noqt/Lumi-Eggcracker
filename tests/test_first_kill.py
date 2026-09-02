@@ -403,6 +403,26 @@ class FirstKillTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertEqual(["signature", "checksum", "extract", "install"], events)
 
+    def test_real_smoke_uses_current_campaign_preparer(self) -> None:
+        campaign_root = Path("/campaign-checkout")
+        expected = campaign_root / "scripts" / "prepare_ai_smoke.py"
+        stop = first_kill.FirstKillError("stop after selecting preparer")
+        with (
+            mock.patch.object(first_kill, "require_regular") as require_regular,
+            mock.patch.object(first_kill, "run", side_effect=stop) as run,
+            self.assertRaisesRegex(first_kill.FirstKillError, "stop after selecting preparer"),
+        ):
+            first_kill.run_real_smoke(
+                campaign_root,
+                Path("/workspace"),
+                "workload",
+                Path("/assets"),
+            )
+
+        require_regular.assert_called_once_with(expected, "AI smoke preparer")
+        self.assertEqual(str(expected), run.call_args.args[0][3])
+        self.assertNotIn("release", str(run.call_args.args[0][3]))
+
     def test_preflight_rejects_mutation_only_flags(self) -> None:
         with (
             contextlib.redirect_stderr(io.StringIO()),

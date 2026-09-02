@@ -100,6 +100,8 @@ root-owned system services, compiles the pinned llama.cpp runner serially, downl
 signed release assets, and—only after the explicit
 flag—downloads the third-party Qwen model. Do not begin on a workstation,
 shared host, production server, or machine carrying private data.
+The campaign checkout's co-located preparer governs that build; the runner's
+qualified digest is checked before it can be executed.
 
 Clone public `main` and run the read-only preflight:
 

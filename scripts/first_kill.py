@@ -647,13 +647,16 @@ def wait_for_receipt(before: set[Path], *, timeout: float = 240) -> dict[str, An
 
 
 def run_real_smoke(
-    release_root: Path,
+    campaign_root: Path,
     workspace: Path,
     workload_user: str,
     assets_workspace: Path,
     demo_delay_seconds: float = 0,
 ) -> dict[str, Any]:
-    assets_script = release_root / "scripts" / "prepare_ai_smoke.py"
+    # Run the campaign checkout's preparer so its current resource safeguards
+    # govern the build. The qualified runner digest below still binds output.
+    assets_script = campaign_root / "scripts" / "prepare_ai_smoke.py"
+    require_regular(assets_script, "AI smoke preparer")
     run(
         [
             "/usr/bin/python3",
@@ -978,7 +981,7 @@ def main(argv: list[str] | None = None) -> int:
         say("preparing the pinned real local-AI smoke assets (explicit third-party download)")
         say("launching an unapproved model and waiting for the complete-tree kill")
         receipt = run_real_smoke(
-            release_root,
+            root,
             workspace,
             workload_user,
             ai_workspace,
