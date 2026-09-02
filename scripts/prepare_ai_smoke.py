@@ -25,6 +25,7 @@ MODEL_SHA256 = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
 MODEL_NAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
 MAX_MODEL_BYTES = 600 * 1024 * 1024
+MAX_BUILD_JOBS = 8
 
 
 def digest(path: Path) -> str:
@@ -155,6 +156,20 @@ def download_model(destination: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def build_command(build: Path) -> list[str]:
+    detected = os.cpu_count() or 1
+    jobs = max(1, min(detected, MAX_BUILD_JOBS))
+    return [
+        "cmake",
+        "--build",
+        str(build),
+        "--target",
+        "llama-cli",
+        "--parallel",
+        str(jobs),
+    ]
+
+
 def prepare(workspace: Path) -> dict[str, Any]:
     source = workspace / "llama.cpp"
     build = workspace / "llama-build"
@@ -167,7 +182,7 @@ def prepare(workspace: Path) -> dict[str, Any]:
     if run(["git", "-C", str(source), "rev-parse", "HEAD"]) != LLAMA_COMMIT:
         raise RuntimeError("runner source did not resolve to the pinned commit")
     run(["cmake", "-S", str(source), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release"])
-    run(["cmake", "--build", str(build), "--target", "llama-cli", "-j"])
+    run(build_command(build))
     runner = build / "bin" / "llama-cli"
     regular(runner, executable=True)
     model.parent.mkdir(mode=0o755)

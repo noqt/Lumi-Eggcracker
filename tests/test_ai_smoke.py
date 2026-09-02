@@ -151,6 +151,22 @@ class AiSmokeTests(unittest.TestCase):
         self.assertEqual(64, len(prepare.MODEL_SHA256))
         self.assertIn("/resolve/", prepare.MODEL_URL)
 
+    def test_prepare_build_parallelism_matches_small_host(self) -> None:
+        with mock.patch.object(prepare.os, "cpu_count", return_value=2):
+            command = prepare.build_command(Path("/tmp/build"))
+        self.assertEqual("--parallel", command[-2])
+        self.assertEqual("2", command[-1])
+
+    def test_prepare_build_parallelism_has_a_ceiling(self) -> None:
+        with mock.patch.object(prepare.os, "cpu_count", return_value=128):
+            command = prepare.build_command(Path("/tmp/build"))
+        self.assertEqual(str(prepare.MAX_BUILD_JOBS), command[-1])
+
+    def test_prepare_build_parallelism_defaults_to_one(self) -> None:
+        with mock.patch.object(prepare.os, "cpu_count", return_value=None):
+            command = prepare.build_command(Path("/tmp/build"))
+        self.assertEqual("1", command[-1])
+
     def test_smoke_path_does_not_use_a_shell_wrapper(self) -> None:
         source = (ROOT / "scripts" / "smoke_local_ai.py").read_text(encoding="utf-8")
         worker = (ROOT / "scripts" / "ai_smoke_worker.py").read_text(encoding="utf-8")
