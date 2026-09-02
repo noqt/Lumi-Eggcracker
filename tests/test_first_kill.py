@@ -146,8 +146,8 @@ class FirstKillTests(unittest.TestCase):
         ):
             forbidden.assert_not_called()
 
-    def test_minimum_memory_is_seven_gibibytes(self) -> None:
-        self.assertEqual(7 * 1024 * 1024 * 1024, first_kill.MIN_TOTAL_MEMORY_BYTES)
+    def test_minimum_memory_is_three_gibibytes(self) -> None:
+        self.assertEqual(3 * 1024 * 1024 * 1024, first_kill.MIN_TOTAL_MEMORY_BYTES)
 
     def test_minimum_free_root_disk_is_eight_gibibytes(self) -> None:
         self.assertEqual(8 * 1024 * 1024 * 1024, first_kill.MIN_FREE_ROOT_BYTES)
@@ -157,7 +157,7 @@ class FirstKillTests(unittest.TestCase):
             first_kill.Path, "is_file", autospec=True, return_value=True
         ):
             self.assert_entrypoint_refuses_before_side_effects(
-                "first-kill requires at least 7 GiB of kernel-reported memory",
+                "first-kill requires at least 3 GiB of kernel-reported memory",
                 total_memory_bytes=first_kill.MIN_TOTAL_MEMORY_BYTES - 1,
             )
 
@@ -386,7 +386,9 @@ class FirstKillTests(unittest.TestCase):
             mock.patch.object(
                 first_kill, "installed_workload_user", return_value="workload"
             ),
-            mock.patch.object(first_kill, "run_real_smoke", return_value=receipt),
+            mock.patch.object(
+                first_kill, "run_real_smoke", return_value=receipt
+            ) as run_real_smoke,
             mock.patch.object(first_kill, "remove_installation"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -402,6 +404,18 @@ class FirstKillTests(unittest.TestCase):
             )
         self.assertEqual(0, result)
         self.assertEqual(["signature", "checksum", "extract", "install"], events)
+        smoke_args = run_real_smoke.call_args.args
+        self.assertEqual(Path("/checkout"), smoke_args[0])
+        self.assertNotEqual(Path("/release"), smoke_args[0])
+        self.assertEqual(
+            (
+                Path("/private-workspace"),
+                "workload",
+                first_kill.DEFAULT_AI_SMOKE_WORKSPACE.absolute(),
+                0,
+            ),
+            smoke_args[1:],
+        )
 
     def test_real_smoke_uses_current_campaign_preparer(self) -> None:
         campaign_root = Path("/campaign-checkout")
