@@ -255,6 +255,7 @@ class ApprovalTests(unittest.TestCase):
                 )
             record["schema_version"] = LEGACY_SCHEMA
             record.pop("installation_epoch")
+            record.pop("allow_interface_discovery")
             for key in ("cpu_quota_percent", "max_memory_mib", "max_pids"):
                 record.pop(key)
             (root / "legacy.json").write_text(
