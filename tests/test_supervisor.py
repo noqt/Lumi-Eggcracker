@@ -29,6 +29,7 @@ from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
 from lumi_eggcracker.supervisor import (
     MAX_FRAME,
+    PROTECTED_SYSTEMD_ENVIRONMENT,
     QUERY_SOCKET,
     Supervisor,
     _bounded_query_items,
@@ -70,6 +71,16 @@ class SupervisorTests(unittest.TestCase):
         value.content_scan_tick = 0
         value.receipt_persistence_healthy = True
         return value
+
+    def test_protected_systemd_environment_has_fixed_minimal_path(self) -> None:
+        path_entries = tuple(
+            entry for entry in PROTECTED_SYSTEMD_ENVIRONMENT if entry.startswith("--setenv=PATH=")
+        )
+        self.assertEqual(path_entries, ("--setenv=PATH=/usr/bin",))
+        self.assertNotIn("--setenv=PATH=.", PROTECTED_SYSTEMD_ENVIRONMENT)
+        self.assertNotIn("--setenv=PATH=/bin", PROTECTED_SYSTEMD_ENVIRONMENT)
+        self.assertFalse(any("venv" in entry for entry in path_entries))
+        self.assertEqual(len(PROTECTED_SYSTEMD_ENVIRONMENT), len(set(PROTECTED_SYSTEMD_ENVIRONMENT)))
 
     def test_live_workload_identity_requires_distinct_exact_uid_gid(self) -> None:
         supervisor = self._instance()

@@ -149,6 +149,25 @@ MAX_CORRELATED_PROCESSES = 64
 SCAN_HEALTH_TIMEOUT_NS = 1_000_000_000
 MAX_DISCOVERY_FAILURES = 3
 MAX_ENFORCEMENT_TASKS = 16
+PROTECTED_SYSTEMD_ENVIRONMENT = (
+    "--setenv=HOME=/nonexistent",
+    "--setenv=BASH_ENV=/nonexistent",
+    "--setenv=ENV=/nonexistent",
+    "--setenv=GCONV_PATH=/nonexistent",
+    "--setenv=LD_AUDIT=",
+    "--setenv=LD_LIBRARY_PATH=",
+    "--setenv=LD_PRELOAD=",
+    "--setenv=LOCPATH=/nonexistent",
+    "--setenv=NLSPATH=/nonexistent",
+    "--setenv=PATH=/usr/bin",
+    "--setenv=PYTHONBREAKPOINT=0",
+    "--setenv=PYTHONINSPECT=",
+    "--setenv=PYTHONNOUSERSITE=1",
+    "--setenv=PYTHONSAFEPATH=1",
+    "--setenv=PYTHONPATH=/nonexistent",
+    "--setenv=PYTHONSTARTUP=/nonexistent",
+    "--setenv=PYTHONUSERBASE=/nonexistent",
+)
 
 
 def policy_network_mode(policy: dict[str, Any]) -> str:
@@ -3054,22 +3073,7 @@ class Supervisor:
                     "--property=IOWeight=10",
                     "--property=LimitNOFILE=1024",
                     "--working-directory=/",
-                    "--setenv=HOME=/nonexistent",
-                    "--setenv=BASH_ENV=/nonexistent",
-                    "--setenv=ENV=/nonexistent",
-                    "--setenv=GCONV_PATH=/nonexistent",
-                    "--setenv=LD_AUDIT=",
-                    "--setenv=LD_LIBRARY_PATH=",
-                    "--setenv=LD_PRELOAD=",
-                    "--setenv=LOCPATH=/nonexistent",
-                    "--setenv=NLSPATH=/nonexistent",
-                    "--setenv=PYTHONBREAKPOINT=0",
-                    "--setenv=PYTHONINSPECT=",
-                    "--setenv=PYTHONNOUSERSITE=1",
-                    "--setenv=PYTHONSAFEPATH=1",
-                    "--setenv=PYTHONPATH=/nonexistent",
-                    "--setenv=PYTHONSTARTUP=/nonexistent",
-                    "--setenv=PYTHONUSERBASE=/nonexistent",
+                    *PROTECTED_SYSTEMD_ENVIRONMENT,
                     "--",
                     "/usr/bin/python3",
                     "-I",
