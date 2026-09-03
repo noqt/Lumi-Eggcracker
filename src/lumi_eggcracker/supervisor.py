@@ -62,12 +62,17 @@ from .discovery import snapshot as process_snapshot
 from .elfmarkers import (
     MAX_RUNTIME_CANDIDATES,
     OLLAMA_LAUNCHER_EVIDENCE_ID,
+    PYTORCH_ATEN_EVIDENCE_ID,
+    PYTORCH_BRIDGE_EVIDENCE_ID,
+    PYTORCH_PAIR_EVIDENCE_ID,
+    VLLM_EXTENSION_EVIDENCE_ID,
     VLLM_PAIR_EVIDENCE_ID,
+    VLLM_PYTHON_EVIDENCE_ID,
     RuntimeEvidence,
     with_pytorch_pair,
     with_vllm_pair,
 )
-from .elfmarkers import from_snapshot as runtime_from_snapshot
+from .elfmarkers import scan_snapshot as runtime_scan_snapshot
 from .execution_policy import STATE_DIR as EXEC_POLICY_DIR
 from .execution_policy import create as create_execution_policy
 from .execution_policy import ephemeral as ephemeral_execution_policy
@@ -335,6 +340,10 @@ class Supervisor:
         self.runtime_map_offsets: dict[ProcessIdentity, int] = {}
         self.observed_content: dict[ProcessIdentity, dict[str, ArtifactEvidence]] = {}
         self.observed_runtimes: dict[ProcessIdentity, dict[str, RuntimeEvidence]] = {}
+        # One lower-specificity PyTorch decision may wait for a bounded vLLM
+        # authentication retry.  Charge that delay to the evidence-bearing
+        # contributors so helper or partial-witness churn cannot renew it.
+        self.runtime_pytorch_delay_spent: set[ProcessIdentity] = set()
         self.content_scan_tick = 0
         self.discovery_window_generation = 0
         self.last_scan_completed_ns = 0
@@ -824,6 +833,64 @@ class Supervisor:
         if topology:
             value["MODEL_TOPOLOGY"] = topology
         return value
+
+    @staticmethod
+    def _pytorch_decision_contributors(
+        candidates: tuple[_EvidenceCandidate, ...] | list[_EvidenceCandidate],
+    ) -> set[ProcessIdentity]:
+        runtime_ids = {
+            PYTORCH_BRIDGE_EVIDENCE_ID,
+            PYTORCH_ATEN_EVIDENCE_ID,
+            PYTORCH_PAIR_EVIDENCE_ID,
+        }
+        return {
+            candidate.snapshot.identity
+            for candidate in candidates
+            if any(item.evidence_id == "safetensors-v1" for item in candidate.content)
+            or any(item.evidence_id in runtime_ids for item in candidate.runtimes)
+        }
+
+    def _prune_runtime_pytorch_delay_spent(
+        self, live_identities: set[ProcessIdentity]
+    ) -> None:
+        spent = getattr(self, "runtime_pytorch_delay_spent", None)
+        if spent is None:
+            self.runtime_pytorch_delay_spent = set()
+            return
+        spent.intersection_update(live_identities)
+
+    def _delay_incomplete_vllm_decision(
+        self,
+        detected: DetectionMatch,
+        witness: tuple[_EvidenceCandidate, ...],
+        scope: tuple[_EvidenceCandidate, ...],
+        deferred_now: set[ProcessIdentity],
+        delayed_this_scan: set[ProcessIdentity],
+    ) -> tuple[bool, set[ProcessIdentity]]:
+        """Delay generic PyTorch once while related vLLM auth is incomplete."""
+        contributors = self._pytorch_decision_contributors(witness)
+        if detected.profile == "content.safetensors-vllm":
+            self.runtime_pytorch_delay_spent.difference_update(contributors)
+            return False, contributors
+        if detected.profile != "content.safetensors-pytorch" or not contributors:
+            return False, contributors
+        scope_ids = {candidate.snapshot.identity for candidate in scope}
+        if not scope_ids.intersection(deferred_now):
+            return False, contributors
+        spent = self.runtime_pytorch_delay_spent
+        if contributors.intersection(delayed_this_scan):
+            spent.update(contributors)
+            delayed_this_scan.update(contributors)
+            return True, contributors
+        if contributors.isdisjoint(spent):
+            spent.update(contributors)
+            delayed_this_scan.update(contributors)
+            return True, contributors
+        # Propagate spent state to a successor witness sharing any surviving
+        # contributor.  Continued or churned deferral now fails closed to the
+        # strongest fully authenticated profile.
+        spent.update(contributors)
+        return False, contributors
 
     def _authorizes_protected_scope(
         self,
@@ -1860,6 +1927,9 @@ class Supervisor:
         )
         snapshot_map = {item.identity: item for item in snapshots}
         live_identities = set(snapshot_map)
+        self._prune_runtime_pytorch_delay_spent(live_identities)
+        vllm_deferred_now: set[ProcessIdentity] = set()
+        delayed_this_scan: set[ProcessIdentity] = set()
         for cache in (
             getattr(self, "artifact_fd_offsets", {}),
             getattr(self, "artifact_map_offsets", {}),
@@ -1915,11 +1985,16 @@ class Supervisor:
                     snapshot.identity,
                     self._window_start(MAX_RUNTIME_CANDIDATES),
                 )
-                runtimes_now = runtime_from_snapshot(
+                runtime_scan = runtime_scan_snapshot(
                     snapshot,
                     cache=self.runtime_cache,
                     start_index=runtime_start,
                 )
+                runtimes_now = runtime_scan.evidence
+                if runtime_scan.deferred_evidence_ids.intersection(
+                    {VLLM_PYTHON_EVIDENCE_ID, VLLM_EXTENSION_EVIDENCE_ID}
+                ):
+                    vllm_deferred_now.add(snapshot.identity)
                 runtime_offsets[snapshot.identity] = runtime_start + MAX_RUNTIME_CANDIDATES
                 observed_content = getattr(self, "observed_content", None)
                 if observed_content is None:
@@ -1952,7 +2027,12 @@ class Supervisor:
                     runtimes = with_pytorch_pair(
                         item for key, item in runtime_values.items() if key in active
                     )
-            if fast_match is None and not content and not runtimes:
+            if (
+                fast_match is None
+                and not content
+                and not runtimes
+                and snapshot.identity not in vllm_deferred_now
+            ):
                 continue
             candidates.append(
                 _EvidenceCandidate(snapshot, content, runtimes, first_seen_ns, fast_match)
@@ -2043,6 +2123,15 @@ class Supervisor:
                 self.catalogue, trigger_candidate.snapshot, evidence=supplied
             )
             if detected is None:
+                continue
+            delay, pytorch_contributors = self._delay_incomplete_vllm_decision(
+                detected,
+                witness,
+                scope,
+                vllm_deferred_now,
+                delayed_this_scan,
+            )
+            if delay:
                 continue
             qualified_ns = time.monotonic_ns()
             unapproved: list[_EvidenceCandidate] = []
@@ -2146,6 +2235,9 @@ class Supervisor:
                     pidfd,
                     **kwargs,
                 )
+                self.runtime_pytorch_delay_spent.difference_update(
+                    pytorch_contributors
+                )
             else:
                 task_args = (
                     snapshot,
@@ -2188,6 +2280,9 @@ class Supervisor:
                 except RuntimeError:
                     self.enforcement_slots.release()
                     self._enforce_discovery(*task_args, **kwargs)
+                self.runtime_pytorch_delay_spent.difference_update(
+                    pytorch_contributors
+                )
         self._trim_evidence_caches()
 
     def _discovery_loop(self) -> None:

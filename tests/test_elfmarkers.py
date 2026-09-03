@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from lumi_eggcracker.discovery import ProcessIdentity
 from lumi_eggcracker.elfmarkers import (
+    OLLAMA_LAUNCHER_EVIDENCE_ID,
     PINNED_LLAMA_BUILD_IDS,
     PYTORCH_ATEN_EVIDENCE_ID,
     PYTORCH_BRIDGE_EVIDENCE_ID,
@@ -23,6 +24,7 @@ from lumi_eggcracker.elfmarkers import (
     from_snapshot,
     inspect_path,
     inspect_pytorch_path,
+    scan_snapshot,
     with_pytorch_pair,
     with_vllm_pair,
 )
@@ -412,6 +414,201 @@ class ElfMarkerTests(unittest.TestCase):
         self.assertEqual((extension,), with_vllm_pair((extension,)))
         values = with_vllm_pair((python, extension))
         self.assertIn(VLLM_PAIR_EVIDENCE_ID, {item.evidence_id for item in values})
+
+    def test_bounded_runtime_authentication_converges_through_cache(self) -> None:
+        identifiers = [bytes.fromhex(f"{value:02x}" * 20) for value in range(1, 5)]
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            mappings = proc / "42" / "map_files"
+            mappings.mkdir(parents=True)
+            paths: list[Path] = []
+            lines: list[str] = []
+            for index, identifier in enumerate(identifiers):
+                start = 0x1000 + index * 0x2000
+                path = mappings / f"{start:x}-{start + 0x1000:x}"
+                path.write_bytes(build_id_elf(identifier))
+                paths.append(path)
+                lines.append(
+                    f"{start:x}-{start + 0x1000:x} r-xp 00000000 00:01 "
+                    f"{index + 11} /runtime-{index}\n"
+                )
+            (proc / "42" / "maps").write_text("".join(lines), encoding="utf-8")
+            sample = type(
+                "Snapshot",
+                (),
+                {
+                    "identity": ProcessIdentity(42, 100),
+                    "exe_path": "",
+                    "executable_map_paths": (),
+                },
+            )()
+            caches: dict[tuple[int, int, int, int, int], tuple[RuntimeEvidence, ...]] = {}
+            file_pins = [
+                (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+                for path in paths
+            ]
+            with (
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_BRIDGE_BUILD_IDS",
+                    {identifiers[0].hex()},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_ATEN_BUILD_IDS",
+                    {identifiers[1].hex()},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_VLLM_PYTHON_BUILD_IDS",
+                    {identifiers[2].hex()},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_VLLM_EXTENSION_BUILD_IDS",
+                    {identifiers[3].hex()},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_BRIDGE_FILES",
+                    {identifiers[0].hex(): file_pins[0]},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_PYTORCH_ATEN_FILES",
+                    {identifiers[1].hex(): file_pins[1]},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_VLLM_PYTHON_FILES",
+                    {identifiers[2].hex(): file_pins[2]},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_VLLM_EXTENSION_FILES",
+                    {identifiers[3].hex(): file_pins[3]},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.MAX_RUNTIME_AUTH_BYTES_PER_SCAN",
+                    paths[0].stat().st_size * 3,
+                ),
+            ):
+                first = scan_snapshot(sample, proc=proc, cache=caches)
+                second = scan_snapshot(sample, proc=proc, cache=caches)
+            first_ids = {item.evidence_id for item in first.evidence}
+            second_ids = {item.evidence_id for item in second.evidence}
+            self.assertTrue(first.incomplete)
+            self.assertEqual(
+                frozenset({VLLM_EXTENSION_EVIDENCE_ID}),
+                first.deferred_evidence_ids,
+            )
+            self.assertIn(PYTORCH_PAIR_EVIDENCE_ID, first_ids)
+            self.assertIn(VLLM_PYTHON_EVIDENCE_ID, first_ids)
+            self.assertNotIn(VLLM_PAIR_EVIDENCE_ID, first_ids)
+            self.assertFalse(second.incomplete)
+            self.assertIn(VLLM_PAIR_EVIDENCE_ID, second_ids)
+
+    def test_churning_wrong_hash_decoy_preserves_evidence_and_stays_incomplete(self) -> None:
+        identifiers = [bytes.fromhex(f"{value:02x}" * 20) for value in range(11, 16)]
+        with tempfile.TemporaryDirectory() as raw:
+            proc = Path(raw)
+            mappings = proc / "42" / "map_files"
+            mappings.mkdir(parents=True)
+            paths: list[Path] = []
+            lines: list[str] = []
+            for index, identifier in enumerate(identifiers[:4]):
+                start = 0x1000 + index * 0x2000
+                path = mappings / f"{start:x}-{start + 0x1000:x}"
+                path.write_bytes(build_id_elf(identifier))
+                paths.append(path)
+                lines.append(
+                    f"{start:x}-{start + 0x1000:x} r-xp 00000000 00:01 "
+                    f"{index + 21} /cached-{index}\n"
+                )
+            extension = build_id_elf(identifiers[4]) + b"\0"
+            decoy = mappings / "9000-a000"
+            valid = mappings / "b000-c000"
+            decoy.write_bytes(extension[:-1] + b"\1")
+            valid.write_bytes(extension)
+            lines.extend(
+                (
+                    "9000-a000 r-xp 00000000 00:01 31 /churning-decoy\n",
+                    "b000-c000 r-xp 00000000 00:01 32 /valid-extension\n",
+                )
+            )
+            (proc / "42" / "maps").write_text("".join(lines), encoding="utf-8")
+            sample = type(
+                "Snapshot",
+                (),
+                {
+                    "identity": ProcessIdentity(42, 100),
+                    "exe_path": "",
+                    "executable_map_paths": (),
+                },
+            )()
+
+            def key(path: Path) -> tuple[int, int, int, int, int]:
+                metadata = path.stat()
+                return (
+                    metadata.st_dev,
+                    metadata.st_ino,
+                    metadata.st_size,
+                    metadata.st_mtime_ns,
+                    metadata.st_ctime_ns,
+                )
+
+            cache = {
+                key(paths[0]): (
+                    RuntimeEvidence(
+                        PYTORCH_BRIDGE_EVIDENCE_ID, "PyTorch/ATen", "SHA256", ()
+                    ),
+                    RuntimeEvidence(
+                        OLLAMA_LAUNCHER_EVIDENCE_ID, "Ollama", "SHA256", ()
+                    ),
+                    RuntimeEvidence(
+                        PYTORCH_ATEN_EVIDENCE_ID, "PyTorch/ATen", "SHA256", ()
+                    ),
+                    RuntimeEvidence(
+                        VLLM_PYTHON_EVIDENCE_ID, "vLLM/CPython", "SHA256", ()
+                    ),
+                ),
+                key(paths[1]): (
+                    RuntimeEvidence(
+                        PYTORCH_ATEN_EVIDENCE_ID, "PyTorch/ATen", "SHA256", ()
+                    ),
+                ),
+                key(paths[2]): (
+                    RuntimeEvidence(
+                        VLLM_PYTHON_EVIDENCE_ID, "vLLM/CPython", "SHA256", ()
+                    ),
+                ),
+                key(paths[3]): (
+                    RuntimeEvidence(
+                        OLLAMA_LAUNCHER_EVIDENCE_ID, "Ollama", "SHA256", ()
+                    ),
+                ),
+            }
+            expected = (len(extension), hashlib.sha256(extension).hexdigest())
+            with (
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_VLLM_EXTENSION_BUILD_IDS",
+                    {identifiers[4].hex()},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.PINNED_VLLM_EXTENSION_FILES",
+                    {identifiers[4].hex(): expected},
+                ),
+                patch(
+                    "lumi_eggcracker.elfmarkers.MAX_RUNTIME_AUTH_BYTES_PER_SCAN",
+                    len(extension),
+                ),
+            ):
+                first = scan_snapshot(sample, proc=proc, cache=cache)
+                decoy.unlink()
+                decoy.write_bytes(extension[:-1] + b"\2")
+                second = scan_snapshot(sample, proc=proc, cache=cache)
+            for result in (first, second):
+                evidence_ids = {item.evidence_id for item in result.evidence}
+                self.assertEqual(
+                    frozenset({VLLM_EXTENSION_EVIDENCE_ID}),
+                    result.deferred_evidence_ids,
+                )
+                self.assertIn(PYTORCH_PAIR_EVIDENCE_ID, evidence_ids)
+                self.assertIn(VLLM_PYTHON_EVIDENCE_ID, evidence_ids)
+                self.assertIn(OLLAMA_LAUNCHER_EVIDENCE_ID, evidence_ids)
+                self.assertNotIn(VLLM_PAIR_EVIDENCE_ID, evidence_ids)
 
     def test_runtime_candidate_cap_deduplicates_repeated_map_segments(self) -> None:
         bridge = type("Evidence", (), {"evidence_id": PYTORCH_BRIDGE_EVIDENCE_ID})()

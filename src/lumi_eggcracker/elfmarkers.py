@@ -7,7 +7,7 @@ import os
 import stat
 import struct
 from collections.abc import Iterable, MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -136,6 +136,16 @@ class RuntimeEvidence:
         return {"family": self.family, "method": self.method}
 
 
+@dataclass(frozen=True)
+class RuntimeScanResult:
+    evidence: tuple[RuntimeEvidence, ...]
+    deferred_evidence_ids: frozenset[str]
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.deferred_evidence_ids)
+
+
 RuntimeCacheKey = tuple[int, int, int, int, int]
 RuntimeCache = MutableMapping[RuntimeCacheKey, tuple[RuntimeEvidence, ...]]
 
@@ -162,11 +172,9 @@ class _ProgramHeader:
 
 @dataclass
 class _AuthenticationBudget:
-    remaining: int = MAX_RUNTIME_AUTH_BYTES_PER_SCAN
-
-
-class _AuthenticationDeferred(Exception):
-    """The current bounded scan exhausted its full-file authentication budget."""
+    remaining: int = field(default_factory=lambda: MAX_RUNTIME_AUTH_BYTES_PER_SCAN)
+    deferred_evidence_ids: set[str] = field(default_factory=set)
+    deferred_attempts: int = 0
 
 
 def _cache_key(metadata: _Metadata) -> RuntimeCacheKey:
@@ -263,6 +271,7 @@ def _authenticated_sha256(
     size: int,
     expected: dict[str, int] | tuple[int, str],
     budget: _AuthenticationBudget | None,
+    evidence_id: str,
 ) -> bool:
     """Authenticate the complete stable runtime file against the release pin."""
     if isinstance(expected, tuple):
@@ -274,7 +283,9 @@ def _authenticated_sha256(
         return False
     if budget is not None:
         if budget.remaining < size:
-            raise _AuthenticationDeferred
+            budget.deferred_evidence_ids.add(evidence_id)
+            budget.deferred_attempts += 1
+            return False
         budget.remaining -= size
     os.lseek(descriptor, 0, os.SEEK_SET)
     digest = hashlib.sha256()
@@ -437,7 +448,11 @@ def _inspect_llama_descriptor(
         if (
             (len(found) >= 2 or build_id in PINNED_LLAMA_BUILD_IDS)
             and _authenticated_sha256(
-                descriptor, before.st_size, PINNED_LLAMA_FILES, budget
+                descriptor,
+                before.st_size,
+                PINNED_LLAMA_FILES,
+                budget,
+                "llama-build-id",
             )
             and _same_metadata(before, _metadata(descriptor, fallback))
         ):
@@ -445,8 +460,6 @@ def _inspect_llama_descriptor(
                 "llama-build-id", "llama.cpp", "SHA256", found
             )
         return None
-    except _AuthenticationDeferred:
-        raise
     except (JsonInputError, OSError, struct.error):
         return None
 
@@ -467,6 +480,7 @@ def _inspect_pytorch_descriptor(
             before.st_size,
             PINNED_PYTORCH_BRIDGE_FILES[build_id],
             budget,
+            PYTORCH_BRIDGE_EVIDENCE_ID,
         ) and _same_metadata(before, _metadata(descriptor, fallback)):
             return RuntimeEvidence(
                 PYTORCH_BRIDGE_EVIDENCE_ID, "PyTorch/ATen", "SHA256", ()
@@ -476,13 +490,12 @@ def _inspect_pytorch_descriptor(
             before.st_size,
             PINNED_PYTORCH_ATEN_FILES[build_id],
             budget,
+            PYTORCH_ATEN_EVIDENCE_ID,
         ) and _same_metadata(before, _metadata(descriptor, fallback)):
             return RuntimeEvidence(
                 PYTORCH_ATEN_EVIDENCE_ID, "PyTorch/ATen", "SHA256", ()
             )
         return None
-    except _AuthenticationDeferred:
-        raise
     except (JsonInputError, OSError, KeyError, struct.error):
         return None
 
@@ -507,13 +520,13 @@ def _inspect_exact_descriptor(
         if (
             build_id in build_ids
             and expected is not None
-            and _authenticated_sha256(descriptor, before.st_size, expected, budget)
+            and _authenticated_sha256(
+                descriptor, before.st_size, expected, budget, evidence_id
+            )
             and _same_metadata(before, _metadata(descriptor, fallback))
         ):
             return RuntimeEvidence(evidence_id, family, "SHA256", ())
         return None
-    except _AuthenticationDeferred:
-        raise
     except (JsonInputError, OSError, KeyError, struct.error):
         return None
 
@@ -749,11 +762,10 @@ def _cached_descriptor(
     cacheable = not isinstance(metadata, StableFileMetadata)
     if cache is not None and cacheable and key in cache:
         return cache[key]
-    try:
-        values = _inspect_descriptor(descriptor, fallback, budget)
-    except _AuthenticationDeferred:
-        return ()
-    if cache is not None and cacheable:
+    deferred_before = budget.deferred_attempts if budget is not None else 0
+    values = _inspect_descriptor(descriptor, fallback, budget)
+    deferred_after = budget.deferred_attempts if budget is not None else 0
+    if cache is not None and cacheable and deferred_before == deferred_after:
         cache[key] = values
     return values
 
@@ -793,14 +805,14 @@ def _matches_mapping(
     return False
 
 
-def from_snapshot(
+def scan_snapshot(
     snapshot: object,
     *,
     cache: RuntimeCache | None = None,
     proc: Path = Path("/proc"),
     start_index: int = 0,
     max_candidates: int = MAX_RUNTIME_CANDIDATES,
-) -> tuple[RuntimeEvidence, ...]:
+) -> RuntimeScanResult:
     """Inspect one fair window of live executable/mapping descriptors.
 
     Native Linux inspection opens only executable ``map_files`` ranges.
@@ -932,4 +944,25 @@ def from_snapshot(
                         values = _inspect_candidate(path)
                         cache[key] = values
                 add(values)
-    return with_vllm_pair(with_pytorch_pair(result))
+    return RuntimeScanResult(
+        with_vllm_pair(with_pytorch_pair(result)),
+        frozenset(budget.deferred_evidence_ids),
+    )
+
+
+def from_snapshot(
+    snapshot: object,
+    *,
+    cache: RuntimeCache | None = None,
+    proc: Path = Path("/proc"),
+    start_index: int = 0,
+    max_candidates: int = MAX_RUNTIME_CANDIDATES,
+) -> tuple[RuntimeEvidence, ...]:
+    """Compatibility wrapper returning evidence from one bounded runtime scan."""
+    return scan_snapshot(
+        snapshot,
+        cache=cache,
+        proc=proc,
+        start_index=start_index,
+        max_candidates=max_candidates,
+    ).evidence
