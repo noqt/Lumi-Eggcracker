@@ -36,22 +36,40 @@ PINNED_LLAMA_BUILD_IDS = frozenset({"7c2bca7f8ea49e1c6e86adb14861e721e041f95e"})
 PINNED_LLAMA_FILES = {
     "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5": 1_248_024
 }
-# Exact GNU build IDs from the pinned CPU-only PyTorch 2.5.1 wheel used by the
-# real smoke environment.  Names and paths are deliberately not part of the
+# Exact GNU build IDs from the qualified CPU-only PyTorch wheels used by the
+# real smoke environments. Names and paths are deliberately not part of the
 # qualification rule.
-PINNED_PYTORCH_BRIDGE_BUILD_IDS = frozenset({"0ba50bfa63eb5fd0dd19cabca2ee1de77c4c1398"})
-PINNED_PYTORCH_ATEN_BUILD_IDS = frozenset({"ad9ab6eeec3b28a0ec3f12f266627610de90813b"})
+PINNED_PYTORCH_BRIDGE_BUILD_IDS = frozenset(
+    {
+        "0ba50bfa63eb5fd0dd19cabca2ee1de77c4c1398",
+        "85d09b66000780cd7339d28d952751229cb33bc7",
+    }
+)
+PINNED_PYTORCH_ATEN_BUILD_IDS = frozenset(
+    {
+        "ad9ab6eeec3b28a0ec3f12f266627610de90813b",
+        "8ec08ec8f71de04ee2baa46c0dbe262858b1e27c",
+    }
+)
 PINNED_PYTORCH_BRIDGE_FILES = {
     "0ba50bfa63eb5fd0dd19cabca2ee1de77c4c1398": (
         26_113_896,
         "b576248e3a0f6ff37de11baa3beac0e53ca1500208b9cf4974db2f3b67cfc8c5",
-    )
+    ),
+    "85d09b66000780cd7339d28d952751229cb33bc7": (
+        30_616_304,
+        "247efcbc423fb65aa64640b96cd51672d4863413472ed2ddded6ad57a8647c67",
+    ),
 }
 PINNED_PYTORCH_ATEN_FILES = {
     "ad9ab6eeec3b28a0ec3f12f266627610de90813b": (
         433_155_401,
         "dacb42735f5a59a8b2abbf06fe7fdeba359849a08f418ad830a84ffadc316802",
-    )
+    ),
+    "8ec08ec8f71de04ee2baa46c0dbe262858b1e27c": (
+        434_184_800,
+        "ae0f4bc33ffe73f4eb85b2fd03b036c68cf5ab6139995f6a2345f5962c1bbb81",
+    ),
 }
 PYTORCH_BRIDGE_EVIDENCE_ID = "pytorch-bridge-build-id-pinned-cpu"
 PYTORCH_ATEN_EVIDENCE_ID = "pytorch-aten-build-id-pinned-cpu"
@@ -79,12 +97,21 @@ PINNED_VLLM_PYTHON_FILES = {
         "a92f0f95e883390c7256b2e441484aac06b1002dbe1d924141a77c8d82f96223",
     )
 }
-PINNED_VLLM_EXTENSION_BUILD_IDS = frozenset({"0b81145998cd6a2a1162b3ca47c1029e55061449"})
+PINNED_VLLM_EXTENSION_BUILD_IDS = frozenset(
+    {
+        "0b81145998cd6a2a1162b3ca47c1029e55061449",
+        "d86c8add9ec525f83ff66448174bf20b7d065772",
+    }
+)
 PINNED_VLLM_EXTENSION_FILES = {
     "0b81145998cd6a2a1162b3ca47c1029e55061449": (
         17_766_528,
         "56510a6c504707d8f986a76f87225ce8026de498672aceae4fc7642bf1aa1edc",
-    )
+    ),
+    "d86c8add9ec525f83ff66448174bf20b7d065772": (
+        82_113_712,
+        "46c04a0e0b245d5438181e9e8335cf5a5445f00c1615962a4b414f844c74dd31",
+    ),
 }
 OLLAMA_LAUNCHER_EVIDENCE_ID = "ollama-launcher-pinned"
 OLLAMA_RUNNER_EVIDENCE_ID = "ollama-runner-pinned"

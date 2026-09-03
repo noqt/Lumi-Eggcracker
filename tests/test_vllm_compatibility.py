@@ -95,6 +95,61 @@ def evidence(evidence_id: str) -> RuntimeEvidence:
 
 
 class VllmCompatibilityTests(unittest.TestCase):
+    def test_vllm_0_28_cpu_pins_extend_prior_supported_set(self) -> None:
+        expected = {
+            "bridge": {
+                "0ba50bfa63eb5fd0dd19cabca2ee1de77c4c1398": (
+                    26_113_896,
+                    "b576248e3a0f6ff37de11baa3beac0e53ca1500208b9cf4974db2f3b67cfc8c5",
+                ),
+                "85d09b66000780cd7339d28d952751229cb33bc7": (
+                    30_616_304,
+                    "247efcbc423fb65aa64640b96cd51672d4863413472ed2ddded6ad57a8647c67",
+                ),
+            },
+            "aten": {
+                "ad9ab6eeec3b28a0ec3f12f266627610de90813b": (
+                    433_155_401,
+                    "dacb42735f5a59a8b2abbf06fe7fdeba359849a08f418ad830a84ffadc316802",
+                ),
+                "8ec08ec8f71de04ee2baa46c0dbe262858b1e27c": (
+                    434_184_800,
+                    "ae0f4bc33ffe73f4eb85b2fd03b036c68cf5ab6139995f6a2345f5962c1bbb81",
+                ),
+            },
+            "extension": {
+                "0b81145998cd6a2a1162b3ca47c1029e55061449": (
+                    17_766_528,
+                    "56510a6c504707d8f986a76f87225ce8026de498672aceae4fc7642bf1aa1edc",
+                ),
+                "d86c8add9ec525f83ff66448174bf20b7d065772": (
+                    82_113_712,
+                    "46c04a0e0b245d5438181e9e8335cf5a5445f00c1615962a4b414f844c74dd31",
+                ),
+            },
+        }
+        for role, build_ids, files in (
+            (
+                "bridge",
+                elfmarkers.PINNED_PYTORCH_BRIDGE_BUILD_IDS,
+                elfmarkers.PINNED_PYTORCH_BRIDGE_FILES,
+            ),
+            (
+                "aten",
+                elfmarkers.PINNED_PYTORCH_ATEN_BUILD_IDS,
+                elfmarkers.PINNED_PYTORCH_ATEN_FILES,
+            ),
+            (
+                "extension",
+                elfmarkers.PINNED_VLLM_EXTENSION_BUILD_IDS,
+                elfmarkers.PINNED_VLLM_EXTENSION_FILES,
+            ),
+        ):
+            with self.subTest(role=role):
+                self.assertLessEqual(expected[role].keys(), build_ids)
+                for build_id, identity in expected[role].items():
+                    self.assertEqual(identity, files[build_id])
+
     def test_exact_four_role_set_is_supported_and_tamper_fails_closed(self) -> None:
         identities = {
             "pytorch_bridge": bytes.fromhex("11" * 20),
