@@ -3,13 +3,14 @@
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
 [v1.0.10 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v1.0.10)
+· [Hugging Face distribution](https://huggingface.co/spaces/noqt/eggcracker)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
 · [Run the first kill](#run-the-first-kill)
 · [Current-run Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
 
-Maintained by [NOQT](https://github.com/noqt), which builds open-source software for security and risk. The [independent watchlist entry](https://github.com/scadastrangelove/awesome-ai-security-tools/blob/main/WATCHLIST.md#candidates) records the current alpha limits and the fact that outside field runs are still missing; it is context, not endorsement or assurance.
+Maintained by [NOQT](https://github.com/noqt), which builds open-source software for security and risk.
 
 ## The kill switch outside the sandbox
 
