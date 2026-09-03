@@ -859,12 +859,24 @@ class Supervisor:
             return
         spent.intersection_update(live_identities)
 
+    @staticmethod
+    def _vllm_topology_pending(
+        runtimes: tuple[RuntimeEvidence, ...],
+        deferred_evidence_ids: frozenset[str] | set[str],
+    ) -> bool:
+        """Return whether exact vLLM topology is authenticated but incomplete."""
+        components = {VLLM_PYTHON_EVIDENCE_ID, VLLM_EXTENSION_EVIDENCE_ID}
+        runtime_ids = {item.evidence_id for item in runtimes}
+        if VLLM_PAIR_EVIDENCE_ID in runtime_ids or components.issubset(runtime_ids):
+            return False
+        return bool(components.intersection(runtime_ids | deferred_evidence_ids))
+
     def _delay_incomplete_vllm_decision(
         self,
         detected: DetectionMatch,
         witness: tuple[_EvidenceCandidate, ...],
         scope: tuple[_EvidenceCandidate, ...],
-        deferred_now: set[ProcessIdentity],
+        pending_now: set[ProcessIdentity],
         delayed_this_scan: set[ProcessIdentity],
     ) -> tuple[bool, set[ProcessIdentity]]:
         """Delay generic PyTorch once while related vLLM auth is incomplete."""
@@ -875,7 +887,7 @@ class Supervisor:
         if detected.profile != "content.safetensors-pytorch" or not contributors:
             return False, contributors
         scope_ids = {candidate.snapshot.identity for candidate in scope}
-        if not scope_ids.intersection(deferred_now):
+        if not scope_ids.intersection(pending_now):
             return False, contributors
         spent = self.runtime_pytorch_delay_spent
         if contributors.intersection(delayed_this_scan):
@@ -887,7 +899,7 @@ class Supervisor:
             delayed_this_scan.update(contributors)
             return True, contributors
         # Propagate spent state to a successor witness sharing any surviving
-        # contributor.  Continued or churned deferral now fails closed to the
+        # contributor.  Continued or churned maturation now fails closed to the
         # strongest fully authenticated profile.
         spent.update(contributors)
         return False, contributors
@@ -1928,7 +1940,7 @@ class Supervisor:
         snapshot_map = {item.identity: item for item in snapshots}
         live_identities = set(snapshot_map)
         self._prune_runtime_pytorch_delay_spent(live_identities)
-        vllm_deferred_now: set[ProcessIdentity] = set()
+        vllm_pending_now: set[ProcessIdentity] = set()
         delayed_this_scan: set[ProcessIdentity] = set()
         for cache in (
             getattr(self, "artifact_fd_offsets", {}),
@@ -1991,10 +2003,6 @@ class Supervisor:
                     start_index=runtime_start,
                 )
                 runtimes_now = runtime_scan.evidence
-                if runtime_scan.deferred_evidence_ids.intersection(
-                    {VLLM_PYTHON_EVIDENCE_ID, VLLM_EXTENSION_EVIDENCE_ID}
-                ):
-                    vllm_deferred_now.add(snapshot.identity)
                 runtime_offsets[snapshot.identity] = runtime_start + MAX_RUNTIME_CANDIDATES
                 observed_content = getattr(self, "observed_content", None)
                 if observed_content is None:
@@ -2027,11 +2035,15 @@ class Supervisor:
                     runtimes = with_pytorch_pair(
                         item for key, item in runtime_values.items() if key in active
                     )
+                if self._vllm_topology_pending(
+                    runtimes, runtime_scan.deferred_evidence_ids
+                ):
+                    vllm_pending_now.add(snapshot.identity)
             if (
                 fast_match is None
                 and not content
                 and not runtimes
-                and snapshot.identity not in vllm_deferred_now
+                and snapshot.identity not in vllm_pending_now
             ):
                 continue
             candidates.append(
@@ -2128,7 +2140,7 @@ class Supervisor:
                 detected,
                 witness,
                 scope,
-                vllm_deferred_now,
+                vllm_pending_now,
                 delayed_this_scan,
             )
             if delay:

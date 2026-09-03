@@ -19,6 +19,9 @@ from lumi_eggcracker.elfmarkers import (
     PYTORCH_ATEN_EVIDENCE_ID,
     PYTORCH_BRIDGE_EVIDENCE_ID,
     PYTORCH_PAIR_EVIDENCE_ID,
+    VLLM_EXTENSION_EVIDENCE_ID,
+    VLLM_PAIR_EVIDENCE_ID,
+    VLLM_PYTHON_EVIDENCE_ID,
     RuntimeEvidence,
     with_pytorch_pair,
 )
@@ -224,6 +227,98 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(delay)
         self.assertEqual(set(), contributors)
         self.assertEqual(set(), supervisor.runtime_pytorch_delay_spent)
+
+    def test_authenticated_partial_vllm_topology_gets_one_bounded_delay(self) -> None:
+        for evidence_id in (
+            VLLM_PYTHON_EVIDENCE_ID,
+            VLLM_EXTENSION_EVIDENCE_ID,
+        ):
+            with self.subTest(evidence_id=evidence_id):
+                supervisor = self._instance()
+                supervisor.runtime_pytorch_delay_spent = set()
+                identity = ProcessIdentity(61, 601)
+                snapshot = ProcessSnapshot(
+                    identity,
+                    2001,
+                    "/usr/bin/python3",
+                    "python3",
+                    ("python3",),
+                    (),
+                    (),
+                    (),
+                )
+                content = ArtifactEvidence(
+                    "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+                )
+                pytorch = RuntimeEvidence(
+                    PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "SHA256_PAIR", ()
+                )
+                partial = RuntimeEvidence(evidence_id, "vLLM", "SHA256", ())
+                candidate = _EvidenceCandidate(
+                    snapshot, (content,), (pytorch, partial), 1
+                )
+                pending = (
+                    {identity}
+                    if supervisor._vllm_topology_pending((partial,), frozenset())
+                    else set()
+                )
+                detected = DetectionMatch(
+                    "content.safetensors-pytorch", "CONTENT", ()
+                )
+                first, _ = supervisor._delay_incomplete_vllm_decision(
+                    detected, (candidate,), (candidate,), pending, set()
+                )
+                second, _ = supervisor._delay_incomplete_vllm_decision(
+                    detected, (candidate,), (candidate,), pending, set()
+                )
+                self.assertTrue(first)
+                self.assertFalse(second)
+
+    def test_complete_vllm_topology_overrides_pending_and_clears_delay(self) -> None:
+        supervisor = self._instance()
+        identity = ProcessIdentity(71, 701)
+        supervisor.runtime_pytorch_delay_spent = {identity}
+        python = RuntimeEvidence(
+            VLLM_PYTHON_EVIDENCE_ID, "vLLM/CPython", "SHA256", ()
+        )
+        extension = RuntimeEvidence(
+            VLLM_EXTENSION_EVIDENCE_ID, "vLLM", "SHA256", ()
+        )
+        pair = RuntimeEvidence(VLLM_PAIR_EVIDENCE_ID, "vLLM", "SHA256_PAIR", ())
+        self.assertFalse(
+            supervisor._vllm_topology_pending(
+                (python, extension, pair), {VLLM_EXTENSION_EVIDENCE_ID}
+            )
+        )
+        snapshot = ProcessSnapshot(
+            identity, 2001, "/usr/bin/python3", "python3", (), (), (), ()
+        )
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        pytorch = RuntimeEvidence(
+            PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "SHA256_PAIR", ()
+        )
+        candidate = _EvidenceCandidate(
+            snapshot, (content,), (pytorch, python, extension, pair), 1
+        )
+        delay, _ = supervisor._delay_incomplete_vllm_decision(
+            DetectionMatch("content.safetensors-vllm", "CONTENT", ()),
+            (candidate,),
+            (candidate,),
+            {identity},
+            set(),
+        )
+        self.assertFalse(delay)
+        self.assertEqual(set(), supervisor.runtime_pytorch_delay_spent)
+
+    def test_lookalike_runtime_ids_do_not_create_vllm_pending_state(self) -> None:
+        supervisor = self._instance()
+        lookalikes = (
+            RuntimeEvidence("vllm-python-lookalike", "vLLM/CPython", "SHA256", ()),
+            RuntimeEvidence("vllm-extension-lookalike", "vLLM", "SHA256", ()),
+        )
+        self.assertFalse(supervisor._vllm_topology_pending(lookalikes, frozenset()))
 
     def test_gated_process_credentials_reject_foreign_supplementary_group(self) -> None:
         supervisor = self._instance()
