@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from lumi_eggcracker.approvals import (
     LEGACY_SCHEMA,
+    PRE_CAPABILITY_SCHEMA,
     _root_controlled_reference,
     create,
     load_all,
@@ -136,6 +137,44 @@ class ApprovalTests(unittest.TestCase):
             self.assertEqual(64, record["max_pids"])
             self.assertEqual(2048, record["max_memory_mib"])
             self.assertEqual(400, record["cpu_quota_percent"])
+            self.assertFalse(record["allow_interface_discovery"])
+
+    def test_interface_discovery_is_root_approval_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "approvals"
+            binary = Path(raw) / "runner"
+            binary.write_bytes(b"#!/bin/true\n")
+            binary.chmod(0o755)
+            argv = [str(binary), "-m", "/models/qwen.gguf"]
+            with patch(
+                "lumi_eggcracker.approvals._classify",
+                return_value=(
+                    "NATIVE_LLAMA",
+                    [{"argument_index": 2, "device": 1, "inode": 1, "kind": "MODEL_ARTIFACT", "sha256": "a" * 64, "size": 1}],
+                ),
+            ), patch(
+                "lumi_eggcracker.approvals._root_controlled_reference",
+                return_value=True,
+            ):
+                record = create(
+                    root,
+                    name="qwen-netlink",
+                    uid=1001,
+                    argv=argv,
+                    administrator_uid=0,
+                    installation_epoch=EPOCH,
+                    allow_interface_discovery=True,
+                )
+            self.assertTrue(record["allow_interface_discovery"])
+            self.assertTrue(public(record)["allow_interface_discovery"])
+
+            record["schema_version"] = PRE_CAPABILITY_SCHEMA
+            record.pop("allow_interface_discovery")
+            (root / "qwen-netlink.json").write_text(
+                json.dumps(record), encoding="utf-8"
+            )
+            loaded = load_all(root, installation_epoch=EPOCH)
+            self.assertFalse(public(loaded[0])["allow_interface_discovery"])
 
     def test_revoke_removes_exact_record(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -11,7 +11,8 @@ from .discovery import ProcessIdentity, ProcessSnapshot
 from .jsonio import JsonInputError, load_regular_json
 from .records import RUN_ID, write_atomic
 
-SCHEMA = "lumi-eggcracker.launch-provenance.v3"
+SCHEMA = "lumi-eggcracker.launch-provenance.v4"
+LEGACY_SCHEMA = "lumi-eggcracker.launch-provenance.v3"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -22,7 +23,7 @@ def provenance_path(root: Path, run_id: str) -> Path:
 
 
 def validate(value: dict[str, Any]) -> dict[str, Any]:
-    expected = {
+    common = {
         "approval_created_monotonic_ns",
         "approval_name",
         "argv_count",
@@ -43,8 +44,15 @@ def validate(value: dict[str, Any]) -> dict[str, Any]:
         "start_time",
         "uid",
     }
-    if set(value) != expected or value.get("schema_version") != SCHEMA:
+    schema = value.get("schema_version")
+    expected = common | {"allow_interface_discovery"}
+    if not (
+        (schema == SCHEMA and set(value) == expected)
+        or (schema == LEGACY_SCHEMA and set(value) == common)
+    ):
         raise JsonInputError("launch provenance schema is invalid")
+    if schema == SCHEMA and not isinstance(value["allow_interface_discovery"], bool):
+        raise JsonInputError("launch provenance interface-discovery capability is invalid")
     if not isinstance(value["run_id"], str) or not RUN_ID.fullmatch(value["run_id"]):
         raise JsonInputError("launch provenance run identity is invalid")
     if not isinstance(value["approval_name"], str) or not value["approval_name"]:
@@ -101,6 +109,9 @@ def create(
         {
             "approval_created_monotonic_ns": approval["created_monotonic_ns"],
             "approval_name": approval["name"],
+            "allow_interface_discovery": bool(
+                approval.get("allow_interface_discovery", False)
+            ),
             "argv_count": approval["argv_count"],
             "argv_sha256": approval["argv_sha256"],
             "bound_input_sha256": [
@@ -171,6 +182,8 @@ def approval_is_active(
                 == provenance["executable_sha256"]
                 and approval["launch_kind"] == provenance["launch_kind"]
                 and approval["uid"] == provenance["uid"]
+                and bool(approval.get("allow_interface_discovery", False))
+                == bool(provenance.get("allow_interface_discovery", False))
             )
         except (KeyError, TypeError):
             return False

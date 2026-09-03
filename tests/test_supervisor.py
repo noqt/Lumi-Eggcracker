@@ -29,12 +29,15 @@ from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
 from lumi_eggcracker.supervisor import (
     MAX_FRAME,
+    PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
     PROTECTED_SYSTEMD_ENVIRONMENT,
+    PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES,
     QUERY_SOCKET,
     Supervisor,
     _bounded_query_items,
     _EvidenceCandidate,
     _receive,
+    protected_systemd_address_families,
 )
 
 
@@ -81,6 +84,32 @@ class SupervisorTests(unittest.TestCase):
         self.assertNotIn("--setenv=PATH=/bin", PROTECTED_SYSTEMD_ENVIRONMENT)
         self.assertFalse(any("venv" in entry for entry in path_entries))
         self.assertEqual(len(PROTECTED_SYSTEMD_ENVIRONMENT), len(set(PROTECTED_SYSTEMD_ENVIRONMENT)))
+
+    def test_protected_workload_allows_only_required_address_families(self) -> None:
+        self.assertEqual(
+            PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
+            "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+        )
+        self.assertEqual(
+            PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES,
+            "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+        )
+        self.assertEqual(
+            protected_systemd_address_families(None),
+            PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
+        )
+        self.assertEqual(
+            protected_systemd_address_families(
+                {"allow_interface_discovery": False}
+            ),
+            PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
+        )
+        self.assertEqual(
+            protected_systemd_address_families(
+                {"allow_interface_discovery": True}
+            ),
+            PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES,
+        )
 
     def test_live_workload_identity_requires_distinct_exact_uid_gid(self) -> None:
         supervisor = self._instance()

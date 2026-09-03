@@ -149,6 +149,12 @@ MAX_CORRELATED_PROCESSES = 64
 SCAN_HEALTH_TIMEOUT_NS = 1_000_000_000
 MAX_DISCOVERY_FAILURES = 3
 MAX_ENFORCEMENT_TASKS = 16
+PROTECTED_SYSTEMD_ADDRESS_FAMILIES = (
+    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
+)
+PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES = (
+    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+)
 PROTECTED_SYSTEMD_ENVIRONMENT = (
     "--setenv=HOME=/nonexistent",
     "--setenv=BASH_ENV=/nonexistent",
@@ -168,6 +174,15 @@ PROTECTED_SYSTEMD_ENVIRONMENT = (
     "--setenv=PYTHONSTARTUP=/nonexistent",
     "--setenv=PYTHONUSERBASE=/nonexistent",
 )
+
+
+def protected_systemd_address_families(
+    approval: dict[str, Any] | None,
+) -> str:
+    """Select the narrow root-approved interface-discovery capability."""
+    if approval is not None and approval.get("allow_interface_discovery") is True:
+        return PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES
+    return PROTECTED_SYSTEMD_ADDRESS_FAMILIES
 
 
 def policy_network_mode(policy: dict[str, Any]) -> str:
@@ -3006,6 +3021,7 @@ class Supervisor:
                 approval = None
             if require_approval and approval is None:
                 raise JsonInputError("protected launch is not approved")
+            address_families = protected_systemd_address_families(approval)
             run_id = os.urandom(12).hex()
             if exec_policy_id is None:
                 execution_policy = ephemeral_execution_policy(argv[0], run_id)
@@ -3066,7 +3082,7 @@ class Supervisor:
                     "--property=CapabilityBoundingSet=",
                     "--property=AmbientCapabilities=",
                     "--property=SupplementaryGroups=",
-                    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+                    address_families,
                     f"--property=TasksMax={maximum}",
                     f"--property=MemoryMax={memory_mib}M",
                     f"--property=CPUQuota={cpu_quota}%",
@@ -3505,13 +3521,18 @@ class Supervisor:
             return {"runs": runs}
         if action in {"approve", "revoke", "exec_policy_create", "exec_policy_revoke"} and not self._incident_status()["healthy"]:
             raise JsonInputError("local lockdown state is unavailable; root recovery is required")
-        if action == "approve" and set(args) == {
+        approval_arguments = {
             "argv",
             "cpu_quota_percent",
             "max_memory_mib",
             "max_pids",
             "name",
             "uid",
+        }
+        if action == "approve" and set(args) == approval_arguments:
+            args = {**args, "allow_interface_discovery": False}
+        if action == "approve" and set(args) == approval_arguments | {
+            "allow_interface_discovery"
         }:
             with self.approval_lock:
                 value = create_approval(
@@ -3524,6 +3545,7 @@ class Supervisor:
                     max_pids=args["max_pids"],
                     max_memory_mib=args["max_memory_mib"],
                     cpu_quota_percent=args["cpu_quota_percent"],
+                    allow_interface_discovery=args["allow_interface_discovery"],
                 )
             return {"approval": public_approval(value), "result": "APPROVED"}
         if action == "revoke" and set(args) == {"name"}:

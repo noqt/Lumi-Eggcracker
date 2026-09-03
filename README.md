@@ -275,6 +275,10 @@ with a redacted support bundle; route security-sensitive findings through
 - keeps an unrelated canary outside the owned cgroup alive;
 - launches every selected workload in a root-controlled offline namespace where
   loopback is allowed and non-loopback IPv4/IPv6 egress is denied and counted;
+- lets root explicitly approve unprivileged interface discovery inside that
+  namespace for a selected command, so it can bind loopback without gaining
+  network-administration capabilities; ordinary protected launches do not
+  receive that additional address family;
 - automatically kills the complete selected workload tree when that boundary
   counter trips, then writes a post-containment receipt;
 - records a bounded local lockdown after an autonomous, network-boundary or
