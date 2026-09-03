@@ -22,6 +22,7 @@ class LaunchProvenanceTests(unittest.TestCase):
             "run_id": run_id,
         }
         approval = {
+            "allow_interface_discovery": True,
             "bound_inputs": [{"sha256": "c" * 64}],
             "created_monotonic_ns": 1,
             "name": "approved",
@@ -70,6 +71,13 @@ class LaunchProvenanceTests(unittest.TestCase):
 
             self.assertTrue(approval_is_active(provenance, [approval]))
             self.assertFalse(approval_is_active(provenance, []))
+            self.assertTrue(provenance["allow_interface_discovery"])
+
+            changed_capability = {
+                **approval,
+                "allow_interface_discovery": False,
+            }
+            self.assertFalse(approval_is_active(provenance, [changed_capability]))
 
             replacement_approval = {**approval, "created_monotonic_ns": 2}
             self.assertFalse(

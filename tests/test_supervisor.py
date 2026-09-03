@@ -13,11 +13,15 @@ from unittest.mock import MagicMock, patch
 from lumi_eggcracker import incidents
 from lumi_eggcracker.artifacts import ArtifactEvidence
 from lumi_eggcracker.containment import EmptyProof
-from lumi_eggcracker.detectors import load_bundled, match
+from lumi_eggcracker.detectors import DetectionMatch, load_bundled, match
 from lumi_eggcracker.discovery import ProcessIdentity, ProcessSnapshot
 from lumi_eggcracker.elfmarkers import (
     PYTORCH_ATEN_EVIDENCE_ID,
     PYTORCH_BRIDGE_EVIDENCE_ID,
+    PYTORCH_PAIR_EVIDENCE_ID,
+    VLLM_EXTENSION_EVIDENCE_ID,
+    VLLM_PAIR_EVIDENCE_ID,
+    VLLM_PYTHON_EVIDENCE_ID,
     RuntimeEvidence,
     with_pytorch_pair,
 )
@@ -25,11 +29,15 @@ from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
 from lumi_eggcracker.supervisor import (
     MAX_FRAME,
+    PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
+    PROTECTED_SYSTEMD_ENVIRONMENT,
+    PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES,
     QUERY_SOCKET,
     Supervisor,
     _bounded_query_items,
     _EvidenceCandidate,
     _receive,
+    protected_systemd_address_families,
 )
 
 
@@ -67,6 +75,42 @@ class SupervisorTests(unittest.TestCase):
         value.receipt_persistence_healthy = True
         return value
 
+    def test_protected_systemd_environment_has_fixed_minimal_path(self) -> None:
+        path_entries = tuple(
+            entry for entry in PROTECTED_SYSTEMD_ENVIRONMENT if entry.startswith("--setenv=PATH=")
+        )
+        self.assertEqual(path_entries, ("--setenv=PATH=/usr/bin",))
+        self.assertNotIn("--setenv=PATH=.", PROTECTED_SYSTEMD_ENVIRONMENT)
+        self.assertNotIn("--setenv=PATH=/bin", PROTECTED_SYSTEMD_ENVIRONMENT)
+        self.assertFalse(any("venv" in entry for entry in path_entries))
+        self.assertEqual(len(PROTECTED_SYSTEMD_ENVIRONMENT), len(set(PROTECTED_SYSTEMD_ENVIRONMENT)))
+
+    def test_protected_workload_allows_only_required_address_families(self) -> None:
+        self.assertEqual(
+            PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
+            "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+        )
+        self.assertEqual(
+            PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES,
+            "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+        )
+        self.assertEqual(
+            protected_systemd_address_families(None),
+            PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
+        )
+        self.assertEqual(
+            protected_systemd_address_families(
+                {"allow_interface_discovery": False}
+            ),
+            PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
+        )
+        self.assertEqual(
+            protected_systemd_address_families(
+                {"allow_interface_discovery": True}
+            ),
+            PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES,
+        )
+
     def test_live_workload_identity_requires_distinct_exact_uid_gid(self) -> None:
         supervisor = self._instance()
         supervisor.policy.update(
@@ -93,6 +137,228 @@ class SupervisorTests(unittest.TestCase):
             self.assertTrue(supervisor._workload_identity_status()["healthy"])
             supervisor.policy["workload_gid"] = 999
             self.assertFalse(supervisor._workload_identity_status()["healthy"])
+
+    def test_incomplete_vllm_delay_survives_witness_and_helper_churn(self) -> None:
+        supervisor = self._instance()
+        supervisor.runtime_pytorch_delay_spent = set()
+        runtime_identity = ProcessIdentity(41, 401)
+        first_content_identity = ProcessIdentity(42, 402)
+        second_content_identity = ProcessIdentity(43, 403)
+        first_helper_identity = ProcessIdentity(44, 404)
+        second_helper_identity = ProcessIdentity(45, 405)
+
+        def snapshot(identity: ProcessIdentity) -> ProcessSnapshot:
+            return ProcessSnapshot(
+                identity,
+                2001,
+                "/usr/bin/python3",
+                "python3",
+                ("python3",),
+                (),
+                (),
+                (),
+            )
+
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        runtime = RuntimeEvidence(
+            PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "SHA256_PAIR", ()
+        )
+        runtime_candidate = _EvidenceCandidate(
+            snapshot(runtime_identity), (), (runtime,), 1
+        )
+        first_content = _EvidenceCandidate(
+            snapshot(first_content_identity), (content,), (), 1
+        )
+        first_helper = _EvidenceCandidate(snapshot(first_helper_identity), (), (), 1)
+        detected = DetectionMatch("content.safetensors-pytorch", "CONTENT", ())
+        delayed_this_scan: set[ProcessIdentity] = set()
+
+        delay, contributors = supervisor._delay_incomplete_vllm_decision(
+            detected,
+            (runtime_candidate, first_content),
+            (runtime_candidate, first_content, first_helper),
+            {first_helper_identity},
+            delayed_this_scan,
+        )
+        self.assertTrue(delay)
+        self.assertEqual(
+            {runtime_identity, first_content_identity}, contributors
+        )
+
+        # Witness order and duplicate groups cannot spend a second delay in
+        # the same scan.
+        duplicate_delay, _ = supervisor._delay_incomplete_vllm_decision(
+            detected,
+            (first_content, runtime_candidate),
+            (first_helper, first_content, runtime_candidate),
+            {first_helper_identity},
+            delayed_this_scan,
+        )
+        self.assertTrue(duplicate_delay)
+
+        second_content = _EvidenceCandidate(
+            snapshot(second_content_identity), (content,), (), 2
+        )
+        second_helper = _EvidenceCandidate(snapshot(second_helper_identity), (), (), 2)
+        supervisor._prune_runtime_pytorch_delay_spent(
+            {runtime_identity, second_content_identity, second_helper_identity}
+        )
+        self.assertEqual(
+            {runtime_identity}, supervisor.runtime_pytorch_delay_spent
+        )
+
+        # The stable runtime contributor propagates spent state to the new
+        # content witness, so a rotated helper cannot suppress enforcement.
+        retry_delay, retry_contributors = supervisor._delay_incomplete_vllm_decision(
+            detected,
+            (second_content, runtime_candidate),
+            (second_helper, second_content, runtime_candidate),
+            {second_helper_identity},
+            set(),
+        )
+        self.assertFalse(retry_delay)
+        self.assertEqual(
+            {runtime_identity, second_content_identity}, retry_contributors
+        )
+        self.assertEqual(
+            {runtime_identity, second_content_identity},
+            supervisor.runtime_pytorch_delay_spent,
+        )
+
+        vllm = DetectionMatch("content.safetensors-vllm", "CONTENT", ())
+        vllm_delay, _ = supervisor._delay_incomplete_vllm_decision(
+            vllm,
+            (runtime_candidate, second_content),
+            (runtime_candidate, second_content, second_helper),
+            set(),
+            set(),
+        )
+        self.assertFalse(vllm_delay)
+        self.assertEqual(set(), supervisor.runtime_pytorch_delay_spent)
+
+    def test_incomplete_vllm_does_not_delay_unrelated_complete_profile(self) -> None:
+        supervisor = self._instance()
+        supervisor.runtime_pytorch_delay_spent = set()
+        identity = ProcessIdentity(51, 501)
+        candidate = _EvidenceCandidate(
+            ProcessSnapshot(
+                identity,
+                2001,
+                "/usr/bin/runtime",
+                "runtime",
+                ("runtime",),
+                (),
+                (),
+                (),
+            ),
+            (),
+            (),
+            1,
+        )
+        delay, contributors = supervisor._delay_incomplete_vllm_decision(
+            DetectionMatch("content.gguf-llama", "CONTENT", ()),
+            (candidate,),
+            (candidate,),
+            {identity},
+            set(),
+        )
+        self.assertFalse(delay)
+        self.assertEqual(set(), contributors)
+        self.assertEqual(set(), supervisor.runtime_pytorch_delay_spent)
+
+    def test_authenticated_partial_vllm_topology_gets_one_bounded_delay(self) -> None:
+        for evidence_id in (
+            VLLM_PYTHON_EVIDENCE_ID,
+            VLLM_EXTENSION_EVIDENCE_ID,
+        ):
+            with self.subTest(evidence_id=evidence_id):
+                supervisor = self._instance()
+                supervisor.runtime_pytorch_delay_spent = set()
+                identity = ProcessIdentity(61, 601)
+                snapshot = ProcessSnapshot(
+                    identity,
+                    2001,
+                    "/usr/bin/python3",
+                    "python3",
+                    ("python3",),
+                    (),
+                    (),
+                    (),
+                )
+                content = ArtifactEvidence(
+                    "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+                )
+                pytorch = RuntimeEvidence(
+                    PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "SHA256_PAIR", ()
+                )
+                partial = RuntimeEvidence(evidence_id, "vLLM", "SHA256", ())
+                candidate = _EvidenceCandidate(
+                    snapshot, (content,), (pytorch, partial), 1
+                )
+                pending = (
+                    {identity}
+                    if supervisor._vllm_topology_pending((partial,), frozenset())
+                    else set()
+                )
+                detected = DetectionMatch(
+                    "content.safetensors-pytorch", "CONTENT", ()
+                )
+                first, _ = supervisor._delay_incomplete_vllm_decision(
+                    detected, (candidate,), (candidate,), pending, set()
+                )
+                second, _ = supervisor._delay_incomplete_vllm_decision(
+                    detected, (candidate,), (candidate,), pending, set()
+                )
+                self.assertTrue(first)
+                self.assertFalse(second)
+
+    def test_complete_vllm_topology_overrides_pending_and_clears_delay(self) -> None:
+        supervisor = self._instance()
+        identity = ProcessIdentity(71, 701)
+        supervisor.runtime_pytorch_delay_spent = {identity}
+        python = RuntimeEvidence(
+            VLLM_PYTHON_EVIDENCE_ID, "vLLM/CPython", "SHA256", ()
+        )
+        extension = RuntimeEvidence(
+            VLLM_EXTENSION_EVIDENCE_ID, "vLLM", "SHA256", ()
+        )
+        pair = RuntimeEvidence(VLLM_PAIR_EVIDENCE_ID, "vLLM", "SHA256_PAIR", ())
+        self.assertFalse(
+            supervisor._vllm_topology_pending(
+                (python, extension, pair), {VLLM_EXTENSION_EVIDENCE_ID}
+            )
+        )
+        snapshot = ProcessSnapshot(
+            identity, 2001, "/usr/bin/python3", "python3", (), (), (), ()
+        )
+        content = ArtifactEvidence(
+            "safetensors-v1", "SAFETENSORS", 1, 2, 4096, "a" * 64
+        )
+        pytorch = RuntimeEvidence(
+            PYTORCH_PAIR_EVIDENCE_ID, "PyTorch/ATen", "SHA256_PAIR", ()
+        )
+        candidate = _EvidenceCandidate(
+            snapshot, (content,), (pytorch, python, extension, pair), 1
+        )
+        delay, _ = supervisor._delay_incomplete_vllm_decision(
+            DetectionMatch("content.safetensors-vllm", "CONTENT", ()),
+            (candidate,),
+            (candidate,),
+            {identity},
+            set(),
+        )
+        self.assertFalse(delay)
+        self.assertEqual(set(), supervisor.runtime_pytorch_delay_spent)
+
+    def test_lookalike_runtime_ids_do_not_create_vllm_pending_state(self) -> None:
+        supervisor = self._instance()
+        lookalikes = (
+            RuntimeEvidence("vllm-python-lookalike", "vLLM/CPython", "SHA256", ()),
+            RuntimeEvidence("vllm-extension-lookalike", "vLLM", "SHA256", ()),
+        )
+        self.assertFalse(supervisor._vllm_topology_pending(lookalikes, frozenset()))
 
     def test_gated_process_credentials_reject_foreign_supplementary_group(self) -> None:
         supervisor = self._instance()

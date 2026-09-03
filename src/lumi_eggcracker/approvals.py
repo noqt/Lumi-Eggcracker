@@ -16,7 +16,8 @@ from .elfmarkers import inspect_path
 from .jsonio import JsonInputError, load_regular_json
 from .records import write_atomic
 
-SCHEMA = "lumi-eggcracker.approval.v6"
+SCHEMA = "lumi-eggcracker.approval.v7"
+PRE_CAPABILITY_SCHEMA = "lumi-eggcracker.approval.v6"
 PRE_EPOCH_SCHEMA = "lumi-eggcracker.approval.v5"
 LEGACY_SCHEMA = "lumi-eggcracker.approval.v4"
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -131,23 +132,27 @@ def validate(
     }
     resources = {"cpu_quota_percent", "max_memory_mib", "max_pids"}
     epoch = {"installation_epoch"}
+    capabilities = {"allow_interface_discovery"}
     schema = value.get("schema_version")
     if not (
-        (schema == SCHEMA and set(value) == common | resources | epoch)
+        (schema == SCHEMA and set(value) == common | resources | epoch | capabilities)
+        or (schema == PRE_CAPABILITY_SCHEMA and set(value) == common | resources | epoch)
         or (schema == PRE_EPOCH_SCHEMA and set(value) == common | resources)
         or (schema == LEGACY_SCHEMA and set(value) == common)
     ):
         raise JsonInputError("approval schema is invalid")
-    if schema == SCHEMA and not _valid_installation_epoch(
+    if schema in {SCHEMA, PRE_CAPABILITY_SCHEMA} and not _valid_installation_epoch(
         value["installation_epoch"]
     ):
         raise JsonInputError("approval installation epoch is invalid")
     if installation_epoch is not None and (
         not _valid_installation_epoch(installation_epoch)
-        or schema != SCHEMA
+        or schema not in {SCHEMA, PRE_CAPABILITY_SCHEMA}
         or value["installation_epoch"] != installation_epoch
     ):
         raise JsonInputError("approval installation epoch does not match")
+    if schema == SCHEMA and not isinstance(value["allow_interface_discovery"], bool):
+        raise JsonInputError("approval interface-discovery capability is invalid")
     if not isinstance(value["name"], str) or not NAME.fullmatch(value["name"]):
         raise JsonInputError("approval name is invalid")
     for key in ("argv_sha256", "executable_sha256"):
@@ -162,7 +167,7 @@ def validate(
         raise JsonInputError("approval administrator must be root")
     if value["launch_kind"] not in LAUNCH_KINDS:
         raise JsonInputError("approval launch kind is invalid")
-    if schema in {SCHEMA, PRE_EPOCH_SCHEMA} and not _valid_resource_limits(
+    if schema in {SCHEMA, PRE_CAPABILITY_SCHEMA, PRE_EPOCH_SCHEMA} and not _valid_resource_limits(
         value["max_pids"],
         value["max_memory_mib"],
         value["cpu_quota_percent"],
@@ -435,6 +440,7 @@ def create(
     max_pids: int = 64,
     max_memory_mib: int = 2048,
     cpu_quota_percent: int = 400,
+    allow_interface_discovery: bool = False,
 ) -> dict[str, Any]:
     if not _valid_installation_epoch(installation_epoch):
         raise JsonInputError("approval installation epoch is invalid")
@@ -442,6 +448,8 @@ def create(
         raise JsonInputError("approval arguments are invalid")
     if not _valid_resource_limits(max_pids, max_memory_mib, cpu_quota_percent):
         raise JsonInputError("approval resource limits are invalid")
+    if not isinstance(allow_interface_discovery, bool):
+        raise JsonInputError("approval interface-discovery capability is invalid")
     supplied = Path(argv[0])
     if not supplied.is_absolute():
         raise JsonInputError("approval executable must be an absolute regular file")
@@ -460,7 +468,7 @@ def create(
     if destination.exists() or destination.is_symlink():
         raise JsonInputError("approval name is unavailable")
     launch_kind, bound_inputs = _classify(executable, metadata, argv)
-    value = validate({"administrator_uid": administrator_uid, "argv_count": len(argv), "argv_sha256": argv_digest(argv), "bound_inputs": bound_inputs, "cpu_quota_percent": cpu_quota_percent, "created_monotonic_ns": time.monotonic_ns(), "executable": str(executable), "executable_device": metadata.st_dev, "executable_inode": metadata.st_ino, "executable_sha256": executable_digest(executable), "installation_epoch": installation_epoch, "launch_kind": launch_kind, "max_memory_mib": max_memory_mib, "max_pids": max_pids, "name": name, "schema_version": SCHEMA, "uid": uid}, installation_epoch=installation_epoch)
+    value = validate({"administrator_uid": administrator_uid, "allow_interface_discovery": allow_interface_discovery, "argv_count": len(argv), "argv_sha256": argv_digest(argv), "bound_inputs": bound_inputs, "cpu_quota_percent": cpu_quota_percent, "created_monotonic_ns": time.monotonic_ns(), "executable": str(executable), "executable_device": metadata.st_dev, "executable_inode": metadata.st_ino, "executable_sha256": executable_digest(executable), "installation_epoch": installation_epoch, "launch_kind": launch_kind, "max_memory_mib": max_memory_mib, "max_pids": max_pids, "name": name, "schema_version": SCHEMA, "uid": uid}, installation_epoch=installation_epoch)
     write_atomic(destination, value)
     return value
 
@@ -524,7 +532,7 @@ def match_launch(
         (
             item
             for item in approvals
-            if item["schema_version"] == SCHEMA
+            if item["schema_version"] in {SCHEMA, PRE_CAPABILITY_SCHEMA}
             and item["uid"] == uid
             and item["executable"] == str(executable)
             and item["executable_device"] == metadata.st_dev
@@ -553,6 +561,7 @@ def revoke(root: Path, name: str, *, installation_epoch: str) -> dict[str, Any]:
 
 def public(value: dict[str, Any]) -> dict[str, Any]:
     result = {key: value[key] for key in ("administrator_uid", "argv_count", "argv_sha256", "created_monotonic_ns", "executable", "executable_sha256", "launch_kind", "name", "uid")}
+    result["allow_interface_discovery"] = bool(value.get("allow_interface_discovery", False))
     result["bound_input_count"] = len(value["bound_inputs"])
     result["resource_limits"] = (
         {
@@ -560,7 +569,7 @@ def public(value: dict[str, Any]) -> dict[str, Any]:
             "max_memory_mib": value["max_memory_mib"],
             "max_pids": value["max_pids"],
         }
-        if value["schema_version"] in {SCHEMA, PRE_EPOCH_SCHEMA}
+        if value["schema_version"] in {SCHEMA, PRE_CAPABILITY_SCHEMA, PRE_EPOCH_SCHEMA}
         else None
     )
     return result

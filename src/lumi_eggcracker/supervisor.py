@@ -62,12 +62,17 @@ from .discovery import snapshot as process_snapshot
 from .elfmarkers import (
     MAX_RUNTIME_CANDIDATES,
     OLLAMA_LAUNCHER_EVIDENCE_ID,
+    PYTORCH_ATEN_EVIDENCE_ID,
+    PYTORCH_BRIDGE_EVIDENCE_ID,
+    PYTORCH_PAIR_EVIDENCE_ID,
+    VLLM_EXTENSION_EVIDENCE_ID,
     VLLM_PAIR_EVIDENCE_ID,
+    VLLM_PYTHON_EVIDENCE_ID,
     RuntimeEvidence,
     with_pytorch_pair,
     with_vllm_pair,
 )
-from .elfmarkers import from_snapshot as runtime_from_snapshot
+from .elfmarkers import scan_snapshot as runtime_scan_snapshot
 from .execution_policy import STATE_DIR as EXEC_POLICY_DIR
 from .execution_policy import create as create_execution_policy
 from .execution_policy import ephemeral as ephemeral_execution_policy
@@ -144,6 +149,40 @@ MAX_CORRELATED_PROCESSES = 64
 SCAN_HEALTH_TIMEOUT_NS = 1_000_000_000
 MAX_DISCOVERY_FAILURES = 3
 MAX_ENFORCEMENT_TASKS = 16
+PROTECTED_SYSTEMD_ADDRESS_FAMILIES = (
+    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6"
+)
+PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES = (
+    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+)
+PROTECTED_SYSTEMD_ENVIRONMENT = (
+    "--setenv=HOME=/nonexistent",
+    "--setenv=BASH_ENV=/nonexistent",
+    "--setenv=ENV=/nonexistent",
+    "--setenv=GCONV_PATH=/nonexistent",
+    "--setenv=LD_AUDIT=",
+    "--setenv=LD_LIBRARY_PATH=",
+    "--setenv=LD_PRELOAD=",
+    "--setenv=LOCPATH=/nonexistent",
+    "--setenv=NLSPATH=/nonexistent",
+    "--setenv=PATH=/usr/bin",
+    "--setenv=PYTHONBREAKPOINT=0",
+    "--setenv=PYTHONINSPECT=",
+    "--setenv=PYTHONNOUSERSITE=1",
+    "--setenv=PYTHONSAFEPATH=1",
+    "--setenv=PYTHONPATH=/nonexistent",
+    "--setenv=PYTHONSTARTUP=/nonexistent",
+    "--setenv=PYTHONUSERBASE=/nonexistent",
+)
+
+
+def protected_systemd_address_families(
+    approval: dict[str, Any] | None,
+) -> str:
+    """Select the narrow root-approved interface-discovery capability."""
+    if approval is not None and approval.get("allow_interface_discovery") is True:
+        return PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES
+    return PROTECTED_SYSTEMD_ADDRESS_FAMILIES
 
 
 def policy_network_mode(policy: dict[str, Any]) -> str:
@@ -335,6 +374,10 @@ class Supervisor:
         self.runtime_map_offsets: dict[ProcessIdentity, int] = {}
         self.observed_content: dict[ProcessIdentity, dict[str, ArtifactEvidence]] = {}
         self.observed_runtimes: dict[ProcessIdentity, dict[str, RuntimeEvidence]] = {}
+        # One lower-specificity PyTorch decision may wait for a bounded vLLM
+        # authentication retry.  Charge that delay to the evidence-bearing
+        # contributors so helper or partial-witness churn cannot renew it.
+        self.runtime_pytorch_delay_spent: set[ProcessIdentity] = set()
         self.content_scan_tick = 0
         self.discovery_window_generation = 0
         self.last_scan_completed_ns = 0
@@ -824,6 +867,76 @@ class Supervisor:
         if topology:
             value["MODEL_TOPOLOGY"] = topology
         return value
+
+    @staticmethod
+    def _pytorch_decision_contributors(
+        candidates: tuple[_EvidenceCandidate, ...] | list[_EvidenceCandidate],
+    ) -> set[ProcessIdentity]:
+        runtime_ids = {
+            PYTORCH_BRIDGE_EVIDENCE_ID,
+            PYTORCH_ATEN_EVIDENCE_ID,
+            PYTORCH_PAIR_EVIDENCE_ID,
+        }
+        return {
+            candidate.snapshot.identity
+            for candidate in candidates
+            if any(item.evidence_id == "safetensors-v1" for item in candidate.content)
+            or any(item.evidence_id in runtime_ids for item in candidate.runtimes)
+        }
+
+    def _prune_runtime_pytorch_delay_spent(
+        self, live_identities: set[ProcessIdentity]
+    ) -> None:
+        spent = getattr(self, "runtime_pytorch_delay_spent", None)
+        if spent is None:
+            self.runtime_pytorch_delay_spent = set()
+            return
+        spent.intersection_update(live_identities)
+
+    @staticmethod
+    def _vllm_topology_pending(
+        runtimes: tuple[RuntimeEvidence, ...],
+        deferred_evidence_ids: frozenset[str] | set[str],
+    ) -> bool:
+        """Return whether exact vLLM topology is authenticated but incomplete."""
+        components = {VLLM_PYTHON_EVIDENCE_ID, VLLM_EXTENSION_EVIDENCE_ID}
+        runtime_ids = {item.evidence_id for item in runtimes}
+        if VLLM_PAIR_EVIDENCE_ID in runtime_ids or components.issubset(runtime_ids):
+            return False
+        return bool(components.intersection(runtime_ids | deferred_evidence_ids))
+
+    def _delay_incomplete_vllm_decision(
+        self,
+        detected: DetectionMatch,
+        witness: tuple[_EvidenceCandidate, ...],
+        scope: tuple[_EvidenceCandidate, ...],
+        pending_now: set[ProcessIdentity],
+        delayed_this_scan: set[ProcessIdentity],
+    ) -> tuple[bool, set[ProcessIdentity]]:
+        """Delay generic PyTorch once while related vLLM auth is incomplete."""
+        contributors = self._pytorch_decision_contributors(witness)
+        if detected.profile == "content.safetensors-vllm":
+            self.runtime_pytorch_delay_spent.difference_update(contributors)
+            return False, contributors
+        if detected.profile != "content.safetensors-pytorch" or not contributors:
+            return False, contributors
+        scope_ids = {candidate.snapshot.identity for candidate in scope}
+        if not scope_ids.intersection(pending_now):
+            return False, contributors
+        spent = self.runtime_pytorch_delay_spent
+        if contributors.intersection(delayed_this_scan):
+            spent.update(contributors)
+            delayed_this_scan.update(contributors)
+            return True, contributors
+        if contributors.isdisjoint(spent):
+            spent.update(contributors)
+            delayed_this_scan.update(contributors)
+            return True, contributors
+        # Propagate spent state to a successor witness sharing any surviving
+        # contributor.  Continued or churned maturation now fails closed to the
+        # strongest fully authenticated profile.
+        spent.update(contributors)
+        return False, contributors
 
     def _authorizes_protected_scope(
         self,
@@ -1860,6 +1973,9 @@ class Supervisor:
         )
         snapshot_map = {item.identity: item for item in snapshots}
         live_identities = set(snapshot_map)
+        self._prune_runtime_pytorch_delay_spent(live_identities)
+        vllm_pending_now: set[ProcessIdentity] = set()
+        delayed_this_scan: set[ProcessIdentity] = set()
         for cache in (
             getattr(self, "artifact_fd_offsets", {}),
             getattr(self, "artifact_map_offsets", {}),
@@ -1915,11 +2031,12 @@ class Supervisor:
                     snapshot.identity,
                     self._window_start(MAX_RUNTIME_CANDIDATES),
                 )
-                runtimes_now = runtime_from_snapshot(
+                runtime_scan = runtime_scan_snapshot(
                     snapshot,
                     cache=self.runtime_cache,
                     start_index=runtime_start,
                 )
+                runtimes_now = runtime_scan.evidence
                 runtime_offsets[snapshot.identity] = runtime_start + MAX_RUNTIME_CANDIDATES
                 observed_content = getattr(self, "observed_content", None)
                 if observed_content is None:
@@ -1952,7 +2069,16 @@ class Supervisor:
                     runtimes = with_pytorch_pair(
                         item for key, item in runtime_values.items() if key in active
                     )
-            if fast_match is None and not content and not runtimes:
+                if self._vllm_topology_pending(
+                    runtimes, runtime_scan.deferred_evidence_ids
+                ):
+                    vllm_pending_now.add(snapshot.identity)
+            if (
+                fast_match is None
+                and not content
+                and not runtimes
+                and snapshot.identity not in vllm_pending_now
+            ):
                 continue
             candidates.append(
                 _EvidenceCandidate(snapshot, content, runtimes, first_seen_ns, fast_match)
@@ -2043,6 +2169,15 @@ class Supervisor:
                 self.catalogue, trigger_candidate.snapshot, evidence=supplied
             )
             if detected is None:
+                continue
+            delay, pytorch_contributors = self._delay_incomplete_vllm_decision(
+                detected,
+                witness,
+                scope,
+                vllm_pending_now,
+                delayed_this_scan,
+            )
+            if delay:
                 continue
             qualified_ns = time.monotonic_ns()
             unapproved: list[_EvidenceCandidate] = []
@@ -2146,6 +2281,9 @@ class Supervisor:
                     pidfd,
                     **kwargs,
                 )
+                self.runtime_pytorch_delay_spent.difference_update(
+                    pytorch_contributors
+                )
             else:
                 task_args = (
                     snapshot,
@@ -2188,6 +2326,9 @@ class Supervisor:
                 except RuntimeError:
                     self.enforcement_slots.release()
                     self._enforce_discovery(*task_args, **kwargs)
+                self.runtime_pytorch_delay_spent.difference_update(
+                    pytorch_contributors
+                )
         self._trim_evidence_caches()
 
     def _discovery_loop(self) -> None:
@@ -2880,6 +3021,7 @@ class Supervisor:
                 approval = None
             if require_approval and approval is None:
                 raise JsonInputError("protected launch is not approved")
+            address_families = protected_systemd_address_families(approval)
             run_id = os.urandom(12).hex()
             if exec_policy_id is None:
                 execution_policy = ephemeral_execution_policy(argv[0], run_id)
@@ -2940,29 +3082,14 @@ class Supervisor:
                     "--property=CapabilityBoundingSet=",
                     "--property=AmbientCapabilities=",
                     "--property=SupplementaryGroups=",
-                    "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
+                    address_families,
                     f"--property=TasksMax={maximum}",
                     f"--property=MemoryMax={memory_mib}M",
                     f"--property=CPUQuota={cpu_quota}%",
                     "--property=IOWeight=10",
                     "--property=LimitNOFILE=1024",
                     "--working-directory=/",
-                    "--setenv=HOME=/nonexistent",
-                    "--setenv=BASH_ENV=/nonexistent",
-                    "--setenv=ENV=/nonexistent",
-                    "--setenv=GCONV_PATH=/nonexistent",
-                    "--setenv=LD_AUDIT=",
-                    "--setenv=LD_LIBRARY_PATH=",
-                    "--setenv=LD_PRELOAD=",
-                    "--setenv=LOCPATH=/nonexistent",
-                    "--setenv=NLSPATH=/nonexistent",
-                    "--setenv=PYTHONBREAKPOINT=0",
-                    "--setenv=PYTHONINSPECT=",
-                    "--setenv=PYTHONNOUSERSITE=1",
-                    "--setenv=PYTHONSAFEPATH=1",
-                    "--setenv=PYTHONPATH=/nonexistent",
-                    "--setenv=PYTHONSTARTUP=/nonexistent",
-                    "--setenv=PYTHONUSERBASE=/nonexistent",
+                    *PROTECTED_SYSTEMD_ENVIRONMENT,
                     "--",
                     "/usr/bin/python3",
                     "-I",
@@ -3394,13 +3521,18 @@ class Supervisor:
             return {"runs": runs}
         if action in {"approve", "revoke", "exec_policy_create", "exec_policy_revoke"} and not self._incident_status()["healthy"]:
             raise JsonInputError("local lockdown state is unavailable; root recovery is required")
-        if action == "approve" and set(args) == {
+        approval_arguments = {
             "argv",
             "cpu_quota_percent",
             "max_memory_mib",
             "max_pids",
             "name",
             "uid",
+        }
+        if action == "approve" and set(args) == approval_arguments:
+            args = {**args, "allow_interface_discovery": False}
+        if action == "approve" and set(args) == approval_arguments | {
+            "allow_interface_discovery"
         }:
             with self.approval_lock:
                 value = create_approval(
@@ -3413,6 +3545,7 @@ class Supervisor:
                     max_pids=args["max_pids"],
                     max_memory_mib=args["max_memory_mib"],
                     cpu_quota_percent=args["cpu_quota_percent"],
+                    allow_interface_discovery=args["allow_interface_discovery"],
                 )
             return {"approval": public_approval(value), "result": "APPROVED"}
         if action == "revoke" and set(args) == {"name"}:

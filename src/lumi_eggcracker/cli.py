@@ -68,6 +68,11 @@ def _parser() -> argparse.ArgumentParser:
     approve.add_argument("--max-pids", default=64, type=int)
     approve.add_argument("--max-memory-mib", default=2048, type=int)
     approve.add_argument("--cpu-quota-percent", default=400, type=int)
+    approve.add_argument(
+        "--allow-interface-discovery",
+        action="store_true",
+        help="allow unprivileged interface lookup inside the offline namespace",
+    )
     approve.add_argument("argv", nargs=argparse.REMAINDER)
     revoke = commands.add_parser("revoke", help="revoke one exact AI runtime approval")
     revoke.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
@@ -156,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_pids=args.max_pids,
                 max_memory_mib=args.max_memory_mib,
                 cpu_quota_percent=args.cpu_quota_percent,
+                allow_interface_discovery=args.allow_interface_discovery,
                 argv=_command(args.argv),
             )
         elif args.command == "revoke":

@@ -39,8 +39,14 @@ class CliTests(unittest.TestCase):
             max_pids=64,
             max_memory_mib=2048,
             cpu_quota_percent=400,
+            allow_interface_discovery=False,
             argv=["/opt/llama-cli", "-m", "/models/qwen.gguf"],
         )
+
+    def test_approve_can_grant_interface_discovery(self) -> None:
+        with patch("lumi_eggcracker.cli.os.geteuid", return_value=0, create=True), patch("lumi_eggcracker.cli.request", return_value={"result": "APPROVED"}) as request:
+            self.assertEqual(0, main(["approve", "--name", "qwen", "--uid", "1001", "--allow-interface-discovery", "--", "/opt/llama-cli", "-m", "/models/qwen.gguf"]))
+        self.assertTrue(request.call_args.kwargs["allow_interface_discovery"])
 
     def test_start_includes_resource_limits(self) -> None:
         with patch("lumi_eggcracker.cli.request", return_value={"result": "STARTED"}) as request:
