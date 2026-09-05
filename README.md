@@ -195,6 +195,56 @@ This is a proof of the deterministic containment primitive, not a test of AI
 workload recognition, the four supported profiles, installation, or universal
 product effectiveness. A pass does not replace the full first-kill path.
 
+#### Save an opt-in local operator receipt
+
+After running that exact command on the supported disposable Ubuntu 24.04 path,
+a non-founder operator can record either the supported success or a reproducible
+redacted blocker locally. Copy this closed input shape to `operator-result.json`;
+set `permission_to_quote` explicitly to `true` or `false`:
+
+```json
+{
+  "supported_environment": "disposable-native-ubuntu-24.04-cgroup-v2",
+  "supported_path": "containment-primitive-probe",
+  "exact_command": "sudo /usr/bin/python3 -I -S scripts/containment_probe.py --i-understand-this-kills-a-test-tree",
+  "expected_result": "result=TERMINATED,target_survivors=0,canary_survived=true,root_populated=0,cleanup_complete=true,exit=0",
+  "observed_result": {
+    "outcome": "supported-success",
+    "result": "TERMINATED",
+    "target_survivors": 0,
+    "canary_survived": true,
+    "root_populated": 0,
+    "cleanup_complete": true,
+    "source_commit": "<exact 40-lowercase-hex source_commit from the probe receipt>",
+    "source_tree_sha256": "<exact 64-lowercase-hex source_tree_sha256 from the probe receipt>"
+  },
+  "permission_to_quote": false
+}
+```
+
+Replace both source placeholders with the exact identities printed by the probe;
+placeholders are rejected. For a blocker, replace `observed_result` with a
+bounded stage and code described by the
+[receipt schema](schemas/supported-path-receipt-v1.schema.json), retaining those
+same exact source identities. Then opt in to the one local write:
+
+```sh
+python3 scripts/collect_supported_path_receipt.py \
+  --i-opt-in-to-write-local-receipt \
+  --input operator-result.json \
+  --output supported-path-receipt.json
+```
+
+The standard-library collector makes no network request or upload and never
+overwrites an output. It accepts only the exact supported environment, path,
+command and expected result above; the closed result shape cannot hold free
+text, secrets, source code, credentials, personal data, raw environment, raw
+arguments or raw output. Commit and executed-source tree digests bind the
+observation to source identity without collecting source content or paths. It
+writes nothing without the explicit opt-in flag.
+Review the local JSON before deciding whether to share it; `permission_to_quote`
+records permission, but does not send or publish anything.
+
 ### Qualify the offline boundary
 
 On the disposable native Ubuntu host, qualify the offline network primitive
