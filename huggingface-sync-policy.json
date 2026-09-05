@@ -1,0 +1,37 @@
+{
+  "schema": "noqt.huggingface_distribution.v1",
+  "mode": "DERIVED_READ_ONLY_MIRROR",
+  "canonical": {
+    "repository": "https://github.com/noqt/Lumi-Eggcracker",
+    "branch": "main",
+    "checkout_directory": "Lumi-Eggcracker"
+  },
+  "target": {
+    "repo_id": "noqt/eggcracker",
+    "repo_type": "space",
+    "space_sdk": "static",
+    "url": "https://huggingface.co/spaces/noqt/eggcracker",
+    "checkout_directory": "eggcracker"
+  },
+  "sync_triggers": [
+    "PUSH_TO_MAIN",
+    "WORKFLOW_DISPATCH",
+    "DAILY_DRIFT_REPAIR"
+  ],
+  "excluded_prefixes": [
+    ".git/",
+    ".github/",
+    "docs/huggingface/"
+  ],
+  "overlays": {
+    "readme_preamble": "docs/huggingface/README_PREAMBLE.md",
+    "static_index": "docs/huggingface/index.html"
+  },
+  "source_marker": "HUGGINGFACE_SYNC.json",
+  "manifest": "HUGGINGFACE_MANIFEST.json",
+  "credential_secret": "HF_TOKEN",
+  "direct_hub_edits": "PROHIBITED_AND_OVERWRITTEN",
+  "forbidden_public_reference_sha256": [
+    "361f4fb6bd466aad815b170a480aec80de2248582244cb6fd1ee30d942208cfd"
+  ]
+}
