@@ -64,7 +64,54 @@ jobs:
       - name: Unit tests
         env:
           PYTHONPATH: src
-        run: python -m unittest discover -s tests -v
+        run: |
+          set -euo pipefail
+          check_integrity() {
+            original_status=$?
+            trap - EXIT
+            integrity_status=0
+            git diff --no-ext-diff --quiet HEAD -- || integrity_status=$?
+            if [ "$integrity_status" -eq 0 ]; then
+              echo 'UNIT_TRACKED_INTEGRITY=PASS'
+            else
+              echo 'UNIT_TRACKED_INTEGRITY=FAIL'
+            fi
+            if [ "$original_status" -ne 0 ]; then
+              exit "$original_status"
+            fi
+            exit "$integrity_status"
+          }
+          trap check_integrity EXIT
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --no-ext-diff --quiet HEAD --
+          test -z "$(git ls-files --others --exclude-standard -- src scripts tests docs)"
+          task_temp=$(mktemp -d "$RUNNER_TEMP/eggcracker-unit.XXXXXX")
+          task_temp=$(cd "$task_temp" && pwd -P)
+          export TEMP="$task_temp" TMP="$task_temp" TMPDIR="$task_temp"
+          export PYTHONPYCACHEPREFIX="$task_temp/pycache"
+          mkdir "$PYTHONPYCACHEPREFIX"
+          python -I -S -B - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import sys
+          import tempfile
+
+          assert sys.platform == "linux" and os.geteuid() != 0
+          assert Path(tempfile.gettempdir()).resolve() == Path(os.environ["TMPDIR"]).resolve()
+          for directory in ("src", "scripts", "tests"):
+              assert not list(Path(directory).rglob("*.pyc")), "pre-existing source bytecode"
+          for name in (
+              "docs/security-control-handoff.md",
+              "tests/test_security_control_handoff_contract.py",
+              "tests/test_security_control_handoff_replay.py",
+          ):
+              print(f"UNIT_SOURCE_SHA256 {name} {hashlib.sha256(Path(name).read_bytes()).hexdigest()}")
+          print(f"UNIT_PREFLIGHT sha={os.environ['GITHUB_SHA']} uid={os.geteuid()} "
+                f"python={sys.version.split()[0]} TMPDIR={os.environ['TMPDIR']}", flush=True)
+          PY
+          test "$(id -u)" -ne 0
+          python -m unittest discover -s tests -v
 
       - name: Build release artifacts
         if: matrix.python-version == '3.11'

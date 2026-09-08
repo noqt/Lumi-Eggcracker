@@ -5,6 +5,7 @@
 [v1.0.10 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v1.0.10)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
+· [Inert developer contract example](docs/security-control-handoff.md)
 · [Run the first kill](#run-the-first-kill)
 · [Current-run Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
