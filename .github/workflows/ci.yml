@@ -10,6 +10,84 @@ permissions:
   contents: read
 
 jobs:
+  monitoring-consumer:
+    name: monitoring-consumer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Verify pinned test-only tools and replay monitoring journey
+        env:
+          PYTHONPATH: src
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --no-ext-diff --quiet HEAD --
+          task_temp=$(mktemp -d "$RUNNER_TEMP/eggcracker-monitoring.XXXXXX")
+          task_temp=$(cd "$task_temp" && pwd -P)
+          export TEMP="$task_temp" TMP="$task_temp" TMPDIR="$task_temp"
+          export PYTHONDONTWRITEBYTECODE=1
+          export EGGCRACKER_NODE_EXPORTER="$task_temp/node_exporter/node_exporter"
+          export EGGCRACKER_PROMTOOL="$task_temp/prometheus/promtool"
+          python -I -S -B - <<'PY'
+          import hashlib
+          import io
+          import os
+          from pathlib import Path
+          import sys
+          import tarfile
+          import tempfile
+          from urllib.request import urlopen
+
+          root = Path(os.environ["TMPDIR"]).resolve()
+          assert sys.platform == "linux" and os.geteuid() != 0
+          assert Path(tempfile.gettempdir()).resolve() == root
+          print(f"MONITORING_PREFLIGHT sha={os.environ['GITHUB_SHA']} uid={os.geteuid()} python={sys.version.split()[0]}", flush=True)
+          tools = (
+              ("node_exporter", "1.12.1", "node_exporter", 12168577,
+               "b51d8a76aa2a9156a55d501aca6276fae09e262259a5e4e831d2c2222f084e63"),
+              ("prometheus", "3.14.0", "promtool", 107111714,
+               "f665c6da19eb7ba399c915d30c7d9793c9b417bf8a749b504bc470678631478d"),
+          )
+          for project, version, binary, size, expected in tools:
+              prefix = f"{project}-{version}.linux-amd64"
+              url = f"https://github.com/prometheus/{project}/releases/download/v{version}/{prefix}.tar.gz"
+              with urlopen(url, timeout=60) as response:
+                  data = response.read(size + 1)
+              assert len(data) == size and hashlib.sha256(data).hexdigest() == expected
+              print(f"MONITORING_TOOL_ARCHIVE {project} {version} SHA256={expected}", flush=True)
+              destination = root / project
+              destination.mkdir()
+              # Extract only individually allowlisted regular members, never tar paths.
+              # Retain complete upstream Apache-2.0 LICENSE and NOTICE beside each tool.
+              with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+                  members = archive.getmembers()
+                  for name in (binary, "LICENSE", "NOTICE"):
+                      matches = [member for member in members if member.name == f"{prefix}/{name}"]
+                      assert len(matches) == 1
+                      member = matches[0]
+                      assert member.isfile() and 0 < member.size <= 256 * 1024 * 1024
+                      source = archive.extractfile(member)
+                      assert source is not None
+                      with source:
+                          content = source.read(member.size + 1)
+                      assert len(content) == member.size
+                      target = destination / name
+                      with target.open("xb") as output:
+                          output.write(content)
+                      target.chmod(0o700 if name == binary else 0o600)
+                      print(f"MONITORING_TOOL_MEMBER {project}/{name} SHA256={hashlib.sha256(content).hexdigest()}", flush=True)
+          PY
+          "$EGGCRACKER_NODE_EXPORTER" --version
+          "$EGGCRACKER_PROMTOOL" --version
+          export EGGCRACKER_REAL_CONSUMERS=1
+          python -m unittest discover -s tests -p 'test_monitoring*.py' -v
+          git diff --no-ext-diff --quiet HEAD --
+          echo 'MONITORING_TRACKED_INTEGRITY=PASS'
+
   hosted-proof-windows:
     name: hosted-proof-windows
     runs-on: windows-2022

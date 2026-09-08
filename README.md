@@ -1,5 +1,8 @@
 # Lumi Eggcracker
 
+Existing operators can integrate [read-only reported-health monitoring](docs/monitoring.md)
+with an existing Prometheus/node_exporter workflow.
+
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
 [v1.0.10 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v1.0.10)
