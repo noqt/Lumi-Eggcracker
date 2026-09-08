@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import socket
 import subprocess
 import tempfile
 import time
 import unittest
-from urllib.request import urlopen
+from pathlib import Path
 from unittest.mock import patch
+from urllib.request import urlopen
+
+from test_monitoring import HEALTHY, ROOT, entrypoint, framed_response
 
 from lumi_eggcracker import monitoring
-from test_monitoring import HEALTHY, ROOT, entrypoint, framed_response
 
 RULES = ROOT / "integrations/prometheus/eggcracker.rules.yml"
 ANNOTATIONS = {

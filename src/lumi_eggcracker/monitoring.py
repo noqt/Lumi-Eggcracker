@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import math
 import os
-from pathlib import Path
 import stat
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 from .client import doctor_strict
 from .jsonio import JsonInputError

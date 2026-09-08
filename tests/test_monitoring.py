@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import io
 import json
-import inspect
 import math
 import os
-from pathlib import Path
 import runpy
 import socket
 import struct
@@ -16,6 +15,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from lumi_eggcracker import client, monitoring
