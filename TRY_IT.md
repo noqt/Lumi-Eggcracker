@@ -44,6 +44,39 @@ guess; it leaves the fork's workflow page for manual inspection. Without
 `--wait`, it prints separate copyable watch and log commands. The run URL remains
 available for the same result in GitHub's interface.
 
+### Resume the same run and save its receipt
+
+If the starter's wait was interrupted or timed out, do not start another proof.
+Keep the exact run URL it printed. In your existing source checkout, replace
+`OWNER` and `RUN_ID` below with that run's owner and numeric ID:
+
+```sh
+python3 scripts/start_hosted_proof.py --resume https://github.com/OWNER/Lumi-Eggcracker/actions/runs/RUN_ID --receipt receipt.json
+python3 scripts/validate_hosted_proof_receipt.py receipt.json
+```
+
+On Windows use `python` instead of `python3`. From the temporary checkout above,
+first change into `"$proof_dir"` (macOS/Linux) or `$proofDir` (PowerShell).
+Resume performs read-only GitHub requests: no dispatch, workflow enablement,
+fork creation or sync, and no acknowledgement is needed. It does not wait:
+if the run is still incomplete, retry the same command after it completes.
+Omit `--receipt receipt.json` to verify without creating a file.
+
+Only a completed successful run in the public canonical repository or its
+direct fork, with the exact currently reviewed workflow at its run commit,
+can export. It independently checks the seven reviewed probe-source Git blobs
+and refuses import-shadowing source paths before retrieving logs. The helper
+requires one valid success receipt matching that commit
+and the workflow's qualified source digest. Older or changed workflows,
+ambiguous receipts and failed runs are refused, even if JSON structure is valid.
+No raw log or receipt values are printed. The output must be a new file:
+existing files and symlinks are not overwritten; symlink/reparse parent
+directories are refused. Choose a trusted directory that is not being renamed
+or modified concurrently. On a write error a partial new
+file may remain; choose a new path to retry. No files are automatically removed.
+These GitHub identity and schema checks are not independent authentication,
+new containment qualification or evidence of independent adoption.
+
 ### Or use the GitHub interface
 
 1. [Fork Lumi Eggcracker](https://github.com/noqt/Lumi-Eggcracker/fork).
@@ -92,7 +125,8 @@ source commit or tree, workflow or host, and it does not claim that the host is
 suitable for production or that Eggcracker detected a real workload. The v1
 file remains compatible; an incompatible contract uses a new versioned path.
 
-If you save the single JSON receipt object as `receipt.json`, the repository's
+After exporting with `--resume --receipt` above (or manually saving the single
+JSON receipt object as `receipt.json`), the repository's
 zero-dependency validator gives automation an exact local exit status without
 uploading or echoing the receipt:
 
@@ -139,7 +173,7 @@ If it passes, returns a redacted failure or gives you confusing friction,
 The short form asks for the workflow URL and what happened. That is useful
 evidence either way.
 
-NOQT will acknowledge a complete public hosted-proof report within two
+noqt will acknowledge a complete public hosted-proof report within two
 Australian business days. That acknowledgement is not a promise of a fix,
 release, private support, or product qualification.
 

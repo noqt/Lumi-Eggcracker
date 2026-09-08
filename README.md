@@ -10,7 +10,7 @@
 · [Current-run Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
 
-Maintained by [NOQT](https://github.com/noqt), which builds open-source software for security and risk. The [independent watchlist entry](https://github.com/scadastrangelove/awesome-ai-security-tools/blob/main/WATCHLIST.md#candidates) records the current alpha limits and the fact that outside field runs are still missing; it is context, not endorsement or assurance.
+Maintained by [noqt](https://github.com/noqt), which builds open-source software for security and risk. This is an alpha; independent field use and assurance remain unproved.
 
 ## The kill switch outside the sandbox
 
@@ -53,7 +53,7 @@ on a disposable supported host. A passing preflight is not a containment result.
 
 The hosted proof tests only the kill mechanism. It does not install Eggcracker,
 download a model, recognise an AI workload or prove product-wide effectiveness.
-[NOQT's reviewed hosted run](https://github.com/noqt/Lumi-Eggcracker/actions/runs/32892727768)
+[noqt's reviewed hosted run](https://github.com/noqt/Lumi-Eggcracker/actions/runs/32892727768)
 passed, but that is not independent use or adoption.
 
 ## Run the first kill
@@ -127,6 +127,8 @@ inspect a Safetensors model, prove a live related-workload topology, qualify an
 execution context, or provide containment evidence. Names, paths, partial or
 swapped sets, other builds, GPU variants, containers and remote workloads do
 not qualify. A pass is neither containment nor adoption evidence.
+
+### Check host compatibility
 
 Use a disposable, supported native Ubuntu machine whose loss is acceptable.
 The first-kill campaign runner rejects WSL2; WSL2 remains a secondary
@@ -285,11 +287,11 @@ GitHub-hosted runners are disposable, but the same narrow evidence boundary
 still applies: this exercises only the synthetic pidfd-stop plus cgroup-v2 kill
 primitive. It does not install Eggcracker, download a model, recognise a
 workload, qualify another host, or establish product-wide effectiveness or
-safety. A public non-NOQT run is evidence only after its source digest and
+safety. A public non-noqt run is evidence only after its source digest and
 workflow blob match the reviewed upstream versions. Share a pass, redacted failure,
 or reproducible friction report through the
 [redacted hosted-proof result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=hosted_probe_result.yml).
-NOQT will acknowledge a complete public hosted-proof report within two
+noqt will acknowledge a complete public hosted-proof report within two
 Australian business days. That acknowledgement is not a promise of a fix,
 release, private support, or product qualification.
 
