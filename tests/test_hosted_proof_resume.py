@@ -127,7 +127,7 @@ class ResumeTests(unittest.TestCase):
         for payload, status in (("{}", 1), ("{", 0), ("x" * 65_537, 0),
                                 ('{"id":1,"id":2}', 0), ('{"id":NaN}', 0)):
             with self.subTest(payload=payload[:20]):
-                def runner(command):
+                def runner(command, status=status, payload=payload):
                     return subprocess.CompletedProcess(command, status, payload, "PRIVATE")
                 with self.assertRaises(proof.HostedProofError) as caught:
                     proof.resume_hosted_proof(URL, runner=runner)
@@ -155,7 +155,7 @@ class ResumeTests(unittest.TestCase):
             with self.subTest(key=key):
                 run = PublicRun()
                 run.repository[key] = value
-                def repository_response(command):
+                def repository_response(command, run=run):
                     run.commands.append(tuple(command))
                     return subprocess.CompletedProcess(command, 0, json.dumps(run.repository), "")
                 with self.assertRaises(proof.HostedProofError):
@@ -286,22 +286,28 @@ class ResumeTests(unittest.TestCase):
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "partial.json"
                 class FailingFile:
+                    def __init__(self, output_path, failure_phase):
+                        self.output_path = output_path
+                        self.failure_phase = failure_phase
+
                     def __enter__(self):
-                        self.handle = original_open(path, "x", encoding="utf-8")
+                        self.handle = original_open(self.output_path, "x", encoding="utf-8")
                         return self
 
                     def write(self, value):
                         self.handle.write(value[:8])
-                        if phase == "write":
+                        if self.failure_phase == "write":
                             raise OSError("PRIVATE")
 
                     def __exit__(self, *_args):
                         self.handle.close()
-                        if phase == "close":
+                        if self.failure_phase == "close":
                             raise OSError("PRIVATE")
 
-                def opening(target, *args, **kwargs):
-                    return FailingFile() if target == path else original_open(target, *args, **kwargs)
+                def opening(target, *args, path=path, phase=phase, file_type=FailingFile, **kwargs):
+                    if target == path:
+                        return file_type(path, phase)
+                    return original_open(target, *args, **kwargs)
 
                 with patch.object(Path, "open", opening), self.assertRaises(proof.HostedProofError):
                     proof.resume_hosted_proof(URL, receipt_path=path, runner=PublicRun())
@@ -316,10 +322,12 @@ class ResumeTests(unittest.TestCase):
             class ReparseDirectory:
                 st_mode = metadata.st_mode
                 st_file_attributes = 0x400
-            with patch.object(Path, "lstat", lambda path:
-                              ReparseDirectory() if path == parent else original_lstat(path)):
-                with self.assertRaises(proof.HostedProofError):
-                    proof.resume_hosted_proof(URL, receipt_path=parent / "receipt", runner=PublicRun())
+            with (
+                patch.object(Path, "lstat", lambda path:
+                             ReparseDirectory() if path == parent else original_lstat(path)),
+                self.assertRaises(proof.HostedProofError),
+            ):
+                proof.resume_hosted_proof(URL, receipt_path=parent / "receipt", runner=PublicRun())
             self.assertFalse((parent / "receipt").exists())
 
     def test_dangling_symlink_is_not_followed(self):

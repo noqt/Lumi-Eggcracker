@@ -229,9 +229,9 @@ def _resume_json(runner: Runner, endpoint: str) -> dict:
         value = json.loads(response.stdout, object_pairs_hook=_unique_metadata,
                            parse_constant=_reject_metadata_number)
         if not isinstance(value, dict):
-            raise ValueError
+            raise TypeError
         return value
-    except (ValueError, UnicodeError, RecursionError) as error:
+    except (ValueError, TypeError, UnicodeError, RecursionError) as error:
         raise HostedProofError("Could not verify bounded public run metadata; retry resume.") from error
 
 
@@ -311,15 +311,14 @@ def _resume_source(runner: Runner, repository: str, head: str) -> None:
         if path in {"src", "src/lumi_eggcracker", "scripts"}:
             if entry.get("mode") != "040000" or entry.get("type") != "tree":
                 raise HostedProofError("Run-source import roots are not regular trees.")
-        elif path.startswith("src/"):
+        elif path.startswith("src/") and (
+            not re.fullmatch(r"src/lumi_eggcracker/[A-Za-z_][A-Za-z_0-9]*\.(py|json)", path)
+            or entry.get("mode") not in {"100644", "100755"}
+            or entry.get("type") != "blob"
+        ):
             # A flat package containing only ordinary .py/.json files cannot
             # shadow the pinned modules with packages, pyc or native extensions.
-            if (
-                not re.fullmatch(r"src/lumi_eggcracker/[A-Za-z_][A-Za-z_0-9]*\.(py|json)", path)
-                or entry.get("mode") not in {"100644", "100755"}
-                or entry.get("type") != "blob"
-            ):
-                raise HostedProofError("Run-source contains unreviewed import paths.")
+            raise HostedProofError("Run-source contains unreviewed import paths.")
     if not {"src", "src/lumi_eggcracker", "scripts"}.issubset(found):
         raise HostedProofError("Run-source import roots are missing.")
     for path, expected in REVIEWED_PROBE_BLOBS.items():
