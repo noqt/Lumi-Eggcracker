@@ -160,10 +160,12 @@ class SupervisorSession:
     def execute(self, pause):
         try:
             self.result = self.run.run(pause)
+            self.run.stage = "SERIALIZE"
             self.payload = self.backend.bounded_json(
                 self.result, self.backend.CASE_RESULT_LIMIT - 1) + b"\n"
-        except BaseException:  # noqa: BLE001 - include output/serialization and interruption
+        except BaseException as error:  # noqa: BLE001 - include serialization and interruption
             self.entry_failed = True
+            self.run.note_failure(error)
             self.run.abort_owned_once()
             self.result = None
             # Constant emergency record: bounded independently of failed evidence.
@@ -174,14 +176,16 @@ class SupervisorSession:
         import os
 
         try:
+            self.run.stage = "OUTPUT"
             with output.open("xb") as stream:
                 if stream.write(self.payload) != len(self.payload):
                     raise OSError("Partial bounded result write")
                 stream.flush()
                 os.fsync(stream.fileno())
             self.output_durable = True
-        except BaseException:  # noqa: BLE001 - never abandon retained capabilities on I/O failure
+        except BaseException as error:  # noqa: BLE001 - preserve capabilities on I/O failure
             self.entry_failed = True
+            self.run.note_failure(error)
             self.run.abort_owned_once()
             # Preserve any partial file; do not overwrite/retry or claim fsync.
 
@@ -302,6 +306,7 @@ def proposal():
                      "resident memory or disk quota. Supervisor memory is not job-bounded.",
         },
         "timing_controls": {
+            "pin_manifest_metadata_validation_bytes": 2097152,
             "deadline_seconds_before_any_role_creation": 30,
             "scheduled_deadline_intervention_seconds": 29,
             "cleanup_acceptance_window_seconds": 5,

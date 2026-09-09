@@ -1133,6 +1133,128 @@ class CompleteQualificationTests(unittest.TestCase):
                 self.assertEqual(len(owner.owned), 3)
                 owner.cleanup()
 
+    def test_manifest_metadata_budget_accepts_realistic_and_maximum_sets(self):
+        for count, length in ((149, 140), (256, 1024)):
+            with self.subTest(count=count, length=length):
+                kernel = RoleKernel()
+                owner = backend.RoleHandles(kernel.factory("supervisor", None))
+                # Shared shallow ancestors keep this within the separate 512-handle cap.
+                prefix = "G:\\" + ("a" * 200 + "\\") * (4 if length == 1024 else 0)
+                paths = [prefix + "b" * (length - len(prefix) - 8) + f"{i:04}.bin"
+                         for i in range(count)]
+                files = {path: {"size": 1, "sha256": hashlib.sha256(b"x").hexdigest()}
+                         for path in paths}
+                kernel.file_contents = {ntpath.normcase(path): b"x" for path in paths}
+                with self.assertRaisesRegex(ValueError, "Bounded JSON byte budget"):
+                    backend.bounded_json(files)  # Reproduces the old pre-API rejection.
+                self.assertEqual(kernel.events, [])
+                pins = backend.HeldArtifacts(owner)
+                pins.acquire(files)
+                self.assertEqual(owner.pin_index, count)
+                self.assertLessEqual(len(owner.owned), 512)
+                self.assertEqual(sum(name == "ReadFile" for _, name in kernel.events), count)
+                self.assertFalse(any("Job" in name or name == "CreateProcessW"
+                                     for _, name in kernel.events))
+                self.assertTrue(owner.cleanup())
+                self.assertEqual(backend.CASE_RESULT_LIMIT, 12288)
+
+    def test_manifest_invalid_or_over_limit_has_zero_api_calls(self):
+        good = {"size": 1, "sha256": hashlib.sha256(b"x").hexdigest()}
+        invalid = [None, {}, {f"G:\\p{i}.bin": good for i in range(257)},
+                   {"G:\\" + "a" * 1022: good},
+                   {"G:\\p.bin": {**good, "size": 16 * 1024 * 1024 + 1}},
+                   {f"G:\\p{i}.bin": {**good, "size": 16 * 1024 * 1024} for i in range(9)},
+                   {"G:\\p.bin": {**good, "sha256": "z" * 64}},
+                   {"G:\\p.bin": good, "g:\\P.BIN": good}]
+        for files in invalid:
+            with self.subTest(files_type=type(files).__name__):
+                kernel = RoleKernel()
+                owner = backend.RoleHandles(kernel.factory("supervisor", None))
+                with self.assertRaises(ValueError):
+                    backend.HeldArtifacts(owner).acquire(files)
+                self.assertEqual(kernel.events, [])
+                self.assertEqual(owner.owned, [])
+
+    def test_realistic_149_pins_complete_the_independent_injected_journey(self):
+        run = self.prepare_independent()
+        for index in range(143):
+            name = f"Lib/synthetic_module_{index:03}.py"
+            self.inventory["files"][name] = {
+                "size": 1, "sha256": hashlib.sha256(b"x").hexdigest()}
+            path = ntpath.normpath(ntpath.join(self.inventory["root"], name))
+            self.kernel.file_contents[ntpath.normcase(path)] = b"x"
+        digest = hashlib.sha256(backend.bounded_json(self.inventory, 1024 * 1024)).hexdigest()
+        run.grant["runtime_sha256"] = run.approved["runtime_sha256"] = digest
+        result = run.run(self.independent_pause)
+        self.assertEqual(len(self.inventory["files"]) + len(run.physical["sources"]), 149)
+        self.assertTrue(result["case_matched_expected_observation"])
+        self.assertIsNone(result["failure"])
+        self.assertEqual(result["status"], "STUB_ONLY")
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_fixed_failure_diagnostics_identify_pin_api_and_redact_details(self):
+        for operation, phase in (("CreateFileW", "OPEN_DIRECTORY"),
+                                 ("GetFileInformationByHandle", "FILE_IDENTITY"),
+                                 ("ReadFile", "HASH_FILE")):
+            with self.subTest(operation=operation):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                self.kernel.fail = operation
+                result = run.run(self.independent_pause)
+                self.assertEqual(result["failure"], {
+                    "stage": "PIN_ADMISSION", "error_class": "OS_ERROR", "code": 122,
+                    "code_domain": "ERRNO", "pin_phase": phase, "pin_index": 1})
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertFalse(result["case_matched_expected_observation"])
+                self.assertNotIn("CreateJobObjectW", [name for _, name in self.kernel.events])
+                self.assertLess(len(backend.bounded_json(result)), backend.CASE_RESULT_LIMIT)
+                self.assertNotIn("synthetic", json.dumps(result))
+
+    def test_failure_fields_are_bounded_first_only_and_never_format_exception(self):
+        class PrivateError(Exception):
+            def __str__(self):
+                raise AssertionError("Exception text must never be accessed")
+
+        for error, category in ((PrivateError(), "OTHER"), (ValueError("private"), "VALUE"),
+                                (TypeError("private"), "TYPE"), (KeyboardInterrupt(), "INTERRUPTED"),
+                                (PermissionError("private"), "PERMISSION")):
+            run = self.prepare_independent()
+            run.stage = "private" * 1000
+            run.note_failure(error)
+            first = dict(run.failure)
+            run.stage = "CLEANUP"
+            run.note_failure(OSError(5, "later private path"))
+            self.assertEqual(run.failure, first)
+            self.assertEqual(first["stage"], "UNKNOWN")
+            self.assertEqual(first["error_class"], category)
+            self.assertIsNone(first["code"])
+            self.assertLess(len(backend.bounded_json(first, 2048)), 256)
+            self.assertNotIn("private", json.dumps(first))
+        for code in (None, True, -1, 2**32, "private", 122):
+            run = self.prepare_independent()
+            error = OSError("private")
+            error.errno = code
+            run.note_failure(error)
+            self.assertEqual(run.failure["code"], 122 if code == 122 else None)
+        run = self.prepare_independent()
+        error = OSError("private")
+        error.errno, error.winerror = 5, 123
+        run.note_failure(error)
+        self.assertEqual((run.failure["code"], run.failure["code_domain"]), (123, "WINERROR"))
+
+    def test_session_output_failure_retains_bounded_diagnostic_without_rewrite(self):
+        session = self.prepare_session()
+        session.execute(self.independent_pause)
+        original = session.payload
+        output = Path(self.temp.name) / "diagnostic-output.json"
+        with patch("os.fsync", side_effect=OSError(5, "private path and credentials")):
+            session.write_result(output)
+        self.assertEqual(output.read_bytes(), original)
+        self.assertEqual(session.run.failure["stage"], "OUTPUT")
+        self.assertEqual(session.run.failure["code"], 5)
+        self.assertNotIn("private", json.dumps(session.run.failure))
+        self.assertEqual(session.exit_code(), 3)
+
     def test_connected_strict_pin_mapping_holds_before_any_job(self):
         # Virtual file objects exercise the full strict mapping/lock path. This
         # is explicitly NOT physical Windows file identity or an OS launch.
@@ -1712,6 +1834,7 @@ class CompleteQualificationTests(unittest.TestCase):
                 result = run.run(self.independent_pause)
                 self.assertEqual(result["outcome"], "UNKNOWN")
                 self.assertFalse(result["current_process_non_elevated"])
+                self.assertEqual(result["failure"]["stage"], "TOKEN_PREFLIGHT")
                 names = [name for _, name in self.kernel.events]
                 self.assertFalse(set(names) & {"CreateFileW", "CreateJobObjectW", "CreateProcessW"})
                 if fault == "open":
