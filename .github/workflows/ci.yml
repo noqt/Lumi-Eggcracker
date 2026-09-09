@@ -137,7 +137,7 @@ jobs:
 
       - name: Lint
         if: matrix.python-version == '3.11'
-        run: ruff check src tests scripts
+        run: ruff check src tests scripts experiments
 
       - name: Unit tests
         env:
