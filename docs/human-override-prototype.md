@@ -71,8 +71,8 @@ response timing, development/evaluation family reservations, seeds and scoring.
 The CLI hashes that protocol and the
 [development scenarios](../experiments/human_override/scenarios.v1.json).
 Future replay commands in the protocol are `INTENDED`, not available commands.
-Detailed held-out recipes still require sealing before evaluation; no E1/E3
-result, detector advantage, AI attribution or held-out score is claimed here.
+The separate E1/E3 CLI below implements all-arm replay instead of those earlier
+per-arm command placeholders. No detector advantage or AI attribution is assumed.
 
 Six abstract protected-effect markers are reachable without a stop and blocked
 after the fake adapter stops execution. They test state reachability only, not
@@ -86,3 +86,47 @@ can continue under a subsequent exact scope while E4 prerequisites are resolved.
 Windows feasibility follows useful Linux evidence; shared event semantics do
 not establish Windows or macOS protection. Internal tests are not adoption,
 independent installations or commercial evidence.
+
+## Synthetic E1/E3 comparison
+
+```text
+python -B experiments/counter_ai/replay.py --output ABSOLUTE_FRESH_DEV --split development
+python -B experiments/counter_ai/replay.py --output ABSOLUTE_FRESH_SEAL --freeze
+python -B experiments/counter_ai/replay.py --output ABSOLUTE_FRESH_EVAL --split heldout --seal ABSOLUTE_FRESH_SEAL/seal.json
+```
+
+Development tests never evaluate the held-out recipes. The source seal binds
+detector, generator, fixture/protocol, response model and test hashes, Git base
+revision, interpreter path/hash and OS/Python build identity. Any change invalidates it. Freeze before evaluation;
+do not tune after seeing results. Recipes are source-visible and predeclared,
+not a blinded independently designed holdout.
+The manifest specifies 3 development recipes and 24 reserved evaluation variants
+(12 harmful, 12 benign), 5 seeded configurations and fast/slow pacing. These are
+abstract toy patterns, not validated independent real-world scenario families.
+
+Every trace has 16 generated actions. Sensor availability delay and telemetry
+loss are separate from the judge's protected-effect time. A response at the same
+tick as an effect is too late. Every protected arm has the same static ACL;
+automatic detectors share the E2 fake adapter and one-tick response delay.
+Alert-only uses an explicit 30-tick delay. Protection-disabled controls establish
+effect reachability. B is a separately running unchanged canary in every arm.
+
+`dataset.json` contains observable events plus separately named oracle effect
+timing. Detectors receive only Event objects: opaque run identity, allocation,
+generation, event ID, sensor, event/available ticks, action, resource and actor
+identity. No harmful label, hidden reasoning or effect oracle enters detection.
+Each detector binds one opaque run ID. Known gap markers clear its correlation
+and rate history, retaining replay-ID memory; output reports gaps and the judge's
+dropped-telemetry count rather than treating missing observations as safety.
+`result.json` records paired raw outcomes, fast/slow counts, benign interruption
+and completion, missing detections, detected-only latency, four-step explicit
+recovery, and whole-family bootstrap intervals. Simulated workload-hour reporting
+assumes one tick per second; it is not measured operating time. No runtime
+overhead, real recovery latency or production false-positive claim follows.
+
+The conventional rule fires on an explicit protected-resource denial or tamper.
+Correlation retains it and additionally uses ordinary denials followed by changed
+identity/resource; ablations remove timing, sequence or identity relationships.
+Legitimate failed-access/retry workflows are included to expose collateral cost.
+Keep null/negative results. Any apparent gain in these designed toy variants needs
+a stronger independently designed evaluation before a general protection claim.
