@@ -468,9 +468,9 @@ class WindowsJobBackendTests(unittest.TestCase):
                 self.assertEqual(loaders, [])
         with patch("ctypes.WinDLL", side_effect=AssertionError("Native loader called"), create=True):
             runpy.run_path(str(ROOT / probe.SOURCE_PATHS[0]))
-        with patch.object(backend, "make_abi", side_effect=AssertionError("Gate bypass")):
-            with self.assertRaises(PermissionError):
-                backend.NativeApi()
+        with (patch.object(backend, "make_abi", side_effect=AssertionError("Gate bypass")),
+              self.assertRaises(PermissionError)):
+            backend.NativeApi()
         with (patch.object(sys, "argv", ["windows_job_probe.py"]),
               contextlib.redirect_stdout(io.StringIO()) as out,
               self.assertRaises(SystemExit) as result):
@@ -932,8 +932,8 @@ class CompleteQualificationTests(unittest.TestCase):
             run = self.prepare()
             original = run.advance
 
-            def advance(amount, selected=delay):
-                original(selected if self.kernel.tick >= 200_000_000 else amount)
+            def advance(amount, selected=delay, advance_clock=original):
+                advance_clock(selected if self.kernel.tick >= 200_000_000 else amount)
                 if selected < backend.SECOND and self.kernel.tick >= selected:
                     self.kernel.kill(self.kernel.roles["target"])
 

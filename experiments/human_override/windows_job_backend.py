@@ -830,8 +830,7 @@ class HeldArtifacts:
         if not 0 < length < 1025 or buffer[length] != 0:
             raise ValueError("Unbounded final artifact path")
         final = bytes(buffer)[:length * 2].decode("utf-16-le")
-        if final.startswith("\\\\?\\"):
-            final = final[4:]
+        final = final.removeprefix("\\\\?\\")
         if self._path(final) != self._path(path):
             raise ValueError("Artifact path substitution")
         self.handles[self._path(path)] = handle
@@ -1318,8 +1317,8 @@ class StubQualification:
                     live_tick, expected = tick, identity
                     self.record("observer", "live_after_resume")
                 elif (kind == 4 and expected == identity and live_tick is not None
-                      and intervention is not None and live_tick < intervention <= tick
-                      and tick <= intervention + 4 * SECOND
+                      and intervention is not None
+                      and live_tick < intervention <= tick <= intervention + 4 * SECOND
                       and tick < self.controller.resumed_at + 60 * SECOND):
                     canary_live = sup.state(self.canary, self.canary_identity) == "LIVE"
                     self.record("observer", "early_primary_exit")
