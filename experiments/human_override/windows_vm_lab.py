@@ -57,6 +57,12 @@ def run(output):
         if not condition:
             raise ValueError("mock journey invariant failed")
 
+    def command(controller, operation, judge=None):
+        state = controller.state
+        return controller.command("human", operation, allocation="A",
+                                  generation=state["generation"], epoch=state["epoch"],
+                                  sequence=state["sequence"] + 1, judge=judge)
+
     for crash in (False, True):
         kernel = controller_module.MockKernel()
         path = output / ("crash.json" if crash else "stop.json")
@@ -68,14 +74,8 @@ def run(output):
         kernel.resume(canary)
         canary_before = asdict(canary)
 
-        def command(operation, judge=None):
-            state = controller.state
-            return controller.command("human", operation, allocation="A",
-                                      generation=state["generation"], epoch=state["epoch"],
-                                      sequence=state["sequence"] + 1, judge=judge)
-
-        require(command("approve") == "OK")
-        require(command("start") == "MOCK_RUNNING")
+        require(command(controller, "approve") == "OK")
+        require(command(controller, "start") == "MOCK_RUNNING")
         require(controller.process.identity["allocation"] == "A")
         require(canary.identity["allocation"] == "B")
         require(controller.job is not canary_job)
@@ -85,16 +85,16 @@ def run(output):
             controller.crash()
             controller = controller_module.Controller(path, kernel)
         else:
-            require(command("stop") == "MOCK_STOP_DISPATCHED")
+            require(command(controller, "stop") == "MOCK_STOP_DISPATCHED")
             require(controller.observed(judge) == "MOCK_RUNNING")
             kernel.complete_exit(controller.process)
-        require(command("start") == "DENIED")
+        require(command(controller, "start") == "DENIED")
         require(controller.observed(judge) == "MOCK_VERIFIED_PRIMARY_EXIT")
-        require(command("reset", judge) == "OK")
+        require(command(controller, "reset", judge) == "OK")
         require(kernel.resumes == 2)  # One target plus one outside mock canary.
-        require(command("start") == "DENIED")
-        require(command("approve") == "OK")
-        require(command("start") == "MOCK_RUNNING")
+        require(command(controller, "start") == "DENIED")
+        require(command(controller, "approve") == "OK")
+        require(command(controller, "start") == "MOCK_RUNNING")
         require(controller.state["generation"] == 2)
         controller.crash()
         require(canary.alive and not canary.suspended and not canary_job.closed)
