@@ -7,6 +7,7 @@ Callbacks are trusted test code, not a sandbox for arbitrary Python code.
 import hashlib
 import json
 import ntpath
+import os
 import stat
 import struct
 import threading
@@ -26,6 +27,8 @@ ERROR_INSUFFICIENT_BUFFER = 122
 HANDLE_LIST = 0x00020002
 CREATE_LOCK = threading.RLock()
 SECOND = 1_000_000_000
+JOURNAL_LIMIT = 8192
+CASE_RESULT_LIMIT = 65536 - 3 * 4096 - 2 * 16384 - JOURNAL_LIMIT
 
 
 def native_backend(*_args, **_kwargs):
@@ -33,9 +36,11 @@ def native_backend(*_args, **_kwargs):
     raise PermissionError("SOURCE_ONLY: native loading and execution are not released")
 
 
-def _bind_prototypes(library, abi):
+def _bind_prototypes(library, abi, names=None):
     """Set signatures only; tests supply Python functions, never a DLL."""
     for name, (result, args) in abi.signatures.items():
+        if names is not None and name not in names:
+            continue
         function = getattr(library, name)
         function.restype = result
         function.argtypes = args
@@ -49,9 +54,12 @@ class NativeApi:
         self.abi = make_abi()
         # Only a later, separately reviewed execution release can reach this body.
         library = self.abi.c.WinDLL("kernel32.dll", use_last_error=True, winmode=0x800)
-        _bind_prototypes(library, self.abi)
+        security = self.abi.c.WinDLL("advapi32.dll", use_last_error=True, winmode=0x800)
+        security_names = {"OpenProcessToken", "GetTokenInformation"}
+        _bind_prototypes(library, self.abi, set(self.abi.signatures) - security_names)
+        _bind_prototypes(security, self.abi, security_names)
         for name in self.abi.signatures:
-            setattr(self, name, getattr(library, name))
+            setattr(self, name, getattr(security if name in security_names else library, name))
         self.last_error = self.abi.c.get_last_error
 
 
@@ -224,7 +232,7 @@ class BoundedEvidence:
                 or type(event) is not str or not 1 <= len(event) <= 32
                 or not event.isascii() or not event.replace("_", "").isalnum()
                 or type(outcome) is not str or outcome not in (
-                    "INTENDED", "STUB", "UNKNOWN", "REFUSED")
+                    "INTENDED", "STUB", "OBSERVED", "UNKNOWN", "REFUSED")
                 or type(generation) is not int or not 1 <= generation < 2**63
                 or type(monotonic_ns) is not int or not 0 <= monotonic_ns < 2**63
                 or len(self.rows) >= 128):
@@ -233,7 +241,7 @@ class BoundedEvidence:
                "monotonic_ns": monotonic_ns, "outcome": outcome}
         encoded = json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n"
         # Reserve pipe buffers and both bounded role bootstrap wire records.
-        if self.bytes_written + len(encoded) > 65536 - 3 * 4096 - 2 * 16384:
+        if self.bytes_written + len(encoded) > CASE_RESULT_LIMIT:
             raise ValueError("Evidence byte limit")
         self.rows.append(row)
         self.bytes_written += len(encoded)
@@ -335,6 +343,8 @@ def make_abi():
         "ResumeThread": (dword, (handle,)),
         "TerminateProcess": (b, (handle, dword)),
         "GetCurrentProcess": (handle, ()),
+        "OpenProcessToken": (b, (handle, dword, p(handle))),
+        "GetTokenInformation": (b, (handle, c.c_int32, v, dword, p(dword))),
         "DuplicateHandle": (b, (handle, handle, handle, p(handle), dword, b, dword)),
         "WaitForSingleObject": (dword, (handle, dword)),
         "GetExitCodeProcess": (b, (handle, p(dword))),
@@ -415,7 +425,7 @@ class RetainedJob:
     """
 
     def __init__(self, api, persist):
-        if type(api) is not StubApi or type(persist) is not FunctionType:
+        if type(api) not in (StubApi, NativeApi) or type(persist) is not FunctionType:
             raise TypeError("SOURCE_ONLY: exact stub API and persistence hook required")
         self.api, self.a, self.persist = api, api.abi, persist
         self.lock = threading.RLock()
@@ -634,7 +644,7 @@ class RoleHandles(RetainedJob):
     """
 
     def __init__(self, api):
-        if type(api) is not StubApi:
+        if type(api) not in (StubApi, NativeApi):
             raise TypeError("SOURCE_ONLY: exact injected StubApi required")
         super().__init__(api, lambda *_: None)
         self.owned = []
@@ -666,6 +676,33 @@ class RoleHandles(RetainedJob):
             except BaseException:  # noqa: BLE001 - attempt every exact close, retain failures
                 self.cleanup_errors.append("role_handle")
         return not self.owned and not self.cleanup_errors
+
+    def require_non_elevated(self):
+        """Current process only; fixed TOKEN_QUERY/TokenElevation, never a PID.
+
+        Zero elevation is not an identity, integrity-level or privilege audit.
+        Token ownership starts on successful open; a failed close is retained.
+        """
+        a = self.a
+        current = self.api.GetCurrentProcess()
+        if current != 2**64 - 1:
+            raise ValueError("Expected current-process pseudo-handle")
+        token = a.HANDLE()
+        self._ok(self.api.OpenProcessToken(current, 0x0008, a.c.byref(token)), "OpenCurrentToken")
+        handle = self.own(token.value, "token")
+        try:
+            elevated, returned = a.DWORD(0xFFFFFFFF), a.DWORD()
+            self._ok(self.api.GetTokenInformation(handle, 20, a.c.byref(elevated), 4,
+                                                  a.c.byref(returned)), "CurrentTokenElevation")
+            if returned.value != 4 or elevated.value != 0:
+                raise PermissionError("Elevated or ambiguous current-process token")
+        finally:
+            try:
+                self.release(handle)
+            except BaseException:  # noqa: BLE001 - preserve exact token on failed close
+                self.cleanup_errors.append("token")
+                raise
+        return True
 
     def job_limit(self, processes, memory_mib, cpu_rate):
         if (processes, memory_mib, cpu_rate) not in (
@@ -840,7 +877,7 @@ class HeldArtifacts:
     """
 
     def __init__(self, owner):
-        if type(owner) is not RoleHandles or type(owner.api) is not StubApi:
+        if type(owner) is not RoleHandles or type(owner.api) not in (StubApi, NativeApi):
             raise TypeError("SOURCE_ONLY: exact stub artifact owner required")
         self.owner = owner
         self.handles = {}
@@ -935,6 +972,21 @@ class HeldArtifacts:
         except BaseException:
             owner.cleanup()
             raise
+
+    def hold_directory(self, path):
+        """Hold the approved case directory and ancestors against rename/delete."""
+        pending = []
+        parent = path
+        while self._path(parent) not in self.handles:
+            pending.append(parent)
+            next_parent = ntpath.dirname(parent)
+            if next_parent == parent:
+                break
+            parent = next_parent
+        if len(self.handles) + len(pending) > 512:
+            raise ValueError("Case directory ancestor bound")
+        for directory in reversed(pending):
+            self._open(directory, True)
 
 
 WIRE = struct.Struct("<7Q32s")
@@ -1177,13 +1229,15 @@ def source_digest():
     return hashlib.sha256(bounded_json(values)).hexdigest()
 
 
-def stub_admission(grant, approved, config, inventory):
+def stub_admission(grant, approved, config, inventory, authority="STUB_ONLY"):
     """Compare with a separately trusted exact approval; NEVER native authority.
 
     Synthetic application aliases are permitted only here, not artifact locks.
     Recomputed inventory is read-only and reports its explicit native gaps.
     No job/process/pipe function may run until this routine has returned.
     """
+    if authority not in ("STUB_ONLY", "NATIVE_QUALIFICATION"):
+        raise PermissionError("Unselected qualification authority")
     if type(config) is not dict or set(config) != {
             "application", "cwd", "source", "generation", "case"}:
         raise ValueError("Exact fixed probe configuration required")
@@ -1197,7 +1251,7 @@ def stub_admission(grant, approved, config, inventory):
         if type(value) is not dict or set(value) != {
                 "authority", "source_sha256", "config_sha256", "runtime_sha256"}:
             raise ValueError("Exact out-of-band stub grant required")
-        if value["authority"] != "STUB_ONLY":
+        if value["authority"] != authority:
             raise PermissionError("Native execution not released")
         for key in ("source_sha256", "config_sha256", "runtime_sha256"):
             digest = value[key]
@@ -1214,7 +1268,8 @@ def stub_admission(grant, approved, config, inventory):
     return grant["config_sha256"]
 
 
-def pin_physical_launch(owner, grant, approved, config, inventory, source_root, sources):
+def pin_physical_launch(owner, grant, approved, config, inventory, source_root, sources,
+                        authority="STUB_ONLY"):
     """Bind intended launch paths to approved file bytes, then retain file locks.
 
     Only an injected owner is possible in this revision. No alias fallback:
@@ -1222,12 +1277,13 @@ def pin_physical_launch(owner, grant, approved, config, inventory, source_root, 
     probe under source_root. Extra import candidates/system DLLs still require
     an accepted loading baseline; held selected files do not close that gap.
     """
-    if type(owner) is not RoleHandles or type(owner.api) is not StubApi:
+    if type(owner) is not RoleHandles or type(owner.api) not in (StubApi, NativeApi):
         raise TypeError("SOURCE_ONLY: exact artifact owner required")
     for value in (config, grant, approved, sources):
         bounded_json(value)
     bounded_json(inventory, 1024 * 1024)
-    if (type(grant) is not dict or grant != approved or grant.get("authority") != "STUB_ONLY"
+    if (authority not in ("STUB_ONLY", "NATIVE_QUALIFICATION")
+            or type(grant) is not dict or grant != approved or grant.get("authority") != authority
             or type(sources) is not dict or set(sources) != set(SOURCE_FILES)
             or type(inventory) is not dict or type(inventory.get("files")) is not dict):
         raise ValueError("Missing exact physical source/runtime approval")
@@ -1258,7 +1314,98 @@ def pin_physical_launch(owner, grant, approved, config, inventory, source_root, 
         raise ValueError("Physical pin approval hash mismatch")
     artifacts = HeldArtifacts(owner)
     artifacts.acquire(pins)
+    if authority == "NATIVE_QUALIFICATION":
+        artifacts.hold_directory(config["cwd"])
     return artifacts
+
+
+class CaseJournal:
+    """Exclusive bounded qualification log, NOT durable restart admission.
+
+    Native wiring first validates and holds the approved case directory. Tests
+    may use their own disposable directory. Existing files are never replaced.
+    """
+
+    def __init__(self, directory, case):
+        self.directory = Path(directory)
+        _physical(self.directory)
+        if not self.directory.is_absolute() or not self.directory.is_dir() or case not in CASES:
+            raise ValueError("Exact case directory required")
+        self.case, self.count, self.size = case, 0, 0
+        self.stream = (self.directory / "controller-journal.jsonl").open("xb")
+
+    def persist(self, phase, identity):
+        if (phase not in ("START_INTENT", "IDENTIFIED_SUSPENDED", "STOP_REQUESTED")
+                or self.count >= 3 or (identity is not None and type(identity) is not Identity)):
+            raise ValueError("Invalid bounded journal phase/identity")
+        expected = ("START_INTENT", "IDENTIFIED_SUSPENDED", "STOP_REQUESTED")[self.count]
+        if phase != expected or (phase == "START_INTENT") != (identity is None):
+            raise ValueError("Out-of-order qualification persistence")
+        if ((self.case == "identity_failure" and phase == "IDENTIFIED_SUSPENDED")
+                or (self.case == "stop_persistence_failure" and phase == "STOP_REQUESTED")):
+            raise OSError("Selected synthetic persistence-failure case")
+        record = {"phase": phase, "identity": None if identity is None else {
+            "generation": identity.generation, "config_sha256": identity.config_sha256,
+            "pid": identity.pid, "creation_time": identity.creation_time}}
+        payload = bounded_json(record, 2048) + b"\n"
+        if self.size + len(payload) > JOURNAL_LIMIT:
+            raise ValueError("Qualification journal byte limit")
+        if self.stream.write(payload) != len(payload):
+            raise OSError("Partial qualification journal write")
+        self.stream.flush()
+        os.fsync(self.stream.fileno())
+        self.count += 1
+        self.size += len(payload)
+
+    def close(self):
+        self.stream.close()
+
+
+def decode_run_packet(raw, approved_sha256):
+    """Pure bounded packet admission; approval digest is supplied out of band.
+
+    Knowing a digest is not privilege or cryptographic operator authentication.
+    The separate trusted run grant must name this exact digest and command.
+    This decoder performs no native call and never creates NativeApi.
+    """
+    if (type(raw) is not bytes or not 1 <= len(raw) <= 1024 * 1024
+            or type(approved_sha256) is not str or len(approved_sha256) != 64
+            or hashlib.sha256(raw).hexdigest() != approved_sha256):
+        raise PermissionError("Packet differs from separately approved identity")
+    try:
+        packet = json.loads(raw)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise ValueError("Malformed bounded run packet") from error
+    if bounded_json(packet, 1024 * 1024) != raw:
+        raise ValueError("Noncanonical or duplicate packet fields")
+    if type(packet) is not dict or set(packet) != {
+            "schema", "grant", "config", "inventory", "physical", "trusted_host"}:
+        raise ValueError("Exact qualification packet required")
+    if packet["schema"] != "windows-harmless-run.v1":
+        raise ValueError("Unknown qualification packet schema")
+    host = packet["trusted_host"]
+    if (type(host) is not dict or set(host) != {
+            "machine", "account", "unprivileged_attested", "system_dlls", "runtime_loading"}
+            or any(type(host[key]) is not str or not 1 <= len(host[key]) <= 128
+                   for key in ("machine", "account"))
+            or host["unprivileged_attested"] is not True
+            or host["system_dlls"] != "TRUSTED_WINDOWS_SYSTEM32"
+            or host["runtime_loading"] != "TRUSTED_PINNED_RUNTIME_ON_TRUSTED_HOST"):
+        raise ValueError("Explicit reviewed trusted-host baseline required")
+    config, physical = packet["config"], packet["physical"]
+    if (type(physical) is not dict or set(physical) != {"source_root", "sources"}
+            or type(physical["sources"]) is not dict or set(physical["sources"]) != set(SOURCE_FILES)):
+        raise ValueError("Exact five physical source records required")
+    stub_admission(packet["grant"], packet["grant"], config, packet["inventory"],
+                   authority="NATIVE_QUALIFICATION")
+    # The grant above is authenticated by the independently approved *whole
+    # packet* digest, not by pretending that its self-comparison grants access.
+    for path in (config["application"], config["cwd"], config["source"], physical["source_root"]):
+        if ntpath.splitdrive(exact_path(path))[0].upper() not in ("F:", "G:"):
+            raise ValueError("Qualification paths must remain on approved data drives")
+    if config["case"] != "human_stop":
+        raise ValueError("Only one human_stop case is selected for initial native qualification")
+    return packet
 
 
 class PreparedRole:
@@ -1273,7 +1420,7 @@ class PreparedRole:
 
     def __init__(self, encoded, api, clock, persist):
         value = decode_bootstrap(encoded)  # Before any API call or ownership.
-        if type(api) is not StubApi or any(type(hook) is not FunctionType
+        if type(api) not in (StubApi, NativeApi) or any(type(hook) is not FunctionType
                                          for hook in (clock, persist)):
             raise TypeError("SOURCE_ONLY: exact role API and hooks required")
         self.value, self.clock, self.persist = value, clock, persist
@@ -1407,6 +1554,7 @@ class PreparedRole:
 
     def steps(self):
         """Cooperative test entry; no cross-role scheduling inside this loop."""
+        self.owner.require_non_elevated()
         for _ in range(351):
             now = self.now()
             if now >= self.value["deadline_ns"] + 5 * SECOND:
@@ -1438,8 +1586,10 @@ class PreparedQualification:
     process handles on unconfirmed death, forbidding a subsequent case.
     """
 
-    def __init__(self, grant, approved, config, inventory, physical, api_factory, clock):
-        self.digest = stub_admission(grant, approved, config, inventory)
+    def __init__(self, grant, approved, config, inventory, physical, api_factory, clock,
+                 authority="STUB_ONLY"):
+        self.digest = stub_admission(grant, approved, config, inventory, authority)
+        self.authority = authority
         if (type(physical) is not dict or set(physical) != {"source_root", "sources"}
                 or any(type(hook) is not FunctionType for hook in (api_factory, clock))):
             raise ValueError("Mandatory strict pins and exact supervisor hooks required")
@@ -1458,6 +1608,8 @@ class PreparedQualification:
         self.protocol_valid = True
         self.outcome = "UNKNOWN"
         self.canary_live = self.cleaned = False
+        self.cleanup_started = self.abort_started = False
+        self.non_elevated = False
 
     def now(self):
         tick = self.clock()
@@ -1467,7 +1619,13 @@ class PreparedQualification:
         return tick
 
     def record(self, event, outcome="STUB"):
+        if outcome == "STUB" and self.is_native():
+            outcome = "OBSERVED"
         self.evidence.record("supervisor", event, self.config["generation"], self.now(), outcome)
+
+    def is_native(self):
+        return (self.owner is not None and type(self.owner.api) is NativeApi
+                and self.authority == "NATIVE_QUALIFICATION")
 
     def setup(self):
         c = self.config
@@ -1475,9 +1633,12 @@ class PreparedQualification:
         self.deadline = self.started + 30 * SECOND
         self.owner = sup = RoleHandles(self.factory("supervisor", None))
         sup.requires_accounted_cleanup = True
+        if type(sup.api) is NativeApi and self.authority != "NATIVE_QUALIFICATION":
+            raise PermissionError("Native API needs separate native authority")
+        self.non_elevated = sup.require_non_elevated()
         self.artifacts = pin_physical_launch(
             sup, self.grant, self.approved, c, self.inventory,
-            self.physical["source_root"], self.physical["sources"])
+            self.physical["source_root"], self.physical["sources"], self.authority)
         in_job = sup.a.c.c_int32()
         sup._ok(sup.api.IsProcessInJob(sup.api.GetCurrentProcess(), None,
                                       sup.a.c.byref(in_job)), "SupervisorJobCheck")
@@ -1584,6 +1745,8 @@ class PreparedQualification:
             self.owner.terminate(self.roles["controller"][0])
             self.intervention = self.now()
             self.protocol_valid &= self.intervention <= self.deadline
+            if case == "human_stop":
+                self.protocol_valid = False  # Deadline cleanup never passes the human-stop case.
             self.record("deadline_intervention")
         return self.intervention is not None and now > self.intervention + 4 * SECOND
 
@@ -1607,19 +1770,44 @@ class PreparedQualification:
             self.outcome = "UNKNOWN"
             self.evidence.record("supervisor", "case_error", self.config["generation"],
                                  self.last_tick, "UNKNOWN")
-        finally:
-            if self.owner is not None:
-                yield from self.cleanup_steps()
-                if not self.cleaned or not self.protocol_valid:
-                    self.outcome = "UNKNOWN"
-        return {"status": "STUB_ONLY", "case": self.config["case"], "outcome": self.outcome,
-                "launch_pins": "HELD_STUB_OBJECTS" if self.artifacts else "REFUSED",
-                "restart_safety": "UNQUALIFIED", "owned_stub_cleanup": self.cleaned,
+        # Never yield in finally: close()/GeneratorExit must not start cleanup.
+        # The driving run() owns exceptional abort; normal iteration drains it.
+        if self.owner is not None:
+            yield from self.cleanup_steps()
+        else:
+            self.cleaned = True  # No API owner or acquired capabilities.
+        return self.result()
+
+    def result(self):
+        if not self.cleaned or not self.protocol_valid:
+            self.outcome = "UNKNOWN"
+        native = self.is_native()
+        outcome = self.outcome.removeprefix("STUB_") if native else self.outcome
+        return {"schema": "windows-harmless-result.v1",
+                "status": "NATIVE_QUALIFICATION_RUN" if native else "STUB_ONLY",
+                "generation": self.config["generation"], "config_sha256": self.digest,
+                "source_sha256": self.grant["source_sha256"],
+                "runtime_sha256": self.grant["runtime_sha256"],
+                "case": self.config["case"], "outcome": outcome,
+                "launch_pins": (("HELD_NATIVE_OBJECTS" if native else "HELD_STUB_OBJECTS")
+                                if self.artifacts else "REFUSED"),
+                "restart_safety": "UNQUALIFIED", "owned_cleanup_confirmed": self.cleaned,
+                "owned_stub_cleanup": self.cleaned and not native,
+                "current_process_non_elevated": self.non_elevated,
+                "protocol_valid": self.protocol_valid,
+                "case_matched_expected_observation": (
+                    self.config["case"] == "human_stop" and self.cleaned and self.protocol_valid
+                    and self.outcome == "STUB_EARLY_PRIMARY_EXIT" and self.canary_live),
                 "canary_live_before_cleanup": self.canary_live,
                 "cleanup_responsibility_retained": not self.cleaned,
+                "terminal_cleanup": ("CONFIRMED" if self.cleaned else
+                                     "UNCONFIRMED_PROCESS_EXIT_RELEASES_RETAINED_HANDLES"),
                 "evidence": self.evidence.finish(), "evidence_bytes": self.evidence.bytes_written}
 
     def cleanup_steps(self):
+        if self.cleanup_started:
+            return
+        self.cleanup_started = True
         sup = self.owner
         failed = bool(sup.cleanup_errors)
         # Keep the outer job handle for accounting. Last-close dispatch alone
@@ -1670,13 +1858,42 @@ class PreparedQualification:
     def run(self, pause):
         if type(pause) is not FunctionType:
             raise TypeError("Exact supervisor pause hook required")
+        if self.used:
+            raise ValueError("One-shot prepared qualification cannot restart")
         steps = self.steps()
-        while True:
+        try:
+            while True:
+                try:
+                    delay = next(steps)
+                except StopIteration as result:
+                    return result.value
+                pause(delay)
+        except BaseException:  # noqa: BLE001 - exact owner survives even interruption
+            steps.close()  # No yielding finally or destructor-dependent cleanup.
+            self.abort_owned_once()
+            return self.result()
+
+    def abort_owned_once(self):
+        """One non-yielding emergency attempt; never extends the 30+5s window.
+
+        A previous cleanup attempt is never retried or waived. If a zero-time
+        check cannot prove empty jobs, keep jobs/pins until explicit process
+        exit, which is an unconfirmed loss of evidence, not a cleanup receipt.
+        """
+        self.outcome, self.protocol_valid = "UNKNOWN", False
+        if self.abort_started:
+            return
+        self.abort_started = True
+        if self.owner is None:
+            self.cleaned = True
+        elif not self.cleanup_started:
+            cleanup = self.cleanup_steps()
             try:
-                delay = next(steps)
-            except StopIteration as result:
-                return result.value
-            pause(delay)
+                next(cleanup, None)
+            except BaseException:  # noqa: BLE001 - preserve ownership, no second attempt
+                self.cleaned = False
+            finally:
+                cleanup.close()
 
 
 def run_serial_prepared(cases, pause):
