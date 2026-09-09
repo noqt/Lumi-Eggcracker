@@ -1,0 +1,22 @@
+{
+  "schema": "windows-vm-design.v1",
+  "status": "MOCK_ONLY_NO_NATIVE_ADAPTER",
+  "claim": "Inert design of trusted-host emergency termination of one controller-created VM primary process and managed restart inhibition.",
+  "authority": "No native Windows process/job calls, overlay, guest, QEMU startup, NIC, host share, QMP or termination is implemented or permitted by this contract.",
+  "intended_native_creation": ["durable START_INTENT", "unnamed kill-on-last-job-handle-close job", "CreateProcessW explicit application, no inherited handles, CREATE_SUSPENDED and atomic PROC_THREAD_ATTRIBUTE_JOB_LIST", "verify and persist retained process identity", "resume only if no stop latch", "persist RUNNING"],
+  "intended_native_stop": ["validate human scope, generation, epoch and replay counter", "persist STOP_REQUESTED latch", "on persistence failure still attempt emergency termination on already retained exact target, report durability unconfirmed", "TerminateProcess on same validated retained handle", "independent judge observes signaled query-only process handle"],
+  "identity": ["allocation", "generation", "instance UUID", "creation FILETIME", "PID", "normalized exact image path", "pinned artifact hashes", "configuration hash"],
+  "recovery": "Never reopen by PID/name. Controller crash intentionally stops the job. Reload always inhibits admission. Missing judge handle or evidence remains UNKNOWN. Human reset plus new approval and separate explicit start required.",
+  "judge": "Native acceptance requires a separate process outside the job, holding only query/synchronize rights and pre-stop liveness. Current MockJudge is only an in-process simulator. No job/terminate handle transfer.",
+  "resource_limits": "INTENDED, not enforced or released: one VM primary process, no breakaway/children, one TCG vCPU, 2 GiB guest RAM, 3 GiB whole-job memory, 15-minute independent supervisor deadline. Disk/log hard bounds need separately accepted enforcement; free-space checks are not reservations.",
+  "artifacts_for_later_review": {
+    "qemu_version": "11.1.0 (v11.1.0-12130-ge470268ff4)",
+    "qemu_system_sha256": "47d57a6072e0bb3bd98f87926eb129eb1736dfe818c67b3b81ef7ce4edd0b3cd",
+    "qemu_img_sha256": "9d930582d0d574bb106d89982c547688e10b8f356192d302cc3d0ae4e8674534",
+    "ubuntu_base_sha256": "d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30",
+    "limits": "These are observed byte identities, not signatures, safe-startup proof or execution authority. Firmware/device/provisioning and all payload dependencies remain separately reviewed."
+  },
+  "durability_limit": "Exclusive pending file, file flush/fsync and replace model restart persistence. No Windows power-loss guarantee. Missing, malformed, changed-contract or pending state inhibits admission.",
+  "collateral": "Intended native hard stop and controller loss interrupt the entire chosen VM and may corrupt its disposable overlay. No graceful shutdown, selective AI stopping, external-job cancellation or resistance to trusted-host compromise is established.",
+  "native_release_gates": ["exact five-file independent static/mock acceptance", "actual Win32 API and atomic job support", "handle ownership and independent judge process", "reviewed firmware/device/startup and fresh overlay", "enforceable memory, CPU, disk/log and deadline bounds", "exact destructive execution grant and direct Risk acceptance", "originating native stop/crash/recovery and outside-canary qualification"]
+}
