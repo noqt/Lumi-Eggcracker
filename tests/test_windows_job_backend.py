@@ -511,6 +511,9 @@ class RoleKernel:
         self.reject_dead_identity = False
         self.partial = None
         self.file_contents = {}
+        self.bootstraps = {}
+        self.pipe_writers = set()
+        self.errors = {}
 
     def ptr(self, pointer, kind):
         return self.a.c.cast(pointer, self.a.c.POINTER(kind)).contents
@@ -531,6 +534,7 @@ class RoleKernel:
         return self.objects[self.tables[role][handle][0]]
 
     def close(self, role, handle):
+        self.pipe_writers.discard((role, handle))
         identity, _, _ = self.tables[role].pop(handle)
         obj = self.objects[identity]
         if obj["kind"] == "job" and 9 in obj and not any(
@@ -552,7 +556,7 @@ class RoleKernel:
 
     def factory(self, role, _process):
         return backend.StubApi({name: self.callback(role, name) for name in self.a.signatures},
-                               lambda: 122)
+                               lambda: self.errors.get(role, 122))
 
     def callback(self, role, name):
         def call(*args):
@@ -603,9 +607,32 @@ class RoleKernel:
             kind = a.ExtendedLimits if args[1] == 9 else a.CpuLimits
             obj[args[1]] = bytes(self.ptr(args[2], kind))
             return 1
+        if name == "TerminateJobObject":
+            identity = self.tables[role][args[0]][0]
+            for process_id, process in list(self.objects.items()):
+                if process["kind"] == "process" and identity in process["jobs"]:
+                    self.kill(process_id)
+            return 1
+        if name == "QueryInformationJobObject":
+            if args[1] != 1 or args[3] != a.c.sizeof(a.BasicAccounting):
+                raise ValueError("Only fixed basic accounting query allowed")
+            identity = self.tables[role][args[0]][0]
+            info = self.ptr(args[2], a.BasicAccounting)
+            processes = [(process_id, process) for process_id, process in self.objects.items()
+                         if process["kind"] == "process" and identity in process["jobs"]]
+            info.TotalProcesses = len(processes)
+            info.ActiveProcesses = sum(
+                process["alive"] or any(process_id == entry[0] or
+                                        (self.objects[entry[0]]["kind"] == "thread" and
+                                         self.objects[entry[0]]["process"] == process_id)
+                                        for table in self.tables.values() for entry in table.values())
+                for process_id, process in processes)
+            self.ptr(args[4], a.DWORD).value = a.c.sizeof(info)
+            return 1
         if name == "CreatePipe":
             reader = self.new(role, "pipe", data=bytearray())
             writer = self.handle(role, self.tables[role][reader][0])
+            self.pipe_writers.add((role, writer))
             self.ptr(args[0], a.HANDLE).value = reader
             self.ptr(args[1], a.HANDLE).value = writer
             return 1
@@ -627,6 +654,8 @@ class RoleKernel:
             if selected & rights != selected:
                 raise ValueError("Rights escalation")
             handle = self.handle(destination, identity, selected, bool(args[5]))
+            if (role, args[1]) in self.pipe_writers:
+                self.pipe_writers.add((destination, handle))
             self.ptr(args[3], a.HANDLE).value = handle
             return 1
         if name == "CreateProcessW":
@@ -637,6 +666,8 @@ class RoleKernel:
                 child = "controller"
             else:
                 child = "target" if role == "controller" else "canary"
+            if child in ("controller", "observer"):
+                self.bootstraps[child] = command.split("--bootstrap ")[1].rstrip("\0")
             self.tables[child] = {}
             attrs = self.attributes[role]
             inherited = attrs.get(backend.HANDLE_LIST, [])
@@ -647,6 +678,8 @@ class RoleKernel:
                 if not entry[2] or self.objects[entry[0]]["kind"] == "job":
                     raise ValueError("Invalid inheritance")
                 self.tables[child][handle] = entry
+                if (role, handle) in self.pipe_writers:
+                    self.pipe_writers.add((child, handle))
             jobs = [self.tables[role][handle][0] for handle in attrs[backend.JOB_LIST]]
             if role in self.roles:
                 jobs = self.objects[self.roles[role]]["jobs"] + jobs
@@ -702,6 +735,11 @@ class RoleKernel:
         if name in ("WriteFile", "ReadFile", "PeekNamedPipe"):
             data = self.object(role, args[0])["data"]
             if name == "PeekNamedPipe":
+                identity = self.tables[role][args[0]][0]
+                if not data and not any(self.tables[owner][handle][0] == identity
+                                        for owner, handle in self.pipe_writers):
+                    self.errors[role] = 109
+                    return 0
                 self.ptr(args[4], a.DWORD).value = len(data)
             elif name == "WriteFile":
                 data.extend(a.c.string_at(args[1], args[2]))
@@ -1104,6 +1142,452 @@ class CompleteQualificationTests(unittest.TestCase):
             name: {"size": 1, "sha256": "a" * 64} for name in backend.SOURCE_FILES}}
         self.assertEqual(run.run()["outcome"], "UNKNOWN")
         self.assertEqual(self.kernel.events, [])
+
+    def test_bounded_role_bootstrap_roundtrip_and_refusals(self):
+        record = {**self.config, "config_sha256": hashlib.sha256(backend.bounded_json(self.config)).hexdigest(),
+                  "started_ns": 0,
+                  "deadline_ns": 30 * backend.SECOND}
+        encoded = backend.encode_bootstrap("controller", record, (101, 102, 103))
+        value = backend.decode_bootstrap(encoded)
+        self.assertEqual(value["handles"], [101, 102, 103])
+        self.assertEqual(value["application"], APP)
+        for invalid in ("0" * 16386, "gg", "0", "5b" * 1000, "74727565"):
+            with self.assertRaises(ValueError):
+                backend.decode_bootstrap(invalid)
+        for handles in ((1, 1, 2), (True, 2, 3), (0, 2, 3), (1, 2), (1, 2, 2**63)):
+            with self.assertRaises(ValueError):
+                backend.encode_bootstrap("observer", record, handles)
+        altered = {**record, "deadline_ns": 31 * backend.SECOND}
+        with self.assertRaises(ValueError):
+            backend.encode_bootstrap("observer", altered, (1, 2, 3))
+        with (contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result):
+            probe.main(["--mode", "native-controller", "--bootstrap", encoded])
+        self.assertEqual(result.exception.code, 2)
+
+    def prepare_independent(self, case="human_stop"):
+        runtime_root, source_root = "G:\\synthetic\\runtime", "G:\\synthetic\\repository"
+        self.inventory["root"] = runtime_root
+        self.config["application"] = ntpath.join(runtime_root, "python.exe")
+        self.config["source"] = ntpath.normpath(ntpath.join(source_root, backend.SOURCE_FILES[1]))
+        self.kernel.file_contents[ntpath.normcase(self.config["application"])] = (
+            Path(self.temp.name) / "python.exe").read_bytes()
+        records = {}
+        for name in backend.SOURCE_FILES:
+            content = (ROOT / name).read_bytes()
+            records[name] = {"size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            self.kernel.file_contents[ntpath.normcase(ntpath.join(source_root, name))] = content
+        with patch.object(backend, "verify_runtime_inventory", return_value=self.inventory):
+            self.prepare(case)  # Reuse exact grant and trusted synthetic clock/persistence hooks.
+            run = backend.PreparedQualification(
+                self.grant, dict(self.grant), self.config, self.inventory,
+                {"source_root": source_root, "sources": records}, self.hooks[0], self.hooks[1])
+        self.independent_roles, self.iterators = {}, {}
+        self.schedule = {"observer": 1, "controller": 1}
+        self.freeze = set()
+        self.role_errors = []
+        self.pause_count = 0
+
+        def pause(amount):
+            # Test driver alone knows all synthetic tables. The supervisor's
+            # code has no child object, callback, table or resumed_at access.
+            self.pause_count += 1
+            for role in ("observer", "controller"):
+                identity = self.kernel.roles.get(role)
+                if identity is None or not self.kernel.objects[identity]["alive"]:
+                    continue
+                if not self.kernel.objects[identity]["resumed"]:
+                    continue
+                if role not in self.independent_roles:
+                    worker = backend.PreparedRole(self.kernel.bootstraps[role],
+                                                  self.kernel.factory(role, None),
+                                                  self.hooks[1], self.hooks[3])
+                    self.independent_roles[role] = worker
+                    self.iterators[role] = worker.steps()
+                if role in self.freeze or self.pause_count % self.schedule[role]:
+                    continue
+                try:
+                    next(self.iterators[role])
+                except (OSError, ValueError, StopIteration) as error:
+                    self.role_errors.append((role, type(error).__name__))
+                    self.kernel.kill(identity)  # Model process exit; no native call.
+            self.hooks[2](amount)
+
+        self.independent_pause = pause
+        return run
+
+    def test_independent_prepared_all_cases_and_strict_pins(self):
+        for case in backend.CASES:
+            with self.subTest(case=case):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent(case)
+                result = run.run(self.independent_pause)
+                expected = ("STUB_MATCHED_LIVE_CONTROL" if case == "no_stop_control" else
+                            "UNKNOWN" if case in ("identity_failure", "suspended_stop",
+                                                  "stop_persistence_failure", "observer_loss",
+                                                  "supervisor_loss") else "STUB_EARLY_PRIMARY_EXIT")
+                self.assertEqual(result["outcome"], expected, (result, self.role_errors))
+                self.assertEqual(result["launch_pins"], "HELD_STUB_OBJECTS")
+                self.assertTrue(result["owned_stub_cleanup"])
+                self.assertFalse(any(self.kernel.tables.values()))
+                self.assertLessEqual(result["evidence_bytes"] + 3 * 4096 + 2 * 16384, 65536)
+                names = [name for _, name in self.kernel.events]
+                self.assertLess(names.index("CreateFileW"), names.index("CreateJobObjectW"))
+                self.assertEqual(set(self.kernel.bootstraps), {"controller", "observer"})
+                for role, encoded in self.kernel.bootstraps.items():
+                    value = backend.decode_bootstrap(encoded)
+                    self.assertEqual(value["role"], role)
+                    self.assertEqual(value["config_sha256"], self.grant["config_sha256"])
+                with self.assertRaises(ValueError):
+                    run.run(self.independent_pause)
+
+    def test_independent_skewed_role_schedules(self):
+        for case in ("human_stop", "controller_crash", "no_stop_control"):
+            with self.subTest(case=case):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent(case)
+                self.schedule = {"observer": 3, "controller": 2}
+                result = run.run(self.independent_pause)
+                expected = ("STUB_MATCHED_LIVE_CONTROL" if case == "no_stop_control"
+                            else "STUB_EARLY_PRIMARY_EXIT")
+                self.assertEqual(result["outcome"], expected, result)
+
+    def test_independent_controller_stall_cannot_stall_supervisor(self):
+        run = self.prepare_independent("controller_deadline")
+        fallback = self.independent_pause
+
+        def pause(amount):
+            if self.kernel.tick > 2 * backend.SECOND:
+                self.freeze.add("controller")
+            fallback(amount)
+
+        result = run.run(pause)
+        self.assertEqual(result["outcome"], "STUB_EARLY_PRIMARY_EXIT", result)
+        rows = [dict(row) for row in result["evidence"]]
+        action = next(row for row in rows if row["event"] == "deadline_intervention")
+        self.assertEqual(action["monotonic_ns"], 29 * backend.SECOND)
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_independent_late_deadline_cleanup_not_success(self):
+        run = self.prepare_independent("controller_deadline")
+        fallback = self.independent_pause
+
+        def pause(amount):
+            fallback(amount)
+            if self.kernel.tick == 28_900_000_000:
+                self.kernel.tick = 30_100_000_000
+
+        result = run.run(pause)
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertTrue(result["owned_stub_cleanup"])
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_independent_missing_observer_or_initialization_is_unknown(self):
+        for role in ("observer", "controller"):
+            with self.subTest(role=role):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                self.freeze.add(role)
+                result = run.run(self.independent_pause)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertTrue(result["owned_stub_cleanup"])
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_independent_pins_are_mandatory_and_bootstrap_refuses_before_api(self):
+        self.prepare_independent()
+        for physical in (None, {}, {"source_root": "G:\\synthetic"}):
+            with (patch.object(backend, "verify_runtime_inventory", return_value=self.inventory),
+                  self.assertRaises(ValueError)):
+                backend.PreparedQualification(self.grant, self.grant, self.config, self.inventory,
+                                              physical, self.hooks[0], self.hooks[1])
+        with self.assertRaises(ValueError):
+            backend.PreparedRole("0" * 16386, self.kernel.factory("supervisor", None),
+                                 self.hooks[1], self.hooks[3])
+        self.assertEqual(self.kernel.events, [])
+
+    def test_independent_exit_without_intervention_cannot_pass(self):
+        run = self.prepare_independent("controller_deadline")
+        fallback = self.independent_pause
+
+        def pause(amount):
+            fallback(amount)
+            if self.kernel.tick == 2 * backend.SECOND:
+                self.kernel.kill(self.kernel.roles["controller"])
+
+        result = run.run(pause)
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertIn("observed_exit_report", [dict(row)["event"] for row in result["evidence"]])
+
+    def test_independent_intent_without_exit_cannot_pass(self):
+        run = self.prepare_independent()
+        fallback = self.kernel.invoke
+
+        def invoke(role, name, args):
+            if role == "controller" and name == "TerminateProcess":
+                return 1  # Dispatch success lies; observer must still query LIVE.
+            return fallback(role, name, args)
+
+        self.kernel.invoke = invoke
+        result = run.run(self.independent_pause)
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertNotIn("observed_exit_report", [dict(row)["event"] for row in result["evidence"]])
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_independent_malformed_control_retains_exit_evidence_not_success(self):
+        run = self.prepare_independent("controller_deadline")
+        fallback = self.independent_pause
+
+        def pause(amount):
+            fallback(amount)
+            if self.kernel.tick == backend.SECOND:
+                worker = self.independent_roles["controller"]
+                worker.frame(worker.machine.outbox, 7, self.kernel.tick)  # Wrong direction/state.
+            if self.kernel.tick == 2 * backend.SECOND:
+                self.kernel.kill(self.kernel.roles["controller"])
+
+        result = run.run(pause)
+        events = [dict(row)["event"] for row in result["evidence"]]
+        self.assertIn("role_failure", events)
+        self.assertIn("observed_exit_report", events)
+        self.assertEqual(result["outcome"], "UNKNOWN")
+
+    def test_independent_natural_exit_and_observer_report_failure_are_unknown(self):
+        for fault in ("natural", "report"):
+            with self.subTest(fault=fault):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent("controller_deadline")
+                fallback = self.independent_pause
+
+                def pause(amount, selected=fault, advance=fallback):
+                    advance(amount)
+                    if self.kernel.tick == 2 * backend.SECOND:
+                        if selected == "natural":
+                            self.hooks[2](60 * backend.SECOND)
+                        else:
+                            self.freeze.add("observer")
+
+                result = run.run(pause)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertTrue(result["owned_stub_cleanup"])
+
+    def test_independent_failed_cleanup_retains_pins_and_exact_handles(self):
+        run = self.prepare_independent()
+        fallback = self.kernel.invoke
+
+        def invoke(role, name, args):
+            if (role == "supervisor" and name == "CloseHandle" and run.jobs
+                    and args[0] == run.jobs[0]):
+                return 0
+            return fallback(role, name, args)
+
+        self.kernel.invoke = invoke
+        result = run.run(self.independent_pause)
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertTrue(result["cleanup_responsibility_retained"])
+        self.assertTrue(run.owner.owned)
+        self.assertTrue(any(self.kernel.object("supervisor", handle)["kind"] == "artifact"
+                            for handle, _ in run.owner.owned))
+        self.assertLessEqual(self.kernel.tick, 35 * backend.SECOND)
+        self.kernel.invoke = fallback
+        self.assertTrue(run.owner.cleanup())
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_fixed_loader_and_dispatch_with_no_search_path_mutation(self):
+        before = list(sys.path)
+        loaded = probe.load_prepared_backend()
+        self.assertEqual(sys.path, before)
+        self.assertEqual(Path(loaded.__file__).resolve(), (ROOT / backend.SOURCE_FILES[0]).resolve())
+        with self.assertRaises(PermissionError):
+            loaded.NativeApi()
+        record = {**self.config, "config_sha256": hashlib.sha256(backend.bounded_json(self.config)).hexdigest(),
+                  "started_ns": 0, "deadline_ns": 30 * backend.SECOND}
+        encoded = backend.encode_bootstrap("observer", record, (101, 102, 103))
+        calls = []
+
+        def factory(_loaded):
+            calls.append("factory")
+
+        with self.assertRaises(ValueError):
+            probe.prepared_role_entry("native-controller", encoded, factory,
+                                      lambda: 0, lambda _: None, lambda *_: None)
+        self.assertEqual(calls, [])
+        for mode in ("native-controller", "native-observer", "native-supervisor"):
+            with (patch.object(probe, "load_prepared_backend", side_effect=AssertionError("gate")),
+                  contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result):
+                probe.main(["--mode", mode, "--bootstrap", encoded])
+            self.assertEqual(result.exception.code, 2)
+
+    def test_owned_job_accounting_abi_and_invalid_handles(self):
+        a = self.kernel.a
+        self.assertEqual(a.c.sizeof(a.BasicAccounting), 48)
+        self.assertEqual(a.BasicAccounting.ActiveProcesses.offset, 40)
+        self.assertEqual(a.BasicAccounting.TotalTerminatedProcesses.offset, 44)
+        owner = backend.RoleHandles(self.kernel.factory("supervisor", None))
+        for invalid in (0, 0xFFFFFFFFFFFFFFFF, 1234):
+            with self.assertRaises(ValueError):
+                owner.active_processes(invalid)
+            with self.assertRaises(ValueError):
+                owner.terminate_outer(invalid)
+        self.assertEqual(self.kernel.events, [])
+        canary_job = owner.job_limit(1, 128, 500)
+        with self.assertRaises(ValueError):
+            owner.terminate_outer(canary_job)
+        self.assertEqual(owner.active_processes(canary_job), 0)
+        owner.cleanup()
+
+    def test_delayed_target_exit_holds_pins_until_accounting_zero(self):
+        run = self.prepare_independent("observer_loss")
+        kill, invoke, pause = self.kernel.kill, self.kernel.invoke, self.independent_pause
+        pending, nonempty = {}, []
+
+        def deferred_kill(identity):
+            process = self.kernel.objects[identity]
+            if process["role"] == "target" and process["alive"]:
+                pending.setdefault(identity, self.kernel.tick + 300_000_000)
+            else:
+                kill(identity)
+
+        def delayed_pause(amount):
+            pause(amount)
+            for identity, due in list(pending.items()):
+                if self.kernel.tick >= due:
+                    kill(identity)
+                    del pending[identity]
+
+        def checked_invoke(role, name, args):
+            result = invoke(role, name, args)
+            if name == "QueryInformationJobObject":
+                info = self.kernel.ptr(args[2], self.kernel.a.BasicAccounting)
+                if info.ActiveProcesses:
+                    nonempty.append(self.kernel.tick)
+                    self.assertTrue(any(kind == "artifact" for _, kind in run.owner.owned))
+            return result
+
+        self.kernel.kill, self.kernel.invoke = deferred_kill, checked_invoke
+        result = run.run(delayed_pause)
+        self.assertTrue(nonempty)
+        self.assertTrue(result["owned_stub_cleanup"])
+        self.assertEqual(result["outcome"], "UNKNOWN")  # Missing judge stays UNKNOWN despite cleanup.
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_job_cleanup_failures_and_nonzero_counts_retain_pins(self):
+        for fault in ("terminate", "query", "short", "inconsistent", "nonzero"):
+            with self.subTest(fault=fault):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                fallback = self.kernel.invoke
+
+                def invoke(role, name, args, selected=fault, original=fallback):
+                    if ((selected == "terminate" and name == "TerminateJobObject")
+                            or (selected == "query" and name == "QueryInformationJobObject")):
+                        return 0
+                    result = original(role, name, args)
+                    if name == "QueryInformationJobObject":
+                        info = self.kernel.ptr(args[2], self.kernel.a.BasicAccounting)
+                        if selected == "short":
+                            self.kernel.ptr(args[4], self.kernel.a.DWORD).value = 47
+                        elif selected in ("inconsistent", "nonzero"):
+                            info.ActiveProcesses = info.TotalProcesses + 1 if selected == "inconsistent" else 1
+                    return result
+
+                self.kernel.invoke = invoke
+                result = run.run(self.independent_pause)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertTrue(result["cleanup_responsibility_retained"])
+                self.assertTrue(any(kind == "artifact" for _, kind in run.owner.owned))
+                self.assertTrue(any(kind == "job" for _, kind in run.owner.owned))
+                self.kernel.invoke = fallback
+                run.owner.cleanup()
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_partial_job_and_process_setup_requires_accounted_cleanup(self):
+        for api_name, maximum in (("CreateJobObjectW", 3), ("CreateProcessW", 3)):
+            for ordinal in range(1, maximum + 1):
+                with self.subTest(api=api_name, ordinal=ordinal):
+                    self.kernel = RoleKernel()
+                    run = self.prepare_independent()
+                    fallback = self.kernel.invoke
+                    counts = {api_name: 0}
+
+                    def invoke(role, name, args, selected=api_name, at=ordinal,
+                               original=fallback, call_counts=counts):
+                        if role == "supervisor" and name == selected:
+                            call_counts[selected] += 1
+                            if call_counts[selected] == at:
+                                return 0
+                        return original(role, name, args)
+
+                    self.kernel.invoke = invoke
+                    result = run.run(self.independent_pause)
+                    self.assertEqual(result["outcome"], "UNKNOWN")
+                    self.assertTrue(result["owned_stub_cleanup"], result)
+                    self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_outer_job_cleanup_preserves_canary_until_its_own_disposal(self):
+        run = self.prepare_independent()
+        fallback = self.kernel.invoke
+        checked = []
+
+        def invoke(role, name, args):
+            result = fallback(role, name, args)
+            if name == "TerminateJobObject":
+                self.assertEqual(args[0], run.outer)
+                self.assertTrue(self.kernel.objects[self.kernel.roles["canary"]]["alive"])
+                checked.append(True)
+            return result
+
+        self.kernel.invoke = invoke
+        result = run.run(self.independent_pause)
+        self.assertTrue(checked)
+        self.assertTrue(result["canary_live_before_cleanup"])
+
+    def test_serial_case_bound_and_unresolved_cleanup_prevents_next_case(self):
+        first = self.prepare_independent()
+        with patch.object(backend, "verify_runtime_inventory", return_value=self.inventory):
+            self.config["case"] = "controller_crash"
+            grant = {**self.grant, "config_sha256": hashlib.sha256(
+                backend.bounded_json(self.config)).hexdigest()}
+            second = backend.PreparedQualification(grant, grant, self.config, self.inventory,
+                                                   first.physical, self.hooks[0], self.hooks[1])
+        for cases in ((), (first,) * 11, (first, first)):
+            with self.assertRaises(ValueError):
+                backend.run_serial_prepared(cases, self.independent_pause)
+        self.assertEqual(self.kernel.events, [])
+        fallback = self.kernel.invoke
+
+        def invoke(role, name, args):
+            return 0 if name == "QueryInformationJobObject" else fallback(role, name, args)
+
+        self.kernel.invoke = invoke
+        results = backend.run_serial_prepared((first, second), self.independent_pause)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(second.used)
+        self.assertIsNone(second.owner)
+        self.kernel.invoke = fallback
+        first.owner.cleanup()
+
+    def test_launch_temporary_close_failure_retains_actual_jobs_and_pins(self):
+        run = self.prepare_independent()
+        fallback = self.kernel.invoke
+        failed = []
+
+        def invoke(role, name, args):
+            if (role == "supervisor" and name == "CloseHandle" and not failed
+                    and (args[0], "temporary") in run.owner.owned):
+                failed.append(args[0])
+                return 0
+            return fallback(role, name, args)
+
+        self.kernel.invoke = invoke
+        result = run.run(self.independent_pause)
+        self.assertTrue(failed)
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertTrue(result["cleanup_responsibility_retained"])
+        self.assertIn("inheritance", run.owner.cleanup_errors)
+        self.assertTrue(any(kind == "job" for _, kind in run.owner.owned))
+        self.assertTrue(any(kind == "artifact" for _, kind in run.owner.owned))
+        self.kernel.invoke = fallback
+        run.owner.cleanup()
+        self.assertFalse(any(self.kernel.tables.values()))
 
 
 if __name__ == "__main__":

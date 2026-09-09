@@ -232,8 +232,8 @@ class BoundedEvidence:
         row = {"role": role, "event": event, "generation": generation,
                "monotonic_ns": monotonic_ns, "outcome": outcome}
         encoded = json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-        # Reserve three 4 KiB pipe buffers inside the combined 64 KiB case cap.
-        if self.bytes_written + len(encoded) > 65536 - 3 * 4096:
+        # Reserve pipe buffers and both bounded role bootstrap wire records.
+        if self.bytes_written + len(encoded) > 65536 - 3 * 4096 - 2 * 16384:
             raise ValueError("Evidence byte limit")
         self.rows.append(row)
         self.bytes_written += len(encoded)
@@ -311,10 +311,18 @@ def make_abi():
                     ("size_low", dword), ("links", dword), ("index_high", dword),
                     ("index_low", dword)]
 
+    class BasicAccounting(c.Structure):
+        _fields_ = [("TotalUserTime", c.c_int64), ("TotalKernelTime", c.c_int64),
+                    ("ThisPeriodTotalUserTime", c.c_int64), ("ThisPeriodTotalKernelTime", c.c_int64),
+                    ("TotalPageFaultCount", dword), ("TotalProcesses", dword),
+                    ("ActiveProcesses", dword), ("TotalTerminatedProcesses", dword)]
+
     p, v, b, w = c.POINTER, c.c_void_p, c.c_int32, c.POINTER(word)
     signatures = {
         "CreateJobObjectW": (handle, (v, w)),
         "SetInformationJobObject": (b, (handle, c.c_int32, v, dword)),
+        "TerminateJobObject": (b, (handle, dword)),
+        "QueryInformationJobObject": (b, (handle, c.c_int32, v, dword, p(dword))),
         "InitializeProcThreadAttributeList": (b, (v, dword, dword, p(size))),
         "UpdateProcThreadAttribute": (b, (v, dword, size, v, size, v, p(size))),
         "DeleteProcThreadAttributeList": (None, (v,)),
@@ -345,7 +353,7 @@ def make_abi():
                            IoCounters=IoCounters, ExtendedLimits=ExtendedLimits,
                            CpuLimits=CpuLimits, StartupInfo=StartupInfo,
                            StartupInfoEx=StartupInfoEx, ProcessInformation=ProcessInformation,
-                           FileInformation=FileInformation,
+                           FileInformation=FileInformation, BasicAccounting=BasicAccounting,
                            signatures=signatures)
 
 
@@ -631,6 +639,8 @@ class RoleHandles(RetainedJob):
         super().__init__(api, lambda *_: None)
         self.owned = []
         self.bound_identities = {}
+        self.job_contracts = {}
+        self.requires_accounted_cleanup = False
 
     def own(self, handle, kind):
         if type(handle) is not int or not 0 < handle < 2**64 - 1:
@@ -647,6 +657,7 @@ class RoleHandles(RetainedJob):
         self._ok(self.api.CloseHandle(handle), "CloseRoleHandle")
         self.owned.remove(entries[0])
         self.bound_identities.pop(handle, None)
+        self.job_contracts.pop(handle, None)
 
     def cleanup(self):
         for handle, _ in sorted(self.owned[:], key=lambda entry: entry[1] != "job"):
@@ -671,7 +682,25 @@ class RoleHandles(RetainedJob):
         cpu = a.CpuLimits(5, cpu_rate)
         self._ok(self.api.SetInformationJobObject(job, 15, a.c.byref(cpu),
                                                  a.c.sizeof(cpu)), "RoleCpuLimit")
+        self.job_contracts[job] = (processes, memory_mib, cpu_rate)
         return job
+
+    def terminate_outer(self, job):
+        if ((job, "job") not in self.owned
+                or self.job_contracts.get(job) != (3, 640, 2000)):
+            raise ValueError("Only exact retained supervisor outer job may be terminated")
+        self._ok(self.api.TerminateJobObject(job, 91), "OwnedOuterTermination")
+
+    def active_processes(self, job):
+        if (job, "job") not in self.owned:
+            raise ValueError("Job accounting requires exact retained owned job")
+        info, returned = self.a.BasicAccounting(), self.a.DWORD()
+        size = self.a.c.sizeof(info)
+        self._ok(self.api.QueryInformationJobObject(job, 1, self.a.c.byref(info), size,
+                                                   self.a.c.byref(returned)), "OwnedJobAccounting")
+        if returned.value != size or info.ActiveProcesses > info.TotalProcesses:
+            raise ValueError("Malformed fixed job accounting")
+        return info.ActiveProcesses
 
     def pipe(self):
         read, write = self.a.HANDLE(), self.a.HANDLE()
@@ -694,7 +723,7 @@ class RoleHandles(RetainedJob):
         # A remote duplicate belongs ONLY to destination, never CloseHandle here.
         return duplicate.value
 
-    def launch(self, role, application, cwd, source, jobs, inheritance=()):
+    def launch(self, role, application, cwd, source, jobs, inheritance=(), bootstrap=None):
         """Atomic suspended launch; temporary inheritance is globally serialized.
 
         Source role commands are fixed, not caller code. CLI roles still refuse.
@@ -706,6 +735,11 @@ class RoleHandles(RetainedJob):
             exact_path(path)
         if not 1 <= len(jobs) <= 2 or len(inheritance) > 3:
             raise ValueError("Invalid role handle count")
+        if bootstrap is not None:
+            checked = decode_bootstrap(encode_bootstrap(role, bootstrap, (1, 2, 3)))
+            if any(checked[name] != path for name, path in (
+                    ("application", application), ("cwd", cwd), ("source", source))):
+                raise ValueError("Bootstrap differs from fixed launch paths")
         a, api = self.a, self.api
         temporary, arrays, initialized = [], [], False
         attributes = None
@@ -735,9 +769,12 @@ class RoleHandles(RetainedJob):
                 if role in ("target", "canary"):
                     command = f'"{application}" -I -S -B -c "import time; time.sleep(60)"'
                 else:
-                    bootstrap = ",".join(str(handle) for handle in temporary)
+                    encoded = (encode_bootstrap(role, bootstrap, temporary) if bootstrap is not None
+                               else ",".join(str(handle) for handle in temporary))
                     command = (f'"{application}" -I -S -B "{source}" '
-                               f'--mode native-{role} --bootstrap {bootstrap}')
+                               f'--mode native-{role} --bootstrap {encoded}')
+                if len(command) >= 16384:
+                    raise ValueError("Fixed role command exceeds bound")
                 result = api.CreateProcessW(wide(a, application), wide(a, command), None, None,
                                             int(bool(temporary)), CREATE_FLAGS,
                                             wide(a, f"TEMP={cwd}\0TMP={cwd}\0TMPDIR={cwd}\0"),
@@ -749,7 +786,8 @@ class RoleHandles(RetainedJob):
                 thread = self.own(info.hThread, "thread")
                 return process, thread, tuple(temporary)
             except BaseException:
-                self.cleanup()
+                if not self.requires_accounted_cleanup:
+                    self.cleanup()
                 raise
             finally:
                 try:
@@ -763,7 +801,8 @@ class RoleHandles(RetainedJob):
                             except BaseException:  # noqa: BLE001 - fail closed after every close
                                 self.cleanup_errors.append("inheritance")
                     if self.cleanup_errors:
-                        self.cleanup()
+                        if not self.requires_accounted_cleanup:
+                            self.cleanup()
                         raise OSError("Temporary inheritance cleanup failed")
 
     def resume(self, thread):
@@ -917,7 +956,7 @@ class FixedChannel:
 
     def send(self, kind, tick, handle=0, pid=0, creation=0):
         fields = (kind, self.generation, self.sent + 1, tick, handle, pid, creation)
-        if (self.sent >= 16 or kind not in (1, 2, 3, 4)
+        if (self.sent >= 16 or kind not in range(1, 10)
                 or any(type(value) is not int or not 0 <= value < 2**63 for value in fields)):
             raise ValueError("Invalid bounded protocol frame")
         packet = WIRE.pack(*fields, self.digest)
@@ -930,11 +969,13 @@ class FixedChannel:
             raise ValueError("Partial protocol write")
         self.sent += 1
 
-    def receive(self, now):
+    def receive(self, now, allow_eof=False):
         a, api = self.owner.a, self.owner.api
         available = a.DWORD()
-        self.owner._ok(api.PeekNamedPipe(self.handle, None, 0, None,
-                                        a.c.byref(available), None), "PeekFrame")
+        peeked = api.PeekNamedPipe(self.handle, None, 0, None, a.c.byref(available), None)
+        if not peeked and allow_eof and api.last_error() == 109:
+            return None  # Only a closed writer, never malformed evidence.
+        self.owner._ok(peeked, "PeekFrame")
         if available.value > 16 * WIRE.size or self.received >= 16:
             raise ValueError("Protocol flood")
         if available.value < WIRE.size:
@@ -945,7 +986,7 @@ class FixedChannel:
         if read.value != WIRE.size:
             raise ValueError("Partial protocol read")
         kind, generation, sequence, tick, handle, pid, creation, digest = WIRE.unpack(buffer.raw)
-        if (kind not in (1, 2, 3, 4) or generation != self.generation or digest != self.digest
+        if (kind not in range(1, 10) or generation != self.generation or digest != self.digest
                 or sequence != self.received + 1 or not self.last_tick <= tick <= now):
             raise ValueError("Stale/forged/out-of-order protocol frame")
         self.last_tick, self.received = tick, sequence
@@ -1072,6 +1113,58 @@ SOURCE_FILES = (
 )
 
 
+def encode_bootstrap(role, record, handles):
+    """Fixed, bounded parent-created role bootstrap; never caller target code."""
+    if type(record) is not dict:
+        raise ValueError("Exact role bootstrap required")
+    value = dict(record)
+    value["role"], value["handles"] = role, list(handles)
+    raw = bounded_json(value, 8192)
+    encoded = raw.hex()
+    decode_bootstrap(encoded)
+    return encoded
+
+
+def decode_bootstrap(encoded):
+    # The raw argv string is bounded BEFORE decoding or parsing JSON.
+    if (type(encoded) is not str or not 2 <= len(encoded) <= 16384 or len(encoded) % 2
+            or any(ch not in "0123456789abcdef" for ch in encoded)):
+        raise ValueError("Invalid bounded role bootstrap encoding")
+    raw = bytes.fromhex(encoded)
+    try:
+        value = json.loads(raw)
+    except (ValueError, UnicodeError, RecursionError) as error:
+        raise ValueError("Invalid role bootstrap JSON") from error
+    if bounded_json(value, 8192) != raw:
+        raise ValueError("Noncanonical/duplicate bootstrap encoding")
+    if type(value) is not dict or set(value) != {
+            "role", "handles", "application", "cwd", "source", "generation", "case",
+            "config_sha256", "started_ns", "deadline_ns"}:
+        raise ValueError("Unexpected bootstrap fields")
+    if type(value["role"]) is not str or value["role"] not in ("controller", "observer"):
+        raise ValueError("Invalid independent role")
+    handles = value["handles"]
+    if (type(handles) is not list or len(handles) != 3
+            or any(type(handle) is not int or not 0 < handle < 2**63 for handle in handles)
+            or len(set(handles)) != 3):
+        raise ValueError("Exact three distinct inherited handles required")
+    for name in ("application", "cwd", "source"):
+        exact_path(value[name])
+    digest = value["config_sha256"]
+    if (type(digest) is not str or len(digest) != 64
+            or any(ch not in "0123456789abcdef" for ch in digest)
+            or type(value["case"]) is not str or value["case"] not in CASES
+            or type(value["generation"]) is not int or not 1 <= value["generation"] < 2**63
+            or any(type(value[name]) is not int for name in ("started_ns", "deadline_ns"))
+            or not 0 <= value["started_ns"] < value["deadline_ns"] < 2**63
+            or value["deadline_ns"] - value["started_ns"] != 30 * SECOND):
+        raise ValueError("Invalid bootstrap identity/deadline")
+    config = {name: value[name] for name in ("application", "cwd", "source", "generation", "case")}
+    if hashlib.sha256(bounded_json(config)).hexdigest() != digest:
+        raise ValueError("Bootstrap configuration hash mismatch")
+    return value
+
+
 def source_digest():
     root = Path(__file__).resolve().parents[2]
     values = {}
@@ -1168,8 +1261,442 @@ def pin_physical_launch(owner, grant, approved, config, inventory, source_root, 
     return artifacts
 
 
+class PreparedRole:
+    """One independently pollable role, constructed ONLY from its fixed bootstrap.
+
+    No supervisor or sibling object is available. The caller schedules this
+    role's steps, or runs its own loop via run(). All API calls remain injected.
+    Protocol kinds: 1 identity; 2 ACK/resume; 3 LIVE; 4 EXIT; 5 stop intent/ACK;
+    6 durable stop completion; 7 matched LIVE; 8 failure; 9 restart refusal.
+    Stop cases are fixed local test actions, not an interactive human-stop UI.
+    """
+
+    def __init__(self, encoded, api, clock, persist):
+        value = decode_bootstrap(encoded)  # Before any API call or ownership.
+        if type(api) is not StubApi or any(type(hook) is not FunctionType
+                                         for hook in (clock, persist)):
+            raise TypeError("SOURCE_ONLY: exact role API and hooks required")
+        self.value, self.clock, self.persist = value, clock, persist
+        self.owner = owner = RoleHandles(api)
+        self.last_tick = value["started_ns"]
+        self.failed = self.finished = False
+        self.live_tick = self.intent_tick = None
+        self.completion = None
+        self.sent_exit = self.sent_control = False
+        handles = value["handles"]
+        for handle in handles:
+            owner.own(handle, "inherited")
+
+        def channel(handle):
+            return FixedChannel(owner, handle, value["generation"], value["config_sha256"])
+
+        if value["role"] == "controller":
+            self.machine = QualificationController(
+                owner, handles[0], channel(handles[1]), channel(handles[2]),
+                value["application"], value["cwd"], value["source"], value["generation"],
+                value["config_sha256"])
+        else:
+            self.machine = QualificationObserver(
+                owner, channel(handles[0]), channel(handles[1]), channel(handles[2]),
+                value["application"], value["generation"], value["config_sha256"])
+
+    def now(self):
+        tick = self.clock()
+        if type(tick) is not int or not self.last_tick <= tick < 2**63:
+            raise ValueError("Role monotonic clock failure")
+        self.last_tick = tick
+        return tick
+
+    def frame(self, channel, kind, now):
+        machine = self.machine
+        handle = machine.remote if self.value["role"] == "controller" else machine.handle
+        channel.send(kind, now, handle, machine.identity.pid, machine.identity.creation_time)
+
+    def bound_frame(self, channel, now, allow_eof=False):
+        frame = channel.receive(now, allow_eof=allow_eof)
+        if frame is not None:
+            machine = self.machine
+            handle = machine.remote if self.value["role"] == "controller" else machine.handle
+            if frame[2:] != (handle, machine.identity.pid, machine.identity.creation_time):
+                raise ValueError("Role frame identity mismatch")
+        return frame
+
+    def controller_step(self, now):
+        machine, case = self.machine, self.value["case"]
+        if machine.process is None:
+            machine.prepare(now, self.persist)
+            if case == "suspended_stop":
+                machine.stop(self.persist)
+                self.failed = True
+            return
+        if machine.resumed_at is None:
+            machine.step(now)
+            return
+        if self.completion is not None:
+            return
+        if self.live_tick is None:
+            frame = self.bound_frame(machine.inbox, now)
+            if frame is not None:
+                if frame[0] != 3 or frame[1] < machine.resumed_at:
+                    raise ValueError("Expected independent post-resume LIVE acknowledgement")
+                self.live_tick = now  # Receiver clock, never controller-selected event time.
+            return
+        if case not in ("human_stop", "stop_persistence_failure", "same_instance_restart_refused"):
+            return
+        if self.intent_tick is None and now >= self.live_tick + SECOND:
+            self.frame(machine.outbox, 5, now)
+            self.intent_tick = now
+            return
+        if self.intent_tick is not None:
+            frame = self.bound_frame(machine.inbox, now)
+            if frame is None:
+                return
+            if frame[0] != 5 or frame[1] < self.intent_tick:
+                raise ValueError("Expected observer stop-intent acknowledgement")
+            durable = machine.stop(self.persist)
+            self.completion = 6 if durable else 8
+            if case == "same_instance_restart_refused" and durable:
+                try:
+                    machine.prepare(now, self.persist)
+                except ValueError:
+                    self.completion = 9
+                else:
+                    raise ValueError("Same-instance restart bypass")
+            self.frame(machine.outbox, self.completion, self.now())
+
+    def observer_step(self, now):
+        machine = self.machine
+        if machine.handle is None or not machine.resumed:
+            machine.step(now)
+            if machine.live:
+                self.live_tick = now
+                self.frame(machine.ackbox, 3, now)
+            elif machine.resumed:
+                raise ValueError("No post-resume observed LIVE")
+            return
+        if not self.failed:
+            try:
+                frame = self.bound_frame(machine.inbox, now, allow_eof=True)
+                if frame is not None:
+                    kind = frame[0]
+                    if kind == 5 and self.intent_tick is None and self.live_tick < now:
+                        self.intent_tick = now
+                        self.frame(machine.outbox, 5, now)
+                        self.frame(machine.ackbox, 5, now)
+                    elif kind in (6, 8, 9) and self.intent_tick is not None and self.completion is None:
+                        self.completion = kind
+                        self.frame(machine.outbox, kind, now)
+                    else:
+                        raise ValueError("Unexpected observer control frame")
+            except (OSError, ValueError):
+                self.failed = True
+                self.frame(machine.outbox, 8, now)
+        # Malformed/closed controller channels cannot suppress actual query
+        # evidence, but malformed input permanently prevents a passing verdict.
+        state = self.owner.state(machine.handle, machine.identity)
+        if state == "EXIT" and not self.sent_exit:
+            # Human cases need completion/persistence status as well as intent.
+            # On missing completion keep querying until the supervisor deadline.
+            if (self.intent_tick is None or self.completion is not None or self.failed):
+                self.frame(machine.outbox, 4, now)
+                self.sent_exit = True
+        elif (state == "LIVE" and self.value["case"] == "no_stop_control"
+              and not self.sent_control and now >= self.live_tick + 5 * SECOND):
+            self.frame(machine.outbox, 7, now)
+            self.sent_control = True
+
+    def steps(self):
+        """Cooperative test entry; no cross-role scheduling inside this loop."""
+        for _ in range(351):
+            now = self.now()
+            if now >= self.value["deadline_ns"] + 5 * SECOND:
+                break
+            if self.value["role"] == "observer":
+                self.observer_step(now)
+            elif not self.failed:
+                self.controller_step(now)
+            yield 100_000_000
+        self.finished = True
+
+    def run(self, pause):
+        """Own-role loop; a future process uses its own clock/wait, not a sibling."""
+        if type(pause) is not FunctionType:
+            raise TypeError("Exact role pause hook required")
+        try:
+            for delay in self.steps():
+                pause(delay)
+        finally:
+            self.owner.cleanup()
+
+
+class PreparedQualification:
+    """Strict launch + independent supervisor loop; injected APIs ONLY.
+
+    Unlike the legacy regression scheduler below, this object never constructs,
+    calls or reads a controller/observer object. Roles receive only immutable
+    bootstrap bytes and three exact inherited handles. Cleanup retains pins and
+    process handles on unconfirmed death, forbidding a subsequent case.
+    """
+
+    def __init__(self, grant, approved, config, inventory, physical, api_factory, clock):
+        self.digest = stub_admission(grant, approved, config, inventory)
+        if (type(physical) is not dict or set(physical) != {"source_root", "sources"}
+                or any(type(hook) is not FunctionType for hook in (api_factory, clock))):
+            raise ValueError("Mandatory strict pins and exact supervisor hooks required")
+        self.grant, self.approved = dict(grant), dict(approved)
+        self.config, self.inventory, self.physical = dict(config), inventory, physical
+        self.factory, self.clock = api_factory, clock
+        self.owner = self.artifacts = None
+        self.outer = None
+        self.roles, self.jobs = {}, []
+        self.evidence = BoundedEvidence()
+        self.used = False
+        self.last_tick = 0
+        self.live_tick = self.intervention = self.intent_receipt = None
+        self.live_observed_tick = None
+        self.expected = self.completion = None
+        self.protocol_valid = True
+        self.outcome = "UNKNOWN"
+        self.canary_live = self.cleaned = False
+
+    def now(self):
+        tick = self.clock()
+        if type(tick) is not int or not self.last_tick <= tick < 2**63:
+            raise ValueError("Supervisor monotonic clock failure")
+        self.last_tick = tick
+        return tick
+
+    def record(self, event, outcome="STUB"):
+        self.evidence.record("supervisor", event, self.config["generation"], self.now(), outcome)
+
+    def setup(self):
+        c = self.config
+        self.started = self.now()
+        self.deadline = self.started + 30 * SECOND
+        self.owner = sup = RoleHandles(self.factory("supervisor", None))
+        sup.requires_accounted_cleanup = True
+        self.artifacts = pin_physical_launch(
+            sup, self.grant, self.approved, c, self.inventory,
+            self.physical["source_root"], self.physical["sources"])
+        in_job = sup.a.c.c_int32()
+        sup._ok(sup.api.IsProcessInJob(sup.api.GetCurrentProcess(), None,
+                                      sup.a.c.byref(in_job)), "SupervisorJobCheck")
+        if in_job.value or self.now() >= self.deadline - SECOND:
+            raise ValueError("Unqualified supervisor job or overdue setup")
+        self.outer = outer = sup.job_limit(3, 640, 2000)
+        observer_job = sup.job_limit(1, 128, 2500)
+        canary_job = sup.job_limit(1, 128, 500)
+        self.jobs = [outer, observer_job, canary_job]
+        query_read, query_write = sup.pipe()
+        ack_read, ack_write = sup.pipe()
+        report_read, report_write = sup.pipe()
+        bootstrap = {**c, "config_sha256": self.digest, "started_ns": self.started,
+                     "deadline_ns": self.deadline}
+        for role in ("observer", "canary", "controller"):
+            jobs = ((outer, observer_job) if role == "observer" else
+                    (canary_job,) if role == "canary" else (outer,))
+            inheritance = (((query_read, 0), (ack_write, 0), (report_write, 0))
+                           if role == "observer" else () if role == "canary" else
+                           ((self.roles["observer"][0], 0x40), (query_write, 0), (ack_read, 0)))
+            process, thread, _ = sup.launch(
+                role, c["application"], c["cwd"], c["source"], jobs, inheritance,
+                bootstrap if role != "canary" else None)
+            identity = sup._identity(process, c["generation"], self.digest)
+            self.roles[role] = (process, thread, identity)
+            if sup.state(process, identity) != "LIVE" or self.now() >= self.deadline - SECOND:
+                raise ValueError("Created role identity or setup deadline failure")
+        self.reports = FixedChannel(sup, report_read, c["generation"], self.digest)
+        for handle in (query_read, query_write, ack_read, ack_write, report_write):
+            sup.release(handle)
+        for _, thread, _ in self.roles.values():
+            if self.now() >= self.deadline - SECOND:
+                raise ValueError("Role resume deadline exceeded")
+            sup.resume(thread)
+        self.record("roles_started")
+
+    def canary_state(self):
+        process, _, identity = self.roles["canary"]
+        return self.owner.state(process, identity) == "LIVE"
+
+    def accept_frame(self, frame, now):
+        kind, tick, handle, pid, creation = frame
+        identity = (handle, pid, creation)
+        if not self.started <= tick <= now <= self.deadline + 5 * SECOND:
+            raise ValueError("Observer report outside admitted case time")
+        if kind == 3 and self.live_tick is None and all(identity) and now < self.deadline:
+            self.live_tick, self.expected = now, identity  # Supervisor receipt time.
+            self.live_observed_tick = tick
+            self.record("live_report_received")
+            return False
+        if identity != self.expected or self.live_tick is None:
+            raise ValueError("Unbound observer result")
+        if kind == 8:
+            self.protocol_valid = False
+            self.record("role_failure", "UNKNOWN")
+        elif (kind == 5 and self.intent_receipt is None and self.live_tick < now
+              and self.config["case"] in ("human_stop", "stop_persistence_failure",
+                                          "same_instance_restart_refused")):
+            self.intent_receipt = now
+            self.intervention = now
+            self.record("stop_intent_received")
+        elif (kind in (6, 9) and self.intent_receipt is not None and self.completion is None
+              and (kind != 9 or self.config["case"] == "same_instance_restart_refused")):
+            self.completion = kind
+            self.record("stop_completion_received")
+        elif kind == 4:
+            self.record("observed_exit_report")
+            self.canary_live = self.canary_state()
+            human = self.config["case"] in (
+                "human_stop", "stop_persistence_failure", "same_instance_restart_refused")
+            completed = (self.completion == (9 if self.config["case"] ==
+                         "same_instance_restart_refused" else 6)) if human else True
+            if (self.protocol_valid and completed and self.intervention is not None
+                    and self.live_tick < self.intervention <= tick <= now
+                    and now <= self.intervention + 4 * SECOND
+                    and now < self.started + 60 * SECOND and self.canary_live):
+                self.outcome = "STUB_EARLY_PRIMARY_EXIT"
+            return True
+        elif (kind == 7 and self.config["case"] == "no_stop_control"
+              and tick >= self.live_observed_tick + 5 * SECOND and self.intervention is None):
+            self.canary_live = self.canary_state()
+            if self.protocol_valid and self.canary_live:
+                self.outcome = "STUB_MATCHED_LIVE_CONTROL"
+            return True
+        else:
+            raise ValueError("Unexpected observer report order")
+        return False
+
+    def intervene(self, now):
+        case = self.config["case"]
+        if self.live_tick is not None and now >= self.live_tick + SECOND:
+            if case == "controller_crash" and self.intervention is None:
+                self.owner.terminate(self.roles["controller"][0])
+                self.intervention = self.now()
+                self.record("controller_crash_dispatched")
+            elif case == "observer_loss":
+                self.owner.terminate(self.roles["observer"][0])
+                self.record("observer_loss", "UNKNOWN")
+                return True
+            elif case == "supervisor_loss":
+                self.record("supervisor_loss", "UNKNOWN")
+                return True  # Cleanup models supervisor-table loss, not a receipt.
+        if now >= self.deadline - SECOND and self.intervention is None:
+            self.owner.terminate(self.roles["controller"][0])
+            self.intervention = self.now()
+            self.protocol_valid &= self.intervention <= self.deadline
+            self.record("deadline_intervention")
+        return self.intervention is not None and now > self.intervention + 4 * SECOND
+
+    def steps(self):
+        if self.used:
+            raise ValueError("One-shot prepared qualification cannot restart")
+        self.used = True
+        try:
+            self.setup()
+            for _ in range(351):
+                now = self.now()
+                if now > self.deadline + 5 * SECOND:
+                    break
+                frame = self.reports.receive(now)
+                if frame is not None and self.accept_frame(frame, now):
+                    break
+                if self.intervene(self.now()):
+                    break
+                yield 100_000_000
+        except (OSError, ValueError, PermissionError):
+            self.outcome = "UNKNOWN"
+            self.evidence.record("supervisor", "case_error", self.config["generation"],
+                                 self.last_tick, "UNKNOWN")
+        finally:
+            if self.owner is not None:
+                yield from self.cleanup_steps()
+                if not self.cleaned or not self.protocol_valid:
+                    self.outcome = "UNKNOWN"
+        return {"status": "STUB_ONLY", "case": self.config["case"], "outcome": self.outcome,
+                "launch_pins": "HELD_STUB_OBJECTS" if self.artifacts else "REFUSED",
+                "restart_safety": "UNQUALIFIED", "owned_stub_cleanup": self.cleaned,
+                "canary_live_before_cleanup": self.canary_live,
+                "cleanup_responsibility_retained": not self.cleaned,
+                "evidence": self.evidence.finish(), "evidence_bytes": self.evidence.bytes_written}
+
+    def cleanup_steps(self):
+        sup = self.owner
+        failed = bool(sup.cleanup_errors)
+        # Keep the outer job handle for accounting. Last-close dispatch alone
+        # cannot prove target death after the observer has been lost.
+        if self.outer is not None and (self.outer, "job") in sup.owned:
+            try:
+                sup.terminate_outer(self.outer)
+            except (OSError, ValueError):
+                failed = True
+        for process, kind in sup.owned[:]:
+            if kind == "process":
+                try:
+                    state = sup.api.WaitForSingleObject(process, 0)
+                    if state == WAIT_TIMEOUT:
+                        sup.terminate(process)  # Canary/partial-start exact owned cleanup only.
+                    elif state != WAIT_OBJECT_0:
+                        failed = True
+                except (OSError, ValueError):
+                    failed = True
+        for _ in range(51):
+            try:
+                signaled = all(sup.api.WaitForSingleObject(process, 0) == WAIT_OBJECT_0
+                               for process, kind in sup.owned if kind == "process")
+                if signaled:
+                    # Accounting may retain terminated members until process
+                    # references close. Preserve job + artifact handles while
+                    # releasing only confirmed-dead process/thread references.
+                    for handle, kind in sup.owned[:]:
+                        if kind in ("process", "thread"):
+                            sup.release(handle)
+                    empty = all(sup.active_processes(job) == 0
+                                for job, kind in sup.owned if kind == "job")
+                    if empty and not failed:
+                        self.record("owned_jobs_empty")
+                        # Stop on closure failure before touching remaining pins.
+                        for handle, _ in sorted(sup.owned[:], key=lambda entry: entry[1] == "artifact"):
+                            sup.release(handle)
+                        self.cleaned = not sup.owned and not sup.cleanup_errors
+                        break
+            except (OSError, ValueError):
+                failed = True
+            if failed or self.now() >= self.deadline + 5 * SECOND:
+                break
+            yield 100_000_000
+        if failed:
+            self.protocol_valid = False
+
+    def run(self, pause):
+        if type(pause) is not FunctionType:
+            raise TypeError("Exact supervisor pause hook required")
+        steps = self.steps()
+        while True:
+            try:
+                delay = next(steps)
+            except StopIteration as result:
+                return result.value
+            pause(delay)
+
+
+def run_serial_prepared(cases, pause):
+    """Bounded selected batch; never admit another case after unresolved cleanup."""
+    if (type(cases) is not tuple or not 1 <= len(cases) <= 10
+            or any(type(case) is not PreparedQualification or case.used for case in cases)
+            or len({case.config["case"] for case in cases}) != len(cases)
+            or type(pause) is not FunctionType):
+        raise ValueError("At most ten distinct fresh prepared cases required")
+    results = []
+    for case in cases:
+        result = case.run(pause)
+        results.append(result)
+        if result["cleanup_responsibility_retained"]:
+            break
+    return tuple(results)
+
+
 class StubQualification:
-    """One connected five-role qualification path, solely injected process tables.
+    """Legacy synchronous regression fixture, solely injected process tables.
 
     The controller/observer state machines prepare a future process split, but
     this scheduler is an in-process STUB. Native bootstrap, artifact locking and

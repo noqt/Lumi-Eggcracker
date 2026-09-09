@@ -4,11 +4,12 @@
   "scope_split": "backend_preparation and windows_job_probe.py describe the separate source-only fixed CPython sleeper qualification proposal (outer 640MiB, target 256MiB, 30s plus 5s). Other top-level VM creation/recovery/judge/resources/gates describe the older mocked QEMU design (2GiB guest,3GiB job,15 minutes), not sleeper authority or implemented restart safety. For the sleeper, observer is outside target inner job but inside supervisor outer job.",
   "backend_preparation": {
     "status": "SOURCE_AND_STUB_TESTS_ONLY",
-    "implemented_internal": "Guarded lazy Win64 binder, exact injected ABI table, retained-handle role primitives, connected five-role stub scheduler, bounded generation/identity protocol, selected runtime inventory, source/config/runtime STUB approval, exact cleanup and hash-bound proposal. Existing MockKernel, Controller and admission code unchanged.",
+    "implemented_internal": "Guarded lazy Win64 binder, exact injected ABI table, retained-handle role primitives, mandatory strict pin admission, fixed bounded bootstrap/loader and separate controller/observer/supervisor polling loops exercised through injected stubs. Supervisor uses only observer reports, exact retained handles and its own clock. Legacy synchronous scheduler retained for regression. Existing MockKernel, Controller and admission code unchanged.",
     "refusal": "Native factory and every native CLI role refuse unconditionally. No native process/job call, child launch, termination, firmware or VM execution is released.",
     "stub_limits": "Outer controller/target/observer job:3 processes,640MiB,20% CPU. Inner target:1,256MiB,50% of parent. Observer subjob:1,128MiB,25% of parent. Outside canary:1,128MiB,5% system. Fixed API arguments and fake semantics, not native enforcement.",
+    "prepared_cleanup": "Terminate only the exact retained supervisor outer job, separately dispose of exact created role/canary processes, observe their handles signaled and close those process/thread references while retaining jobs and pins. Query fixed48-byte BasicAccountingInformation for every retained owned job including partial setup. ActiveProcesses=0 required before job/pin release. Failed/ambiguous/nonzero results retain UNKNOWN, remaining jobs/pins and cleanup responsibility. The serial driver admits at most10 distinct fresh cases and never starts another after unresolved cleanup. No named-job lookup, PID scan/reopen or native API execution.",
     "not_implemented": [
-      "executable native role bootstrap and independently scheduled supervisor",
+      "released native wiring and independently scheduled OS processes (prepared loops/entry are injected-only)",
       "native use/qualification of prepared held-file physical source/runtime pins",
       "actual native job, inheritance and handle transfer qualification",
       "Windows system-DLL inventory or accepted trusted-OS baseline",
@@ -23,16 +24,21 @@
       "pipes": 3,
       "total_evidence_bytes": 65536,
       "pipe_buffer_reservation_bytes": 12288,
+      "bootstrap_wire_reservation_bytes": 32768,
+      "scheduled_deadline_intervention_seconds": 29,
+      "actual_intervention_latest_seconds": 30,
+      "cleanup_latest_case_seconds": 35,
       "sequence": [
         "suspended identity",
         "observer acknowledgement",
         "controller resume",
         "resume notification",
-        "observed LIVE",
-        "intervention",
+        "observed LIVE and controller acknowledgement",
+        "fixed local stop intent and observer acknowledgement (or supervisor crash/deadline intervention)",
+        "stop completion/persistence status for local stop cases",
         "observed EXIT"
       ],
-      "claim": "Early primary exit after intervention only; temporal order is not proof of causation. No whole-job-empty or native stop receipt."
+      "claim": "Early primary exit after intervention only; receiver-side timing and actual observer queries, not proof of causation. Malformed control remains UNKNOWN while genuine exit evidence may survive. No whole-job-empty or native stop receipt. Cleanup retains exact handles and pins on unconfirmed process death; unresolved roles prohibit subsequent cases."
     }
   },
   "claim": "Inert design of trusted-host emergency termination of one controller-created VM primary process and managed restart inhibition.",
