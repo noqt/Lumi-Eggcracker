@@ -47,9 +47,12 @@ class HumanOverrideLabTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "experiment"
             stream = io.StringIO()
-            with patch.object(sys, "argv", [str(LAB), "--output", str(output)]):
-                with contextlib.redirect_stdout(stream), self.assertRaises(SystemExit) as exit_status:
-                    runpy.run_path(str(LAB), run_name="__main__")
+            with (
+                patch.object(sys, "argv", [str(LAB), "--output", str(output)]),
+                contextlib.redirect_stdout(stream),
+                self.assertRaises(SystemExit) as exit_status,
+            ):
+                runpy.run_path(str(LAB), run_name="__main__")
             self.assertEqual(exit_status.exception.code, 0)
             result = json.loads((output / "result.json").read_text())
             self.assertEqual(result["result"], "PASS")
@@ -272,9 +275,12 @@ class HumanOverrideLabTests(unittest.TestCase):
 
     def test_cli_refuses_existing_output_without_overwrite(self):
         stream = io.StringIO()
-        with patch.object(sys, "argv", [str(LAB), "--output", self.directory.name]):
-            with contextlib.redirect_stderr(stream), self.assertRaises(SystemExit) as status:
-                runpy.run_path(str(LAB), run_name="__main__")
+        with (
+            patch.object(sys, "argv", [str(LAB), "--output", self.directory.name]),
+            contextlib.redirect_stderr(stream),
+            self.assertRaises(SystemExit) as status,
+        ):
+            runpy.run_path(str(LAB), run_name="__main__")
         self.assertEqual(status.exception.code, 2)
         self.assertTrue(self.path.is_file())
 
