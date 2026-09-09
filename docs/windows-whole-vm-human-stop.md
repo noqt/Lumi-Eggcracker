@@ -73,122 +73,148 @@ unchanged and does not gate this human-stop investigation.
 
 ## Source-only Windows x64 backend preparation
 
-`windows_job_backend.py` adds lazy ctypes data layouts and API signature metadata
-bound **only to injected Python functions**. There is no DLL loader or executable
-native binding. Imports do not even construct the layouts. `native_backend()`
-always refuses; the CLI's three native roles also always refuse. This is
-`IMPLEMENTED_INTERNAL` stub preparation, not a qualified native adapter.
+The backend now contains a lazy Win64 binder body behind unconditional refusal.
+Imports do not load a DLL or construct an API table. NativeApi construction,
+native_backend and all three native CLI roles refuse before native loading.
+Only exact injected Python-function tables enter the source/stub adapter.
 
 ```text
 python -B experiments/human_override/windows_job_probe.py
 python -B -m unittest discover -s tests -p test_windows_job_backend.py -v
 ```
 
-The default CLI prints a proposal with SHA-256 hashes of all five current source
-files. It launches nothing and writes no result file. The tests call Python fakes
-and exercise Windows x64 layouts on a 64-bit interpreter. They do not validate
-Windows API availability or enforcement. Fixed-width DWORD/BOOL/UTF-16 and
-pointer-sized HANDLE/SIZE_T avoid host-dependent `c_long`/`c_wchar` widths.
-The selected structures are naturally aligned, not packed; x86 is refused.
+The default CLI prints the current five-file hashes and a harmless-process
+proposal. It launches nothing and writes no file. The original RetainedJob
+primitive and accepted MockKernel/Controller admission implementation are
+preserved. Windows x64 layouts use fixed-width DWORD/BOOL/UTF-16 and pointer-sized
+HANDLE/SIZE_T; no packed or x86 fallback exists.
 
-The one-shot adapter prepares an unnamed job with kill-on-close, one active
-process, a 256 MiB committed-memory limit and a 10% CPU hard cap. These are
-**stubbed API arguments**, not observed resource enforcement. Creation uses an
-explicit application, mutable UTF-16 command/environment, no inherited handles,
-no console, and suspended atomic JOB_LIST assignment. Unsupported creation or
-limit setup fails closed. No running/unassigned fallback exists. The only child
-command represented is isolated-mode Python sleeping for 60 seconds; that child
-program requests only sleep. OS/interpreter startup still loads runtime files;
-`-I -S -B` is not a sandbox or a promise of zero startup access.
-Its chosen executable is not yet hash-admitted
-by this adapter: path/configuration syntax checks are not provenance checks.
+### Connected source/stub path
 
-Both returned process/thread handles are retained before identity checks. A
-creation FILETIME, returned PID, exact image path, generation and configuration
-digest are persisted before resume through a trusted injected persistence hook.
-The hook is not native durable storage. A stop sets the latch first, persists,
-then validates and terminates only the same retained process handle; persistence
-failure still attempts dispatch but returns durability unconfirmed. Job close
-is attempted before other owned handles; failures remain UNKNOWN and all other
-closes are attempted. Successfully closed handles are never closed twice.
-Injected close interruptions are retained as cleanup failures without aborting
-the remaining closes or masking the original startup failure. UNKNOWN remains
-sticky after an earlier cleanup failure, even if a later retry closes the handle.
+RoleHandles prepares explicit suspended JOB_LIST creation, serialized temporary
+HANDLE_LIST inheritance, exact query-only duplication, fixed resource arguments,
+and retained-handle cleanup. StubQualification connects controller, observer and
+supervisor state machines using three fixed-frame pipe stubs and separate
+synthetic handle tables. Target and canary are only fake processes. This is
+IMPLEMENTED_INTERNAL source/stub logic, not independently scheduled OS roles.
 
-The local query duplicate has only QUERY_LIMITED_INFORMATION and SYNCHRONIZE,
-is non-inheritable and remains owned by the adapter. Observation holds the same
-lock as close to avoid numeric-handle reuse during queries. It requires matching
-identity, prior liveness and a signaled process plus successful exit-code query.
-This is an in-process stub observer, **not the independent native judge**. It
-does not feed the accepted mock admission controller or authorize native reset.
-The existing `MockKernel`, `Controller` and admission logic remain unchanged.
+The supervisor owns an outer kill-on-close job containing controller, target and
+observer: three processes, 640 MiB committed memory, proposed 20% CPU hard cap.
+It creates the observer first, with a separate nested one-process 128 MiB job.
+The controller solely owns the target inner job: one process, 256 MiB, proposed
+50% of the parent's CPU allowance (intended 10% system). The observer rate is
+25% of the parent (intended 5% system). The outside canary has its own one-process
+128 MiB job and proposed 5% system CPU cap. All outer jobs belong only to the
+supervisor; no job handle is inherited. No compatible host-job assumption or
+breakaway fallback is permitted: a preexisting supervisor job refuses setup.
 
-### Next harmless-process proposal, not executable authority
+These are stubbed arguments and arithmetic, not observed native enforcement.
+Actual parent/JOB_LIST nesting, active-process counts, committed-memory/CPU
+limits, last-handle closure and inheritance need native qualification.
+Committed memory is not resident memory or a disk quota. The supervisor remains
+outside these jobs, with unbounded-by-job memory and an explicit availability
+dependency. At most five roles including supervisor and ten serial cases are
+proposed; unresolved live native roles must block the next case.
 
-Before a VM, propose the pinned portable CPython 3.12.10 Windows x64 executable
-(SHA-256 `6461fe8dc13c642302f591c0c1c16b220629f7a336f74ce88aa2cdd31c43e62a`)
-running only `import time; time.sleep(60)` with `-I -S -B`. The exact local
-executable, dependent runtime files and fresh F/G paths must be separately
-recorded, held against change and reviewed. The CLI binds this proposal to the
-current five-file source hashes; those hashes alone do not grant execution.
+Supervisor launches fixed observer/controller source commands with only selected
+inherited handles. Controller receives PROCESS_DUP_HANDLE to the observer plus
+two protocol endpoints. It duplicates only QUERY_LIMITED_INFORMATION and
+SYNCHRONIZE target rights directly into the observer, then immediately closes its
+observer-process capability. The returned numeric handle belongs exclusively to
+the observer, never the controller. A lost notification is cleaned by ending the
+exact observer role, which closes its table, not by guessing a remote handle.
+The target and canary inherit nothing.
 
-A separate supervisor would retain the controller handle from its own creation
-call and enforce a 30-second deadline starting before controller creation. On
-the scoped crash/hang case it would terminate only that exact controller,
-causing the target job's last handle to close. This deadline is **not implemented**;
-a sleeping target and a controller-local timer are not independent enforcement.
-Supervisor loss and any unconfirmed cleanup must remain explicit residual gaps.
+PROCESS_DUP_HANDLE is substantial authority. Independence here means fault
+separation among trusted reviewed roles, not resistance to a malicious controller
+or compromised host. A target/guest never receives that authority. Original
+unused pipe ends and temporary inheritable copies close on success/failure;
+temporary copies exist only inside the process-creation lock.
 
-A separately created observer outside the target job would receive only a
-query/synchronize target duplicate through an explicit HANDLE_LIST. The observer
-launch needs inheritance enabled for that precise list; the target launch does
-not. Never inherit the job or a terminate handle. Observer ownership transfer,
-its pre-liveness handshake, bounded result channel and shutdown are not yet
-implemented. No process handle is reopened by PID, name or a saved numeric value.
-The temporary inheritable copy must close after confirmed transfer and on launch
-failure, with concurrent launches excluded while it exists. The observer must
-acknowledge its suspended-target identity before resume, then actual liveness
-before any measured intervention; handshake failure aborts the launch.
+The 88-byte protocol binds generation, configuration digest, sequence, trusted
+monotonic tick, observer-local target handle, PID and creation FILETIME.
+Suspended identity must be acknowledged before controller resume; a resume
+notification precedes the observer's real stub-handle LIVE query. Only a later
+signaled handle plus exit-code query can supply EXIT. No controller assertion is
+an observer result. An already-bound exclusively retained handle is not reopened
+or reidentified by image after exit. Missing/stale/out-of-order/partial/oversized
+evidence fails or remains UNKNOWN; no PID/name scan exists.
 
-The future contract must separately bound controller, supervisor, observer and
-outside-canary resources and cleanup, including permission to terminate only
-those exact created roles. Fixed-count trusted evidence writes totaling at most
-64 KiB per case are proposed. The fixed sleep has no output or file-writing
-code; this is not an OS disk quota, an adversarial sandbox, or a VM disk solution.
-Missing observer evidence stays UNKNOWN; do not claim primary exit proves a
-whole job empty. Test actual job constraints before allowing that inference.
+The case deadline starts before any role creation. Stub scheduling separates
+controller crash/hang decisions from the supervisor's 30-second clock.
+Intervention follows the live handshake by one second; early exit must be observed
+within four seconds, before the fixed 60-second natural lifetime. A matched
+no-stop control stays live for five seconds before separate cleanup. Natural or
+pre-intervention exits do not qualify. Supervisor loss closes its modeled job
+ownership, potentially losing observer and canary: the result is UNKNOWN.
 
-The concrete proposal selects at most ten serial cases and five simultaneous
-roles including the supervisor. The controller's outer job would allow two
-processes and 512 MiB committed memory including the nested target; observer and
-canary jobs each allow one process and 128 MiB. Observer/canary CPU caps would be
-5% each. No parent CPU rate is selected for the controller job so the inner
-target's 10% setting is not silently multiplied by a parent rate. Each outer job
-is unnamed, non-inheritable, kill-on-last-close, and owned only by the supervisor;
-the distinct inner target job is owned only by the controller. This proposed
-nested-job containment is unimplemented and needs actual capability checks.
+Each pipe permits at most 16 fixed frames. Evidence permits at most 128
+fixed-schema records; fields/counts are bounded before JSON serialization and
+validated again at finalization. Three 4 KiB pipe buffers are reserved inside the
+combined 64 KiB case evidence limit. Writers belong only to expendable
+controller/observer roles; supervisor reads a complete available frame after
+PeekNamedPipe. Synchronous writes may stall and need the genuinely independent
+native supervisor. The stub scheduler does not establish real pipe latency.
+Cleanup uses only exact owned handles, retains failed closures, attempts every
+remaining close and never treats dispatch as exit. The 30+5 second windows are
+acceptance targets, not OS scheduling guarantees.
 
-The supervisor would retain minimal termination/synchronization handles to its
-exact created observer and canary for cleanup, in addition to its controller
-handle. It holds no inner target-job handle. Allow at most five seconds for
-bounded cleanup after the 30-second case deadline; never abandon live roles
-silently. Supervisor memory and OS job-termination scheduling latency are not
-hard bounded by this proposal. If outer job close after supervisor loss does not
-establish target/role exit, report UNKNOWN; no broad cleanup scan is permitted.
+Restart safety is UNQUALIFIED in this new harness. Same-instance retry refusal
+does not prove durable inhibition across a controller restart. The separately
+accepted persistent mock controller retains its own narrower evidence; that
+property does not transfer to this adapter. No native reset is implemented.
+The case is explicitly named same_instance_restart_refused.
 
-The child sleep was changed from 20 to 60 seconds during source review because
-natural exit at 20 seconds would confound a 30-second deadline test. Human stop
-and controller crash would occur one second after the live handshake and require
-exit evidence within four seconds. A matched no-stop case must stay live for
-five seconds before separate planned cleanup. The hang case requires independent
-deadline intervention by 30 seconds and evidence within four seconds, clearly
-before the child's natural sleep completion. Missing/late evidence is UNKNOWN,
-not successful kill-on-close. No timing or native test has run.
+### Runtime inventory and remaining native preparation
 
-Execution still requires a separate exact Chair grant and direct Risk/technical
-acceptance after native binding, role separation, hash admission, deadline and
-bounded logging are implemented and reviewed. No native qualification, Linux
-boot, adaptive opponent, E4 completion or Windows efficacy follows here.
+The selected future target/canary command is the existing pinned portable
+CPython 3.12.10 x64 executable (SHA-256
+6461fe8dc13c642302f591c0c1c16b220629f7a336f74ce88aa2cdd31c43e62a)
+with fixed -I -S -B and import time; time.sleep(60). No caller code or target
+arguments are admitted. OS/interpreter startup still accesses runtime files:
+these flags are not a sandbox.
+
+The inventory helper bounds selected files, byte totals, directory count, name
+bytes and entry count; rejects reparse/alias escapes; hashes selected bytes and
+records directory entry names/types. Persisted JSON round-trips and changed,
+missing or additional selected-directory entries are checked. Source/config/
+runtime hashes must match a separately trusted STUB_ONLY approval before any
+stub API call. Synthetic application aliases are only for stub fixtures.
+
+This inventory is NOT proof of complete dependency closure or launch-time
+identity. Pathname checks do not close TOCTOU windows. It explicitly records
+path_handles_held=false and system_dlls_verified=false. System DLLs are outside
+this selected portable-runtime inventory and require an explicit trusted-OS
+baseline decision; no whole-host/credential audit is implied.
+
+The optional strict stub path links application to inventory-root/python.exe
+and the script to the exact five-file source pin set, with no alias fallback.
+HeldArtifacts then prepares read handles denying write/delete sharing, retains
+ancestor handles, rejects reparse/final-path substitution and rechecks held
+volume/file index, size, write time and streaming SHA. Acquisition precedes any
+job or pipe creation. The connected fixture uses virtual file objects and
+reports HELD_STUB_OBJECTS, not observed physical Windows file locks. Alias-only
+fixtures explicitly report SYNTHETIC_ALIASES. Native release must require the
+strict path; the optional alias branch is never native authority.
+
+The hashed read handle is at EOF and serves as an identity lock; CreateProcess
+and Python would reopen the bound path. Denied write/delete sharing and retained
+ancestors preserve the selected objects, not import/dependency closure. Directory
+handles do not prevent adding child entries. Python bytecode-cache reads and OS
+DLL resolution still require the accepted runtime-loading baseline.
+
+Before any native execution release, finish and statically review fixed role
+bootstrap/dispatch, integration of the prepared held-file admission and
+independently scheduled supervisor execution. Bind exact local paths, files,
+host/account and source hashes; obtain direct Risk and fresh technical acceptance
+plus a separate exact Chair grant. Native creation/limits/ownership/cleanup then
+need their own originating qualification. This preparation is not VM boot,
+firmware acceptance, adaptive-opponent evidence, Windows efficacy or E4 completion.
+Implementation/static acceptance and a bounded test contract precede the first
+authorised native qualification run; observed native behavior is an outcome of
+that run, required before efficacy or expanded-use claims, not a circular
+prerequisite to the first qualification call. The older top-level QEMU contract
+is a distinct mocked plan and cannot grant sleeper execution or restart safety.
 
 ### Primary ABI/design references
 

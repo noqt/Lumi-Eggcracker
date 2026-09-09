@@ -1,20 +1,67 @@
 {
   "schema": "windows-vm-design.v1",
   "status": "MOCK_ONLY_NO_NATIVE_ADAPTER",
+  "scope_split": "backend_preparation and windows_job_probe.py describe the separate source-only fixed CPython sleeper qualification proposal (outer 640MiB, target 256MiB, 30s plus 5s). Other top-level VM creation/recovery/judge/resources/gates describe the older mocked QEMU design (2GiB guest,3GiB job,15 minutes), not sleeper authority or implemented restart safety. For the sleeper, observer is outside target inner job but inside supervisor outer job.",
   "backend_preparation": {
     "status": "SOURCE_AND_STUB_TESTS_ONLY",
-    "implemented_internal": "Lazy Windows x64 ctypes layouts, API signature metadata bound only to injected Python functions, one-shot retained-handle job adapter, local query observer and hash-bound proposal CLI. No DLL loader or executable native binding is present. Existing MockKernel, Controller and admission code are unchanged.",
+    "implemented_internal": "Guarded lazy Win64 binder, exact injected ABI table, retained-handle role primitives, connected five-role stub scheduler, bounded generation/identity protocol, selected runtime inventory, source/config/runtime STUB approval, exact cleanup and hash-bound proposal. Existing MockKernel, Controller and admission code unchanged.",
     "refusal": "Native factory and every native CLI role refuse unconditionally. No native process/job call, child launch, termination, firmware or VM execution is released.",
-    "stub_limits": "256 MiB whole-job committed memory; active-process limit one; no breakaway; 10% CPU hard cap expressed as API arguments only. No native enforcement evidence.",
-    "not_implemented": ["native DLL binding and OS execution", "hash-locked executable/dependency admission", "separate controller/supervisor/query-only observer processes", "native handle transfer", "independent 30-second deadline", "bounded native evidence output", "admission integration", "VM disk quota or boot"],
+    "stub_limits": "Outer controller/target/observer job:3 processes,640MiB,20% CPU. Inner target:1,256MiB,50% of parent. Observer subjob:1,128MiB,25% of parent. Outside canary:1,128MiB,5% system. Fixed API arguments and fake semantics, not native enforcement.",
+    "not_implemented": [
+      "executable native role bootstrap and independently scheduled supervisor",
+      "native use/qualification of prepared held-file physical source/runtime pins",
+      "actual native job, inheritance and handle transfer qualification",
+      "Windows system-DLL inventory or accepted trusted-OS baseline",
+      "durable restart admission integration for this harness",
+      "VM disk quota or boot"
+    ],
     "next_contract": "Run windows_job_probe.py in default plan mode to obtain the five current source hashes and the harmless-process proposal. It is not an execution command or approval.",
-    "trust": "Injected functions and persistence hooks are trusted test code, not a security sandbox. Syntactically valid F/G paths and configuration digests are not artifact pin verification. QueryObserver is in-process and its handle remains owned by RetainedJob; locking serializes observation against close."
+    "trust": "Only exact injected Python API functions. The lazy NativeApi constructor and native CLI roles unconditionally refuse. Synthetic path aliases are not native artifact linkage. Separate fake tables do not prove independent OS scheduling. PROCESS_DUP_HANDLE is substantial authority, closed after query transfer; trusted-role fault separation, not malicious-controller isolation. Restart safety UNQUALIFIED.",
+    "connected_stub_protocol": {
+      "frame_bytes": 88,
+      "frames_per_pipe": 16,
+      "pipes": 3,
+      "total_evidence_bytes": 65536,
+      "pipe_buffer_reservation_bytes": 12288,
+      "sequence": [
+        "suspended identity",
+        "observer acknowledgement",
+        "controller resume",
+        "resume notification",
+        "observed LIVE",
+        "intervention",
+        "observed EXIT"
+      ],
+      "claim": "Early primary exit after intervention only; temporal order is not proof of causation. No whole-job-empty or native stop receipt."
+    }
   },
   "claim": "Inert design of trusted-host emergency termination of one controller-created VM primary process and managed restart inhibition.",
   "authority": "No native Windows process/job calls, overlay, guest, QEMU startup, NIC, host share, QMP or termination is implemented or permitted by this contract.",
-  "intended_native_creation": ["durable START_INTENT", "unnamed kill-on-last-job-handle-close job", "CreateProcessW explicit application, no inherited handles, CREATE_SUSPENDED and atomic PROC_THREAD_ATTRIBUTE_JOB_LIST", "verify and persist retained process identity", "resume only if no stop latch", "persist RUNNING"],
-  "intended_native_stop": ["validate human scope, generation, epoch and replay counter", "persist STOP_REQUESTED latch", "on persistence failure still attempt emergency termination on already retained exact target, report durability unconfirmed", "TerminateProcess on same validated retained handle", "independent judge observes signaled query-only process handle"],
-  "identity": ["allocation", "generation", "instance UUID", "creation FILETIME", "PID", "normalized exact image path", "pinned artifact hashes", "configuration hash"],
+  "intended_native_creation": [
+    "durable START_INTENT",
+    "unnamed kill-on-last-job-handle-close job",
+    "CreateProcessW explicit application, no inherited handles, CREATE_SUSPENDED and atomic PROC_THREAD_ATTRIBUTE_JOB_LIST",
+    "verify and persist retained process identity",
+    "resume only if no stop latch",
+    "persist RUNNING"
+  ],
+  "intended_native_stop": [
+    "validate human scope, generation, epoch and replay counter",
+    "persist STOP_REQUESTED latch",
+    "on persistence failure still attempt emergency termination on already retained exact target, report durability unconfirmed",
+    "TerminateProcess on same validated retained handle",
+    "independent judge observes signaled query-only process handle"
+  ],
+  "identity": [
+    "allocation",
+    "generation",
+    "instance UUID",
+    "creation FILETIME",
+    "PID",
+    "normalized exact image path",
+    "pinned artifact hashes",
+    "configuration hash"
+  ],
   "recovery": "Never reopen by PID/name. Controller crash intentionally stops the job. Reload always inhibits admission. Missing judge handle or evidence remains UNKNOWN. Human reset plus new approval and separate explicit start required.",
   "judge": "Native acceptance requires a separate process outside the job, holding only query/synchronize rights and pre-stop liveness. Current MockJudge is only an in-process simulator. No job/terminate handle transfer.",
   "resource_limits": "INTENDED, not enforced or released: one VM primary process, no breakaway/children, one TCG vCPU, 2 GiB guest RAM, 3 GiB whole-job memory, 15-minute independent supervisor deadline. Disk/log hard bounds need separately accepted enforcement; free-space checks are not reservations.",
@@ -27,5 +74,13 @@
   },
   "durability_limit": "Exclusive pending file, file flush/fsync and replace model restart persistence. No Windows power-loss guarantee. Missing, malformed, changed-contract or pending state inhibits admission.",
   "collateral": "Intended native hard stop and controller loss interrupt the entire chosen VM and may corrupt its disposable overlay. No graceful shutdown, selective AI stopping, external-job cancellation or resistance to trusted-host compromise is established.",
-  "native_release_gates": ["exact five-file independent static/mock acceptance", "actual Win32 API and atomic job support", "handle ownership and independent judge process", "reviewed firmware/device/startup and fresh overlay", "enforceable memory, CPU, disk/log and deadline bounds", "exact destructive execution grant and direct Risk acceptance", "originating native stop/crash/recovery and outside-canary qualification"]
+  "native_release_gates": [
+    "exact five-file independent static/mock acceptance",
+    "actual Win32 API and atomic job support",
+    "handle ownership and independent judge process",
+    "reviewed firmware/device/startup and fresh overlay",
+    "enforceable memory, CPU, disk/log and deadline bounds",
+    "exact destructive execution grant and direct Risk acceptance",
+    "originating native stop/crash/recovery and outside-canary qualification"
+  ]
 }
