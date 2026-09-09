@@ -367,6 +367,15 @@ No exception message, dynamic type name, path, process argument, identity or
 credential is recorded. Later cleanup failures do not replace the first cause.
 This diagnostic is not a complete event/API trace; null does not prove success.
 
+Host-job admission preserves its existing refusal and call order. HOST_JOB
+identifies query-stage failure; HOST_JOB_MEMBERSHIP identifies nonzero returned
+membership; HOST_JOB_DEADLINE identifies the later clock/deadline check after
+zero membership. Membership refusal takes precedence, as before. Injected tests
+exercise each branch, simultaneous membership/deadline rejection and successful
+admission to owned-job creation. No extra API, compatibility mode, breakaway or
+native eligibility probe is added. An older combined HOST_JOB/VALUE result
+remains ambiguous; these new source labels do not change historical evidence.
+
 Diagnostics share the unchanged 12 KiB final-result and 64 KiB total case-evidence
 limits. Serialization failure retains the constant emergency record; output
 failure can retain diagnostics only in the live session, without rewriting or

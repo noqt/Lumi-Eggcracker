@@ -1628,7 +1628,8 @@ class PreparedQualification:
         """First failure only; no exception text, paths, arguments or type names."""
         if self.failure is not None:
             return
-        stages = ("SETUP", "TOKEN_PREFLIGHT", "PIN_ADMISSION", "HOST_JOB", "JOBS",
+        stages = ("SETUP", "TOKEN_PREFLIGHT", "PIN_ADMISSION", "HOST_JOB",
+                  "HOST_JOB_MEMBERSHIP", "HOST_JOB_DEADLINE", "JOBS",
                   "PIPES", "ROLES", "OBSERVE", "CLEANUP", "SERIALIZE", "OUTPUT")
         phases = ("NOT_STARTED", "BINDING", "MANIFEST", "ANCESTORS", "OPEN_DIRECTORY",
                   "OPEN_FILE", "FILE_IDENTITY", "FINAL_PATH", "HASH_FILE", "RECHECK_FILE")
@@ -1688,8 +1689,12 @@ class PreparedQualification:
         in_job = sup.a.c.c_int32()
         sup._ok(sup.api.IsProcessInJob(sup.api.GetCurrentProcess(), None,
                                       sup.a.c.byref(in_job)), "SupervisorJobCheck")
-        if in_job.value or self.now() >= self.deadline - SECOND:
-            raise ValueError("Unqualified supervisor job or overdue setup")
+        if in_job.value:
+            self.stage = "HOST_JOB_MEMBERSHIP"
+            raise ValueError("Unqualified supervisor job")
+        self.stage = "HOST_JOB_DEADLINE"
+        if self.now() >= self.deadline - SECOND:
+            raise ValueError("Overdue setup")
         self.stage = "JOBS"
         self.outer = outer = sup.job_limit(3, 640, 2000)
         observer_job = sup.job_limit(1, 128, 2500)

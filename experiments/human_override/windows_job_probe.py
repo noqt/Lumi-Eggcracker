@@ -301,7 +301,9 @@ def proposal():
             "observer_job": {"active_processes": 1, "committed_memory_mib": 128,
                              "cpu_percent_of_outer": 25},
             "canary_job": {"active_processes": 1, "committed_memory_mib": 128, "system_cpu_percent": 5},
-            "preexisting_supervisor_job": "Refuse; no implicit compatibility or breakaway",
+            "preexisting_supervisor_job": "Refuse; no implicit compatibility or breakaway. "
+                                          "Fixed HOST_JOB_MEMBERSHIP and HOST_JOB_DEADLINE "
+                                          "diagnostics distinguish admission failures.",
             "limit": "Stub arguments, not installed native controls. Committed memory is not "
                      "resident memory or disk quota. Supervisor memory is not job-bounded.",
         },

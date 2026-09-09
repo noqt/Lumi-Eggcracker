@@ -1192,6 +1192,47 @@ class CompleteQualificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "STUB_ONLY")
         self.assertFalse(any(self.kernel.tables.values()))
 
+    def test_host_job_membership_and_deadline_have_distinct_fixed_stages(self):
+        for fault, expected in (("membership", "HOST_JOB_MEMBERSHIP"),
+                                ("deadline", "HOST_JOB_DEADLINE"),
+                                ("both", "HOST_JOB_MEMBERSHIP"),
+                                ("query", "HOST_JOB")):
+            with self.subTest(fault=fault):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                self.kernel.host_job = fault in ("membership", "both")
+                self.kernel.fail = "IsProcessInJob" if fault == "query" else None
+                original = self.kernel.invoke
+
+                def invoke(role, name, args, selected=fault, fallback=original):
+                    result = fallback(role, name, args)
+                    if name == "IsProcessInJob" and selected in ("deadline", "both"):
+                        self.kernel.tick = 29 * backend.SECOND
+                    return result
+
+                self.kernel.invoke = invoke
+                result = run.run(self.independent_pause)
+                self.assertEqual(result["failure"]["stage"], expected)
+                self.assertEqual(result["failure"]["error_class"],
+                                 "OS_ERROR" if fault == "query" else "VALUE")
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertFalse(result["case_matched_expected_observation"])
+                self.assertEqual(result["launch_pins"], "HELD_STUB_OBJECTS")
+                names = [name for _, name in self.kernel.events]
+                self.assertEqual(names.count("IsProcessInJob"), 1)
+                self.assertNotIn("CreateJobObjectW", names)
+                self.assertNotIn("CreateProcessW", names)
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_host_job_preflight_success_reaches_owned_jobs(self):
+        run = self.prepare_independent()
+        self.kernel.fail = "CreateJobObjectW"
+        result = run.run(self.independent_pause)
+        self.assertEqual(result["failure"]["stage"], "JOBS")
+        self.assertEqual(result["failure"]["error_class"], "VALUE")
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertFalse(any(self.kernel.tables.values()))
+
     def test_fixed_failure_diagnostics_identify_pin_api_and_redact_details(self):
         for operation, phase in (("CreateFileW", "OPEN_DIRECTORY"),
                                  ("GetFileInformationByHandle", "FILE_IDENTITY"),
