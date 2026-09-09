@@ -651,6 +651,7 @@ class RoleHandles(RetainedJob):
         self.bound_identities = {}
         self.job_contracts = {}
         self.requires_accounted_cleanup = False
+        self.pin_phase, self.pin_index = "NOT_STARTED", 0
 
     def own(self, handle, kind):
         if type(handle) is not int or not 0 < handle < 2**64 - 1:
@@ -891,17 +892,20 @@ class HeldArtifacts:
 
     def _open(self, path, directory):
         owner, a = self.owner, self.owner.a
+        owner.pin_phase = "OPEN_DIRECTORY" if directory else "OPEN_FILE"
         if self._path(path) in self.handles:
             raise ValueError("Duplicate held artifact path")
         handle = owner.api.CreateFileW(wide(a, path), 0 if directory else 0x80000000,
                                       3 if directory else 1, None, 3, 0x02200000, None)
         owner._ok(handle and handle != 2**64 - 1, "OpenPinnedArtifact")
         owner.own(handle, "artifact")
+        owner.pin_phase = "FILE_IDENTITY"
         info = a.FileInformation()
         owner._ok(owner.api.GetFileInformationByHandle(handle, a.c.byref(info)), "ArtifactIdentity")
         if info.attributes & 0x400 or bool(info.attributes & 0x10) != directory:
             raise ValueError("Reparse/wrong artifact kind")
         buffer = (a.WORD * 1025)()
+        owner.pin_phase = "FINAL_PATH"
         length = owner.api.GetFinalPathNameByHandleW(handle, buffer, 1025, 0)
         if not 0 < length < 1025 or buffer[length] != 0:
             raise ValueError("Unbounded final artifact path")
@@ -913,9 +917,12 @@ class HeldArtifacts:
         return handle, info
 
     def acquire(self, files):
+        self.owner.pin_phase, self.owner.pin_index = "MANIFEST", 0
         if self.used or type(files) is not dict or not 1 <= len(files) <= 256:
             raise ValueError("One-shot exact artifact set required")
-        bounded_json(files)
+        # Metadata only: 256 maximum-length paths plus fixed hash/size records.
+        # The default 64 KiB case-evidence budget cannot admit realistic pins.
+        bounded_json(files, 2 * 1024 * 1024)
         normalized, total = {}, 0
         for path, expected in files.items():
             key = exact_path(path)
@@ -933,7 +940,8 @@ class HeldArtifacts:
         self.used = True
         owner, a = self.owner, self.owner.a
         try:
-            for path, expected in files.items():
+            for index, (path, expected) in enumerate(files.items(), 1):
+                owner.pin_phase, owner.pin_index = "ANCESTORS", index
                 parents, parent = [], ntpath.dirname(path)
                 while parent and self._path(parent) not in self.handles:
                     parents.append(parent)
@@ -946,6 +954,7 @@ class HeldArtifacts:
                 for directory in reversed(parents):
                     self._open(directory, True)
                 handle, before = self._open(path, False)
+                owner.pin_phase = "HASH_FILE"
                 size = (before.size_high << 32) | before.size_low
                 if size != expected["size"]:
                     raise ValueError("Artifact size changed")
@@ -960,6 +969,7 @@ class HeldArtifacts:
                     digest.update(buffer.raw[:read.value])
                     remaining -= read.value
                 after = a.FileInformation()
+                owner.pin_phase = "RECHECK_FILE"
                 owner._ok(owner.api.GetFileInformationByHandle(handle, a.c.byref(after)),
                           "RecheckHeldArtifact")
                 # Last-access updates are not content changes.
@@ -1279,6 +1289,7 @@ def pin_physical_launch(owner, grant, approved, config, inventory, source_root, 
     """
     if type(owner) is not RoleHandles or type(owner.api) not in (StubApi, NativeApi):
         raise TypeError("SOURCE_ONLY: exact artifact owner required")
+    owner.pin_phase, owner.pin_index = "BINDING", 0
     for value in (config, grant, approved, sources):
         bounded_json(value)
     bounded_json(inventory, 1024 * 1024)
@@ -1315,6 +1326,7 @@ def pin_physical_launch(owner, grant, approved, config, inventory, source_root, 
     artifacts = HeldArtifacts(owner)
     artifacts.acquire(pins)
     if authority == "NATIVE_QUALIFICATION":
+        owner.pin_index = 0  # The case directory is not a manifest file ordinal.
         artifacts.hold_directory(config["cwd"])
     return artifacts
 
@@ -1610,6 +1622,37 @@ class PreparedQualification:
         self.canary_live = self.cleaned = False
         self.cleanup_started = self.abort_started = False
         self.non_elevated = False
+        self.stage, self.failure = "SETUP", None
+
+    def note_failure(self, error):
+        """First failure only; no exception text, paths, arguments or type names."""
+        if self.failure is not None:
+            return
+        stages = ("SETUP", "TOKEN_PREFLIGHT", "PIN_ADMISSION", "HOST_JOB", "JOBS",
+                  "PIPES", "ROLES", "OBSERVE", "CLEANUP", "SERIALIZE", "OUTPUT")
+        phases = ("NOT_STARTED", "BINDING", "MANIFEST", "ANCESTORS", "OPEN_DIRECTORY",
+                  "OPEN_FILE", "FILE_IDENTITY", "FINAL_PATH", "HASH_FILE", "RECHECK_FILE")
+        stage = self.stage if type(self.stage) is str and self.stage in stages else "UNKNOWN"
+        phase, index = "NOT_STARTED", 0
+        if stage == "PIN_ADMISSION" and self.owner is not None:
+            phase, index = self.owner.pin_phase, self.owner.pin_index
+        phase = phase if type(phase) is str and phase in phases else "UNKNOWN"
+        index = index if type(index) is int and 0 <= index <= 256 else 0
+        category = ("PERMISSION" if isinstance(error, PermissionError) else
+                    "OS_ERROR" if isinstance(error, OSError) else
+                    "VALUE" if isinstance(error, ValueError) else
+                    "TYPE" if isinstance(error, TypeError) else
+                    "INTERRUPTED" if isinstance(error, (KeyboardInterrupt, SystemExit, GeneratorExit))
+                    else "OTHER")
+        code, domain = None, "NONE"
+        if isinstance(error, OSError):
+            for field, label in (("winerror", "WINERROR"), ("errno", "ERRNO")):
+                candidate = getattr(error, field, None)
+                if type(candidate) is int and 0 <= candidate < 2**32:
+                    code, domain = candidate, label
+                    break
+        self.failure = {"stage": stage, "error_class": category, "code": code,
+                        "code_domain": domain, "pin_phase": phase, "pin_index": index}
 
     def now(self):
         tick = self.clock()
@@ -1635,24 +1678,30 @@ class PreparedQualification:
         sup.requires_accounted_cleanup = True
         if type(sup.api) is NativeApi and self.authority != "NATIVE_QUALIFICATION":
             raise PermissionError("Native API needs separate native authority")
+        self.stage = "TOKEN_PREFLIGHT"
         self.non_elevated = sup.require_non_elevated()
+        self.stage = "PIN_ADMISSION"
         self.artifacts = pin_physical_launch(
             sup, self.grant, self.approved, c, self.inventory,
             self.physical["source_root"], self.physical["sources"], self.authority)
+        self.stage = "HOST_JOB"
         in_job = sup.a.c.c_int32()
         sup._ok(sup.api.IsProcessInJob(sup.api.GetCurrentProcess(), None,
                                       sup.a.c.byref(in_job)), "SupervisorJobCheck")
         if in_job.value or self.now() >= self.deadline - SECOND:
             raise ValueError("Unqualified supervisor job or overdue setup")
+        self.stage = "JOBS"
         self.outer = outer = sup.job_limit(3, 640, 2000)
         observer_job = sup.job_limit(1, 128, 2500)
         canary_job = sup.job_limit(1, 128, 500)
         self.jobs = [outer, observer_job, canary_job]
+        self.stage = "PIPES"
         query_read, query_write = sup.pipe()
         ack_read, ack_write = sup.pipe()
         report_read, report_write = sup.pipe()
         bootstrap = {**c, "config_sha256": self.digest, "started_ns": self.started,
                      "deadline_ns": self.deadline}
+        self.stage = "ROLES"
         for role in ("observer", "canary", "controller"):
             jobs = ((outer, observer_job) if role == "observer" else
                     (canary_job,) if role == "canary" else (outer,))
@@ -1756,6 +1805,7 @@ class PreparedQualification:
         self.used = True
         try:
             self.setup()
+            self.stage = "OBSERVE"
             for _ in range(351):
                 now = self.now()
                 if now > self.deadline + 5 * SECOND:
@@ -1766,7 +1816,8 @@ class PreparedQualification:
                 if self.intervene(self.now()):
                     break
                 yield 100_000_000
-        except (OSError, ValueError, PermissionError):
+        except (OSError, ValueError, PermissionError) as error:
+            self.note_failure(error)
             self.outcome = "UNKNOWN"
             self.evidence.record("supervisor", "case_error", self.config["generation"],
                                  self.last_tick, "UNKNOWN")
@@ -1779,6 +1830,7 @@ class PreparedQualification:
         return self.result()
 
     def result(self):
+        self.stage = "SERIALIZE"
         if not self.cleaned or not self.protocol_valid:
             self.outcome = "UNKNOWN"
         native = self.is_native()
@@ -1795,6 +1847,7 @@ class PreparedQualification:
                 "owned_stub_cleanup": self.cleaned and not native,
                 "current_process_non_elevated": self.non_elevated,
                 "protocol_valid": self.protocol_valid,
+                "failure": self.failure,
                 "case_matched_expected_observation": (
                     self.config["case"] == "human_stop" and self.cleaned and self.protocol_valid
                     and self.outcome == "STUB_EARLY_PRIMARY_EXIT" and self.canary_live),
@@ -1808,6 +1861,7 @@ class PreparedQualification:
         if self.cleanup_started:
             return
         self.cleanup_started = True
+        self.stage = "CLEANUP"
         sup = self.owner
         failed = bool(sup.cleanup_errors)
         # Keep the outer job handle for accounting. Last-close dispatch alone
@@ -1815,7 +1869,8 @@ class PreparedQualification:
         if self.outer is not None and (self.outer, "job") in sup.owned:
             try:
                 sup.terminate_outer(self.outer)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as error:
+                self.note_failure(error)
                 failed = True
         for process, kind in sup.owned[:]:
             if kind == "process":
@@ -1825,7 +1880,8 @@ class PreparedQualification:
                         sup.terminate(process)  # Canary/partial-start exact owned cleanup only.
                     elif state != WAIT_OBJECT_0:
                         failed = True
-                except (OSError, ValueError):
+                except (OSError, ValueError) as error:
+                    self.note_failure(error)
                     failed = True
         for _ in range(51):
             try:
@@ -1847,7 +1903,8 @@ class PreparedQualification:
                             sup.release(handle)
                         self.cleaned = not sup.owned and not sup.cleanup_errors
                         break
-            except (OSError, ValueError):
+            except (OSError, ValueError) as error:
+                self.note_failure(error)
                 failed = True
             if failed or self.now() >= self.deadline + 5 * SECOND:
                 break
@@ -1868,7 +1925,8 @@ class PreparedQualification:
                 except StopIteration as result:
                     return result.value
                 pause(delay)
-        except BaseException:  # noqa: BLE001 - exact owner survives even interruption
+        except BaseException as error:  # noqa: BLE001 - exact owner survives even interruption
+            self.note_failure(error)
             steps.close()  # No yielding finally or destructor-dependent cleanup.
             self.abort_owned_once()
             return self.result()
@@ -1890,7 +1948,8 @@ class PreparedQualification:
             cleanup = self.cleanup_steps()
             try:
                 next(cleanup, None)
-            except BaseException:  # noqa: BLE001 - preserve ownership, no second attempt
+            except BaseException as error:  # noqa: BLE001 - preserve ownership, no second attempt
+                self.note_failure(error)
                 self.cleaned = False
             finally:
                 cleanup.close()

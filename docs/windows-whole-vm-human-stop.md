@@ -340,7 +340,39 @@ Read a result together with the exit status; a file alone cannot prove successfu
 output durability. Injected APIs always label results STUB_ONLY/STUB outcomes,
 including tests of the native packet wiring. Only the exact real NativeApi under
 native authority selects NATIVE_QUALIFICATION_RUN and observed native labels.
-No native result has been produced by the source-only preparation.
+The dormant public entry does not produce native qualification evidence.
+
+### Pin-manifest validation repair and bounded diagnostics
+
+The combined source/runtime pin map now has an explicit 2 MiB conservative
+pre-encoder metadata budget. The old default 64 KiB budget rejected a realistic
+149-entry map before the first pin API call in an injected reproduction. This
+is a source-order reproduction, not a native API trace. A preserved failed
+qualification attempt lacking error detail cannot by itself identify the API
+or prove successful role startup, human stop or native pin behaviour.
+
+The repair leaves all content and resource limits unchanged: 1..256 files,
+1024-character paths, 16 MiB per file, 128 MiB aggregate content and 512 retained
+file/ancestor handles. Full manifest validation still precedes all pin APIs.
+Injected regressions cover 149 entries and 256 maximum-length paths, malformed
+and excessive inputs with zero API calls, and the 149-pin independent role
+journey. None of these fake file objects establishes native path acceptance.
+
+A result may contain one first-failure diagnostic: fixed supervisor stage,
+fixed error category, optional unsigned 32-bit numeric error field and its
+domain, fixed pin phase, and manifest ordinal 1..256 (0 means no file ordinal).
+WINERROR identifies the exception's winerror field; ERRNO identifies its errno
+field, which fixed API wrappers populate with the immediate last-error code.
+No exception message, dynamic type name, path, process argument, identity or
+credential is recorded. Later cleanup failures do not replace the first cause.
+This diagnostic is not a complete event/API trace; null does not prove success.
+
+Diagnostics share the unchanged 12 KiB final-result and 64 KiB total case-evidence
+limits. Serialization failure retains the constant emergency record; output
+failure can retain diagnostics only in the live session, without rewriting or
+retrying a partial result. Exit status remains essential. The failed immutable
+qualification artifacts and consumed grant are not reusable: any further native
+attempt requires a fresh reviewed snapshot, exact packet and separate grant.
 
 ### Primary ABI/design references
 
