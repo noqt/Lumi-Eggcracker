@@ -1405,7 +1405,6 @@ class CompleteQualificationTests(unittest.TestCase):
 
         def factory(_loaded):
             calls.append("factory")
-            return None
 
         with self.assertRaises(ValueError):
             probe.prepared_role_entry("native-controller", encoded, factory,
@@ -1509,10 +1508,11 @@ class CompleteQualificationTests(unittest.TestCase):
                     fallback = self.kernel.invoke
                     counts = {api_name: 0}
 
-                    def invoke(role, name, args, selected=api_name, at=ordinal, original=fallback):
+                    def invoke(role, name, args, selected=api_name, at=ordinal,
+                               original=fallback, call_counts=counts):
                         if role == "supervisor" and name == selected:
-                            counts[selected] += 1
-                            if counts[selected] == at:
+                            call_counts[selected] += 1
+                            if call_counts[selected] == at:
                                 return 0
                         return original(role, name, args)
 
