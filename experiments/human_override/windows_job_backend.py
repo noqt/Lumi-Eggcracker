@@ -699,7 +699,7 @@ class RoleHandles(RetainedJob):
         finally:
             try:
                 self.release(handle)
-            except BaseException:  # noqa: BLE001 - preserve exact token on failed close
+            except BaseException:  # Preserve exact token on failed close, then re-raise.
                 self.cleanup_errors.append("token")
                 raise
         return True
