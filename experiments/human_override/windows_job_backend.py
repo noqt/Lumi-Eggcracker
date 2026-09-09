@@ -140,7 +140,8 @@ def wide(abi, value):
 def exact_path(value):
     if (type(value) is not str or not 4 <= len(value) <= 1024
             or any(ch in value for ch in '\x00"\r\n')
-            or value[:3].upper() not in ("F:\\", "G:\\")
+            or ntpath.splitdrive(value)[0].upper() not in ("F:", "G:")
+            or not ntpath.isabs(value)
             or ntpath.normpath(value) != value):
         raise ValueError("Require a normalized absolute task path on F: or G:")
     return ntpath.normcase(value)

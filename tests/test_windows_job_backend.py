@@ -13,10 +13,11 @@ from unittest.mock import patch
 
 from experiments.human_override import windows_job_backend as backend
 from experiments.human_override import windows_job_probe as probe
+from scripts.verify_release import FORBIDDEN
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = "F:\\synthetic\\python.exe"
-CWD = "F:\\synthetic\\temp"
+APP = "G:\\synthetic\\python.exe"
+CWD = "G:\\synthetic\\temp"
 CONFIG = "a" * 64
 
 
@@ -257,7 +258,7 @@ class WindowsJobBackendTests(unittest.TestCase):
             self.assertFalse(self.fake.open_handles)
 
     def test_identity_mismatch_closes_suspended_child(self):
-        self.fake.image = "F:\\synthetic\\other.exe"
+        self.fake.image = "G:\\synthetic\\other.exe"
         with self.assertRaises(ValueError):
             self.start()
         self.assertNotIn("ResumeThread", self.fake.events)
@@ -423,13 +424,19 @@ class WindowsJobBackendTests(unittest.TestCase):
         self.assertEqual(self.fake.open_handles, {self.fake.job})
 
     def test_invalid_input_before_any_api_call(self):
-        for path in ("python.exe", "C:\\other.exe", "F:\\x\\..\\y", 'F:\\a"b.exe', "F:\\a\0"):
+        for path in ("python.exe", "C:\\other.exe", "G:\\x\\..\\y", 'G:\\a"b.exe',
+                     "G:\\a\0", "F:relative.exe", "G:relative.exe"):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 self.owner.start(path, CWD, 1, CONFIG)
         for generation in (True, 0, -1, 2**63):
             with self.assertRaises(ValueError):
                 self.owner.start(APP, CWD, generation, CONFIG)
         self.assertEqual(self.fake.events, [])
+
+    def test_selected_source_obeys_existing_public_artifact_filter(self):
+        for name in probe.SOURCE_PATHS:
+            content = (ROOT / name).read_text(encoding="utf-8").lower()
+            self.assertEqual([item for item in FORBIDDEN if item in content], [], name)
 
     def test_import_and_cli_have_no_native_loader(self):
         for name in ("windows_job_backend.py", "windows_job_probe.py"):
