@@ -439,9 +439,10 @@ class WindowsJobBackendTests(unittest.TestCase):
             self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr in (
                 "WinDLL", "CDLL", "windll", "cdll", "LoadLibrary", "Popen", "system")
                 for node in ast.walk(tree)))
-        with patch.object(sys, "argv", ["windows_job_probe.py"]), contextlib.redirect_stdout(io.StringIO()) as out:
-            with self.assertRaises(SystemExit) as result:
-                runpy.run_path(str(ROOT / probe.SOURCE_PATHS[1]), run_name="__main__")
+        with (patch.object(sys, "argv", ["windows_job_probe.py"]),
+              contextlib.redirect_stdout(io.StringIO()) as out,
+              self.assertRaises(SystemExit) as result):
+            runpy.run_path(str(ROOT / probe.SOURCE_PATHS[1]), run_name="__main__")
         self.assertEqual(result.exception.code, 0)
         data = json.loads(out.getvalue())
         self.assertEqual(data["status"], "SOURCE_ONLY_NOT_EXECUTABLE")
@@ -451,9 +452,9 @@ class WindowsJobBackendTests(unittest.TestCase):
 
     def test_all_native_cli_modes_refuse(self):
         for mode in ("native-controller", "native-observer", "native-supervisor"):
-            with contextlib.redirect_stderr(io.StringIO()) as error:
-                with self.assertRaises(SystemExit) as result:
-                    probe.main(["--mode", mode])
+            with (contextlib.redirect_stderr(io.StringIO()) as error,
+                  self.assertRaises(SystemExit) as result):
+                probe.main(["--mode", mode])
             self.assertEqual(result.exception.code, 2)
             self.assertIn("SOURCE_ONLY", error.getvalue())
 

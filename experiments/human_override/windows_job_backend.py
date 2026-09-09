@@ -284,7 +284,7 @@ class RetainedJob:
             durable = True
             try:
                 self.persist("STOP_REQUESTED", self.identity)
-            except Exception:
+            except Exception:  # noqa: BLE001 - any failed persistence must leave emergency stop usable
                 durable = False
             if self.process is None or self.identity is None:
                 return "UNKNOWN"
@@ -326,13 +326,13 @@ class RetainedJob:
                     try:
                         self._ok(self.api.CloseHandle(handle), "CloseHandle")
                         setattr(self, field, None)
-                    except BaseException:
+                    except BaseException:  # noqa: BLE001 - finish other closes, retain UNKNOWN
                         self.cleanup_errors.append(field)
             for handle in self.query_handles[:]:
                 try:
                     self._ok(self.api.CloseHandle(handle), "CloseQueryHandle")
                     self.query_handles.remove(handle)
-                except BaseException:
+                except BaseException:  # noqa: BLE001 - finish other closes, retain UNKNOWN
                     self.cleanup_errors.append("query")
             return "UNKNOWN" if self.cleanup_errors else "STUB_HANDLES_CLOSED"
 
