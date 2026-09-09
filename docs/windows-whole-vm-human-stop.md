@@ -93,10 +93,16 @@ HANDLE/SIZE_T; no packed or x86 fallback exists.
 
 RoleHandles prepares explicit suspended JOB_LIST creation, serialized temporary
 HANDLE_LIST inheritance, exact query-only duplication, fixed resource arguments,
-and retained-handle cleanup. StubQualification connects controller, observer and
-supervisor state machines using three fixed-frame pipe stubs and separate
-synthetic handle tables. Target and canary are only fake processes. This is
-IMPLEMENTED_INTERNAL source/stub logic, not independently scheduled OS roles.
+and retained-handle cleanup. PreparedQualification performs mandatory strict pin
+admission and runs only the supervisor loop. PreparedRole constructs either
+controller or observer from a bounded canonical bootstrap and runs its own loop.
+The supervisor cannot call or inspect either role object: it receives reports
+through its sole pipe reader and uses its own clock and retained process handles.
+Tests schedule the role loops separately using synthetic handle tables, including
+uneven polling and stalled roles. StubQualification remains a legacy synchronous
+regression fixture, not the prepared entry. Target and canary are only fake
+processes. This is IMPLEMENTED_INTERNAL source/stub logic, not independently
+scheduled OS processes or native qualification.
 
 The supervisor owns an outer kill-on-close job containing controller, target and
 observer: three processes, 640 MiB committed memory, proposed 20% CPU hard cap.
@@ -114,7 +120,8 @@ limits, last-handle closure and inheritance need native qualification.
 Committed memory is not resident memory or a disk quota. The supervisor remains
 outside these jobs, with unbounded-by-job memory and an explicit availability
 dependency. At most five roles including supervisor and ten serial cases are
-proposed; unresolved live native roles must block the next case.
+proposed. The prepared serial driver accepts at most ten distinct fresh cases
+and refuses to start the next after unresolved cleanup.
 
 Supervisor launches fixed observer/controller source commands with only selected
 inherited handles. Controller receives PROCESS_DUP_HANDLE to the observer plus
@@ -140,8 +147,24 @@ an observer result. An already-bound exclusively retained handle is not reopened
 or reidentified by image after exit. Missing/stale/out-of-order/partial/oversized
 evidence fails or remains UNKNOWN; no PID/name scan exists.
 
+The observer also acknowledges post-resume LIVE to the controller. Fixed local
+stop cases wait one second after that acknowledgement, send stop intent and wait
+for the observer's acknowledgement before attempting stop. The observer forwards
+its local intent-receipt time; the supervisor records its own receipt time. Stop
+completion includes persistence status or same-instance restart refusal before
+the observer reports EXIT. These are trusted-role control metadata, not proof of
+termination or power-loss durability. Query evidence alone proves neither cause
+nor restart safety. The no-stop result comes from a second actual observer LIVE
+query at least five seconds after its first, never direct supervisor inspection.
+A broken controller pipe after resume does not suppress retained-handle queries.
+Malformed control permanently invalidates the verdict while subsequent genuine
+EXIT evidence can still be recorded. Missing completion remains UNKNOWN.
+
 The case deadline starts before any role creation. Stub scheduling separates
-controller crash/hang decisions from the supervisor's 30-second clock.
+controller crash/hang decisions from the supervisor's 30-second clock. The
+prepared supervisor schedules deadline intervention at 29 seconds, reserving one
+second of margin; actual dispatch later than 30 seconds cannot pass. A late
+clock jump still triggers exact cleanup, never an on-time claim.
 Intervention follows the live handshake by one second; early exit must be observed
 within four seconds, before the fixed 60-second natural lifetime. A matched
 no-stop control stays live for five seconds before separate cleanup. Natural or
@@ -150,13 +173,34 @@ ownership, potentially losing observer and canary: the result is UNKNOWN.
 
 Each pipe permits at most 16 fixed frames. Evidence permits at most 128
 fixed-schema records; fields/counts are bounded before JSON serialization and
-validated again at finalization. Three 4 KiB pipe buffers are reserved inside the
-combined 64 KiB case evidence limit. Writers belong only to expendable
+validated again at finalization. Three 4 KiB pipe buffers and two maximum 16 KiB
+bootstrap wire records are reserved inside the combined 64 KiB case evidence
+limit. The bootstrap is canonical lower-case hex of bounded JSON, binding the
+role, exact three inherited handles, fixed paths, case, generation, configuration
+hash and shared start/deadline. It is bounded before JSON parsing and rejects
+duplicate/noncanonical keys, unexpected fields, pseudo/duplicate handles and
+configuration mismatches. These are wire/evidence bounds, not Python heap limits.
+Writers belong only to expendable
 controller/observer roles; supervisor reads a complete available frame after
 PeekNamedPipe. Synchronous writes may stall and need the genuinely independent
 native supervisor. The stub scheduler does not establish real pipe latency.
-Cleanup uses only exact owned handles, retains failed closures, attempts every
-remaining close and never treats dispatch as exit. The 30+5 second windows are
+Prepared cleanup retains supervisor-owned jobs, explicitly terminates only the
+exact owned outer job, and separately disposes of exact retained role processes
+including the canary. It waits for retained created processes to signal before
+releasing those process/thread references. It then queries the fixed 48-byte
+BasicAccountingInformation for every retained job, including partial-setup jobs.
+Only verified ActiveProcesses=0 allows closing jobs and releasing artifact pins.
+The outer count covers the nested target when its observer has been lost;
+controller/observer exit or last-job-handle-close dispatch alone is insufficient.
+Accounting can retain terminated members until process references are released,
+so signaled process references close before the zero-count poll, not after it.
+Job termination/query/close failure, malformed size/count or nonzero counts keep
+the result UNKNOWN and retain remaining job handles and pins. This remains
+stubbed API semantics, not observed Windows job emptiness.
+After at most five seconds of cleanup polling, or the 35-second hard case window,
+unconfirmed job emptiness retains pins/job handles and cleanup responsibility and forbids
+restart of that one-shot case. No second case may start while those roles remain
+unresolved. The 30+5 second windows are
 acceptance targets, not OS scheduling guarantees.
 
 Restart safety is UNQUALIFIED in this new harness. Same-instance retry refusal
@@ -187,15 +231,15 @@ path_handles_held=false and system_dlls_verified=false. System DLLs are outside
 this selected portable-runtime inventory and require an explicit trusted-OS
 baseline decision; no whole-host/credential audit is implied.
 
-The optional strict stub path links application to inventory-root/python.exe
+The mandatory PreparedQualification strict path links application to inventory-root/python.exe
 and the script to the exact five-file source pin set, with no alias fallback.
 HeldArtifacts then prepares read handles denying write/delete sharing, retains
 ancestor handles, rejects reparse/final-path substitution and rechecks held
 volume/file index, size, write time and streaming SHA. Acquisition precedes any
 job or pipe creation. The connected fixture uses virtual file objects and
 reports HELD_STUB_OBJECTS, not observed physical Windows file locks. Alias-only
-fixtures explicitly report SYNTHETIC_ALIASES. Native release must require the
-strict path; the optional alias branch is never native authority.
+legacy fixtures explicitly report SYNTHETIC_ALIASES. There is no alias fallback
+in the prepared path; the legacy optional branch is never native authority.
 
 The hashed read handle is at EOF and serves as an identity lock; CreateProcess
 and Python would reopen the bound path. Denied write/delete sharing and retained
@@ -203,9 +247,13 @@ ancestors preserve the selected objects, not import/dependency closure. Director
 handles do not prevent adding child entries. Python bytecode-cache reads and OS
 DLL resolution still require the accepted runtime-loading baseline.
 
-Before any native execution release, finish and statically review fixed role
-bootstrap/dispatch, integration of the prepared held-file admission and
-independently scheduled supervisor execution. Bind exact local paths, files,
+The prepared role entry loads only the fixed backend sibling by explicit file
+location, without adding cwd or the repository to sys.path. This prepares the
+-I -S child-loading path, but imports are not a security sandbox. The entry is
+tested only with exact injected APIs and is unreachable from the native CLI.
+Before any native execution release, separately review native wiring of this
+fixed loader/bootstrap, mandatory held-file admission and role-local loops.
+Bind exact local paths, files,
 host/account and source hashes; obtain direct Risk and fresh technical acceptance
 plus a separate exact Chair grant. Native creation/limits/ownership/cleanup then
 need their own originating qualification. This preparation is not VM boot,
@@ -222,3 +270,4 @@ is a distinct mocked plan and cannot grant sleeper execution or restart safety.
 - [Attribute lists, JOB_LIST and HANDLE_LIST](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute).
 - [Job basic limits](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information), [extended layout](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information) and [CPU hard cap](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information).
 - [DuplicateHandle rights and inheritance](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle), [creation FILETIME](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes) and [image identity](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew).
+- [Owned-job termination](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-terminatejobobject), [fixed job query](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject) and [basic accounting layout and reference lifetime](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information).

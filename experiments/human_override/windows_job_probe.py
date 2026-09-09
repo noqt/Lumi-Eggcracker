@@ -15,6 +15,49 @@ SOURCE_PATHS = (
 )
 
 
+def load_prepared_backend():
+    """Fixed source loader for isolated-mode role preparation; no sys.path edit.
+
+    The strict parent holds this exact file before any intended role launch.
+    This loader is not a sandbox or an independent runtime-loading baseline.
+    """
+    import importlib.util
+    import sys
+
+    name = "eggcracker_windows_prepared_backend"
+    path = ROOT / SOURCE_PATHS[0]
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(name)
+    sys.modules[name] = module  # Required by dataclass; never modifies import search paths.
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return module
+
+
+def prepared_role_entry(mode, encoded, api_factory, clock, pause, persist):
+    """Exact injected entry for exercising the fixed loader + role dispatch.
+
+    Not reachable from CLI. Native modes refuse before calling this function.
+    The factory receives only the loaded backend to construct its exact StubApi.
+    """
+    from types import FunctionType
+
+    if any(type(hook) is not FunctionType for hook in (api_factory, clock, pause, persist)):
+        raise TypeError("SOURCE_ONLY: exact injected role hooks required")
+    backend = load_prepared_backend()
+    value = backend.decode_bootstrap(encoded)
+    if mode != "native-" + value["role"]:
+        raise ValueError("Mode differs from fixed role bootstrap")
+    worker = backend.PreparedRole(encoded, api_factory(backend), clock, persist)
+    worker.run(pause)
+
+
 def proposal():
     return {
         "schema": "windows-harmless-probe-proposal.v1",
@@ -25,13 +68,17 @@ def proposal():
                           for name in SOURCE_PATHS},
         "implemented_internal": [
             "Guarded lazy Win64 binder and exact injected ABI table",
-            "Connected five-role STUB scheduler with separate synthetic handle tables",
+            "Strict five-role prepared path with separate role-local polling loops and bootstrap",
             "Atomic suspended job/explicit handle-list arguments; serialized temporary copies",
             "Controller-to-observer query-only duplicate and bounded identity/resume handshake",
             "Monotonic supervisor deadline decisions; exact-role cleanup and loss is UNKNOWN",
             "Read-only selected runtime inventory and exact source/config/runtime STUB approval",
             "Strict source/application pin mapping and held-file verification through injected APIs",
             "Fixed-schema bounded evidence and same-instance restart refusal",
+            "Supervisor uses observer reports, retained role handles and its own clock only",
+            "Fixed isolated-mode backend loader and injected role entry; native CLI still refuses",
+            "Exact owned outer-job termination plus bounded job-empty accounting before pin release",
+            "At most ten serial prepared cases; unresolved cleanup prevents the next case",
         ],
         "target": {
             "runtime": "Existing pinned CPython 3.12.10 Windows x86_64 portable",
@@ -71,6 +118,7 @@ def proposal():
         },
         "timing_controls": {
             "deadline_seconds_before_any_role_creation": 30,
+            "scheduled_deadline_intervention_seconds": 29,
             "cleanup_acceptance_window_seconds": 5,
             "natural_sleep_seconds": 60,
             "stop_or_crash_seconds_after_live": 1,
@@ -84,7 +132,9 @@ def proposal():
             "frame_bytes": 88, "max_frames_per_pipe": 16, "pipe_count": 3,
             "evidence_bytes_per_case": 65536, "max_evidence_records": 128,
             "order": "Suspended exact identity -> observer ack -> controller resume -> resume "
-                     "notification -> observed LIVE -> intervention -> observed EXIT",
+                     "notification -> observed LIVE/ack -> stop intent/observer ack -> "
+                     "stop completion status -> observed EXIT",
+            "bootstrap_bytes_per_role": 16384,
             "write_limit": "Synchronous writers are expendable controller/observer roles only. "
                            "Supervisor only reads complete available frames. Not an OS disk quota.",
         },
@@ -96,8 +146,8 @@ def proposal():
         "required_before_execution": [
             "Fresh non-author technical and direct Risk acceptance of exact five hashes",
             "Separate exact Chair native execution grant",
-            "Native process bootstrap/role dispatch and independently scheduled supervisor",
-            "Implemented and statically reviewed native integration of prepared held-file admission",
+            "Separate reviewed native wiring release: current entry and APIs are injected-only",
+            "Reviewed native wiring of mandatory held-file admission and fixed role loops",
             "Reviewed unprivileged-host preflight procedure for the authorized qualification run",
             "Windows system-DLL provenance decision; selected inventory does not cover those files",
             "Reviewed bounded native test procedures for job nesting, inheritance, limits and cleanup",
