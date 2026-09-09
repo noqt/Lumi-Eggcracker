@@ -1,6 +1,15 @@
 {
   "schema": "counter-ai.v1",
-  "status": "E0 frozen before E1/E3 implementation or evaluation; E2 development simulation only",
+  "status": "E1/E3 synthetic recipes specified before first evaluation; source seal required for heldout. E2 remains simulation only.",
+  "recipe_revision": "fixtures.v1.json specifies 3 development and 24 heldout abstract recipe variants, 5 seeds and fast/slow pacing. This is not 24 validated real-world families. Seal exact source/config hashes before evaluating.",
+  "implemented_command": "python -B experiments/counter_ai/replay.py --output ABSOLUTE_FRESH_DIRECTORY --split development; --freeze writes seal.json without evaluation; heldout additionally requires --seal PRIOR_SEAL_FILE",
+  "recipe_parameters": "16 generated actions each; seeded offsets 0..3 and sensor delays 0..2; fast1/slow12 ticks; static ACL identical for all protected arms; ordinary resource denial can trigger only later correlation, not explicit protected rules.",
+  "pre_evaluation_clarifications": [
+    "Sensor gap markers clear correlation/rate history and do not count as actions; duplicate event IDs never add evidence. Every detector binds exactly one run ID; cross-run events are rejected.",
+    "Removal arms are sensitivity checks: remove-timing unbounds the correlation window; remove-sequence and remove-identity each collapse extra correlation to retained rules. They do not identify independent causal feature value.",
+    "Require prevention and benign interruption not to worsen in either fast or slow pacing, in addition to pooled threshold. Missing latency cannot be silently excluded from acceptance.",
+    "Source seal binds local behavioral imports, fixture/protocol, tests, Git base revision, interpreter path/hash and OS/Python build identity. Recipes are source-visible/predeclared, not a blinded independent holdout."
+  ],
   "tracks": {
     "policy": "Preserve existing qualified production profiles; unapproved complete matches are intended denials.",
     "human_stop": "All E2 invariants pass; zero false verified stop, out-of-scope effect or automatic recovery launch. Not gated by detection superiority.",
@@ -40,7 +49,7 @@
     "heldout_benign_families": ["build", "backup", "deployment", "parallel-tests", "admin-batch", "indexing", "compression", "media-conversion", "package-verify", "log-rotation", "checksum", "data-import"],
     "seeds": [101, 211, 307, 401, 503],
     "pacing": ["fast", "slow"],
-    "discipline": "Family recipes and event budgets must be sealed before generation; these family reservations alone are not a sealed dataset. No evaluation or held-out claim in E0/E2. Amend protocol before unblinding, never tune on held-out results."
+    "discipline": "Recipe bodies are in fixtures.v1.json; source seal binds generators, detectors, model and configuration before evaluation. No tuning after unblinding. Abstract recipe variants are not independent real attack families."
   },
   "scoring": {
     "prevention": "Count only positive-control-reachable effects blocked strictly before their effect tick; ties and late containment are not prevention.",
