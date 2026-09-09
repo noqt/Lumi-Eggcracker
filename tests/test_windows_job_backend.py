@@ -459,8 +459,16 @@ class WindowsJobBackendTests(unittest.TestCase):
                               if isinstance(node, ast.ClassDef) and node.name == "NativeApi")
                 constructor = next(node for node in native.body
                                    if isinstance(node, ast.FunctionDef) and node.name == "__init__")
-                self.assertEqual(len(loaders), 1)
-                self.assertIn(loaders[0], list(ast.walk(constructor)))
+                self.assertEqual(len(loaders), 2)
+                for loader in loaders:
+                    self.assertIn(loader, list(ast.walk(constructor)))
+                dll_calls = [node for node in ast.walk(constructor)
+                             if isinstance(node, ast.Call) and node.func in loaders]
+                self.assertEqual({node.args[0].value for node in dll_calls},
+                                 {"kernel32.dll", "advapi32.dll"})
+                for call in dll_calls:
+                    self.assertEqual({item.arg: item.value.value for item in call.keywords},
+                                     {"use_last_error": True, "winmode": 0x800})
                 gate = constructor.body[0]
                 self.assertIsInstance(gate, ast.Expr)
                 self.assertEqual(gate.value.func.id, "native_backend")
@@ -514,6 +522,8 @@ class RoleKernel:
         self.bootstraps = {}
         self.pipe_writers = set()
         self.errors = {}
+        self.token_elevation = 0
+        self.token_length = 4
 
     def ptr(self, pointer, kind):
         return self.a.c.cast(pointer, self.a.c.POINTER(kind)).contents
@@ -573,6 +583,18 @@ class RoleKernel:
         a = self.a
         if name == "GetCurrentProcess":
             return 0xFFFFFFFFFFFFFFFF
+        if name == "OpenProcessToken":
+            if args[:2] != (2**64 - 1, 0x0008):
+                raise ValueError("Only current process TOKEN_QUERY is selected")
+            self.ptr(args[2], a.HANDLE).value = self.new(role, "token")
+            return 1
+        if name == "GetTokenInformation":
+            if (args[1] != 20 or args[3] != 4
+                    or self.object(role, args[0])["kind"] != "token"):
+                raise ValueError("Only fixed four-byte TokenElevation is selected")
+            self.ptr(args[2], a.DWORD).value = self.token_elevation
+            self.ptr(args[4], a.DWORD).value = self.token_length
+            return 1
         if name == "CreateFileW":
             path = bytes(args[0]).decode("utf-16-le").rstrip("\0")
             content = self.file_contents.get(ntpath.normcase(path))
@@ -1588,6 +1610,300 @@ class CompleteQualificationTests(unittest.TestCase):
         self.kernel.invoke = fallback
         run.owner.cleanup()
         self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_dormant_native_entries_refuse_before_loading_or_packet_reads(self):
+        with patch.object(probe, "load_prepared_backend", side_effect=AssertionError("native gate")):
+            with self.assertRaises(PermissionError):
+                probe.native_role_entry("native-controller", "00")
+            with self.assertRaises(PermissionError):
+                probe.native_supervisor_entry("G:\\absent\\packet.json", "a" * 64)
+        source = ast.parse((ROOT / backend.SOURCE_FILES[1]).read_text())
+        entries = [node for node in source.body if isinstance(node, ast.FunctionDef)
+                   and node.name in ("native_role_entry", "native_supervisor_entry")]
+        self.assertEqual(len(entries), 2)
+        for entry in entries:
+            self.assertEqual(entry.body[0].value.func.id, "native_refusal")
+
+    def test_case_journal_is_exclusive_bounded_and_not_restart_authority(self):
+        identity = backend.Identity(1, CONFIG, 10, 20, APP)
+        journal = backend.CaseJournal(self.temp.name, "human_stop")
+        try:
+            with self.assertRaises(ValueError):
+                journal.persist("STOP_REQUESTED", identity)
+            journal.persist("START_INTENT", None)
+            journal.persist("IDENTIFIED_SUSPENDED", identity)
+            journal.persist("STOP_REQUESTED", identity)
+            with self.assertRaises(ValueError):
+                journal.persist("START_INTENT", None)
+            self.assertLessEqual(journal.size, backend.JOURNAL_LIMIT)
+        finally:
+            journal.close()
+        content = (Path(self.temp.name) / "controller-journal.jsonl").read_bytes()
+        self.assertEqual(len(content.splitlines()), 3)
+        with self.assertRaises(FileExistsError):
+            backend.CaseJournal(self.temp.name, "human_stop")
+        self.assertEqual((Path(self.temp.name) / "controller-journal.jsonl").read_bytes(), content)
+
+    def test_run_packet_binds_separate_approval_before_wiring(self):
+        prepared = self.prepare_independent()
+        packet = {"schema": "windows-harmless-run.v1", "config": dict(self.config),
+                  "grant": {**self.grant, "authority": "NATIVE_QUALIFICATION"},
+                  "inventory": self.inventory, "physical": prepared.physical,
+                  "trusted_host": {"machine": "SYNTHETIC", "account": "synthetic-operator",
+                                   "unprivileged_attested": True,
+                                   "system_dlls": "TRUSTED_WINDOWS_SYSTEM32",
+                                   "runtime_loading": "TRUSTED_PINNED_RUNTIME_ON_TRUSTED_HOST"}}
+        raw = backend.bounded_json(packet, 1024 * 1024)
+        approved = hashlib.sha256(raw).hexdigest()
+        with patch.object(backend, "verify_runtime_inventory", return_value=self.inventory):
+            self.assertEqual(backend.decode_run_packet(raw, approved), packet)
+        for wrong_approval in ("0" * 64, packet["grant"], None):
+            with self.assertRaises(PermissionError):
+                backend.decode_run_packet(raw, wrong_approval)
+        with self.assertRaises(PermissionError):
+            backend.decode_run_packet(b"x" * (1024 * 1024 + 1), approved)
+        for malformed in (raw + b" ", b'{"schema":1,"schema":2}'):
+            with self.assertRaises(ValueError):
+                backend.decode_run_packet(malformed, hashlib.sha256(malformed).hexdigest())
+        self.assertEqual(self.kernel.events, [])
+        # Exercise the post-admission orchestration exclusively with injected
+        # APIs. The independently scheduled test driver runs the fixed roles.
+        with patch.object(backend, "verify_runtime_inventory", return_value=self.inventory):
+            session = probe.wired_supervisor_body(
+                backend, packet, self.hooks[0], self.hooks[1], self.independent_pause)
+        self.assertTrue(session.run.cleaned)
+        self.assertLessEqual(len(session.payload), backend.CASE_RESULT_LIMIT)
+        self.assertEqual(json.loads(session.payload)["outcome"], "STUB_EARLY_PRIMARY_EXIT")
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_fixed_polling_wrapper_has_no_arbitrary_wait(self):
+        import time
+
+        with patch.object(time, "sleep") as sleep:
+            clock, pause = probe.fixed_clock_and_pause()
+            self.assertIsInstance(clock(), int)
+            pause(100_000_000)
+            sleep.assert_called_once_with(0.1)
+            for value in (0, -1, 100_000_001, True, 100_000_000.0):
+                with self.assertRaises(ValueError):
+                    pause(value)
+
+    def test_token_elevation_abi_success_and_fixed_rights(self):
+        owner = backend.RoleHandles(self.kernel.factory("supervisor", None))
+        a, api = owner.a, owner.api
+        self.assertEqual(api.OpenProcessToken.argtypes, (a.HANDLE, a.DWORD, a.c.POINTER(a.HANDLE)))
+        self.assertEqual(api.GetTokenInformation.argtypes,
+                         (a.HANDLE, a.c.c_int32, a.c.c_void_p, a.DWORD, a.c.POINTER(a.DWORD)))
+        self.assertTrue(owner.require_non_elevated())
+        self.assertEqual([name for _, name in self.kernel.events], [
+            "GetCurrentProcess", "OpenProcessToken", "GetTokenInformation", "CloseHandle"])
+        self.assertEqual(owner.owned, [])
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_elevation_refusals_before_any_pin_job_or_role(self):
+        for fault in ("elevated", "unwritten", "short", "large", "open", "query", "close"):
+            with self.subTest(fault=fault):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                self.kernel.token_elevation = {"elevated": 1, "unwritten": 0xFFFFFFFF}.get(fault, 0)
+                self.kernel.token_length = {"short": 3, "large": 5}.get(fault, 4)
+                self.kernel.fail = {"open": "OpenProcessToken", "query": "GetTokenInformation",
+                                    "close": "CloseHandle"}.get(fault)
+                result = run.run(self.independent_pause)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertFalse(result["current_process_non_elevated"])
+                names = [name for _, name in self.kernel.events]
+                self.assertFalse(set(names) & {"CreateFileW", "CreateJobObjectW", "CreateProcessW"})
+                if fault == "open":
+                    self.assertNotIn("GetTokenInformation", names)
+                    self.assertNotIn("CloseHandle", names)
+                elif fault == "close":
+                    self.assertTrue(result["cleanup_responsibility_retained"])
+                    self.assertEqual([kind for _, kind in run.owner.owned], ["token"])
+                else:
+                    self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_invalid_token_return_is_not_closed_or_used(self):
+        for returned in (None, 2**64 - 1):
+            self.kernel = RoleKernel()
+            original = self.kernel.invoke
+
+            def invoke(role, name, args, value=returned, fallback=original):
+                if name == "OpenProcessToken":
+                    self.kernel.ptr(args[2], self.kernel.a.HANDLE).value = value
+                    return 1
+                return fallback(role, name, args)
+
+            self.kernel.invoke = invoke
+            owner = backend.RoleHandles(self.kernel.factory("supervisor", None))
+            with self.assertRaises(ValueError):
+                owner.require_non_elevated()
+            self.assertEqual([name for _, name in self.kernel.events],
+                             ["GetCurrentProcess", "OpenProcessToken"])
+            self.assertEqual(owner.owned, [])
+
+    def test_supervisor_pause_interruption_aborts_once_without_generator_finally(self):
+        for phase in ("setup", "observe", "cleanup"):
+            with self.subTest(phase=phase):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                ordinary = self.independent_pause
+                original = self.kernel.invoke
+                pauses = []
+
+                def invoke(role, name, args, fallback=original, selected=phase):
+                    result = fallback(role, name, args)
+                    if selected == "cleanup" and name == "QueryInformationJobObject":
+                        self.kernel.ptr(args[2], self.kernel.a.BasicAccounting).ActiveProcesses = 1
+                    return result
+
+                def pause(amount, driver=ordinary, selected=phase, active=run, seen=pauses):
+                    seen.append(amount)
+                    if (selected == "setup" or (selected == "observe" and active.live_tick is not None)
+                            or (selected == "cleanup" and active.cleanup_started)):
+                        raise KeyboardInterrupt
+                    driver(amount)
+
+                self.kernel.invoke = invoke
+                result = run.run(pause)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertFalse(result["case_matched_expected_observation"])
+                self.assertTrue(run.abort_started)
+                before = tuple(self.kernel.events)
+                run.abort_owned_once()
+                self.assertEqual(tuple(self.kernel.events), before)
+                if phase == "cleanup":
+                    self.assertTrue(result["cleanup_responsibility_retained"])
+                    self.assertTrue(any(kind == "job" for _, kind in run.owner.owned))
+                    self.assertTrue(any(kind == "artifact" for _, kind in run.owner.owned))
+                else:
+                    self.assertTrue(result["owned_cleanup_confirmed"])
+                self.assertLess(len(pauses), 351)
+
+    def prepare_session(self):
+        prepared = self.prepare_independent()
+        packet = {"grant": {**self.grant, "authority": "NATIVE_QUALIFICATION"},
+                  "config": self.config, "inventory": self.inventory, "physical": prepared.physical}
+        with patch.object(backend, "verify_runtime_inventory", return_value=self.inventory):
+            return probe.SupervisorSession(backend, packet, self.hooks[0], self.hooks[1])
+
+    def test_session_success_requires_durable_output_and_remains_stub(self):
+        session = self.prepare_session()
+        session.execute(self.independent_pause)
+        self.assertEqual(session.result["status"], "STUB_ONLY")
+        self.assertEqual(session.result["schema"], "windows-harmless-result.v1")
+        for key in ("source_sha256", "config_sha256", "runtime_sha256"):
+            self.assertEqual(session.result[key], session.run.grant[key])
+        self.assertEqual(session.result["generation"], session.run.config["generation"])
+        self.assertTrue(session.result["case_matched_expected_observation"])
+        self.assertEqual(session.exit_code(), 3)
+        output = Path(self.temp.name) / "result.json"
+        session.write_result(output)
+        self.assertEqual(session.exit_code(), 0)
+        self.assertEqual(output.read_bytes(), session.payload)
+        self.assertLessEqual(len(session.payload), backend.CASE_RESULT_LIMIT)
+
+    def test_session_serialization_failure_keeps_ownership_and_no_retry(self):
+        session = self.prepare_session()
+        self.kernel.fail = "QueryInformationJobObject"
+        with patch.object(session.run.evidence, "finish", side_effect=ValueError("bad evidence")):
+            session.execute(self.independent_pause)
+        self.assertTrue(session.entry_failed)
+        self.assertEqual(json.loads(session.payload)["outcome"], "UNKNOWN")
+        self.assertTrue(any(kind == "artifact" for _, kind in session.run.owner.owned))
+        self.assertTrue(any(kind == "job" for _, kind in session.run.owner.owned))
+        self.assertEqual(session.exit_code(), 3)
+
+    def test_session_output_failure_never_releases_unconfirmed_pins(self):
+        for fault in ("exists", "write", "flush", "fsync"):
+            with self.subTest(fault=fault):
+                self.kernel = RoleKernel()
+                session = self.prepare_session()
+                self.kernel.fail = "QueryInformationJobObject"
+                session.execute(self.independent_pause)
+                before = tuple(session.run.owner.owned)
+                output = Path(self.temp.name) / (fault + ".json")
+                if fault == "exists":
+                    with output.open("xb") as stream:
+                        stream.write(b"preserve")
+                    session.write_result(output)
+                    self.assertEqual(output.read_bytes(), b"preserve")
+                elif fault == "fsync":
+                    with patch("os.fsync", side_effect=OSError("injected")):
+                        session.write_result(output)
+                else:
+                    with patch.object(Path, "open") as opened:
+                        stream = opened.return_value.__enter__.return_value
+                        stream.write.return_value = 0 if fault == "write" else len(session.payload)
+                        stream.flush.side_effect = OSError("injected")
+                        session.write_result(output)
+                self.assertEqual(tuple(session.run.owner.owned), before)
+                self.assertTrue(session.entry_failed)
+                self.assertFalse(session.output_durable)
+                self.assertEqual(session.exit_code(), 3)
+
+    def test_fixed_loader_compiles_source_not_cached_code(self):
+        import importlib.machinery
+
+        with patch.object(importlib.machinery.SourceFileLoader, "get_code",
+                          side_effect=AssertionError("Unpinned cached-code loader")):
+            loaded = probe.load_prepared_backend()
+        self.assertEqual(loaded.SOURCE_FILES, backend.SOURCE_FILES)
+        with self.assertRaises(PermissionError):
+            loaded.NativeApi()
+
+    def test_second_supervisor_admission_cannot_replace_owner(self):
+        session = self.prepare_session()
+        self.assertFalse(self.kernel.events)
+        with patch.object(probe, "_RETAINED_SUPERVISOR", None):
+            probe.require_unused_supervisor()
+            probe.retain_supervisor(session)
+            with self.assertRaises(PermissionError):
+                probe.require_unused_supervisor()
+            with self.assertRaises(PermissionError):
+                probe.retain_supervisor(session)
+            self.assertIs(probe._RETAINED_SUPERVISOR, session)
+            self.assertFalse(self.kernel.events)
+
+    def test_elevation_failure_in_each_role_precedes_target_operations(self):
+        for role in ("controller", "observer"):
+            for fault in ("elevated", "short", "query", "close"):
+                with self.subTest(role=role, fault=fault):
+                    self.kernel = RoleKernel()
+                    self.prepare_independent()
+                    self.kernel.tables[role] = {}
+                    handles = tuple(self.kernel.new(role, "pipe", data=bytearray()) for _ in range(3))
+                    record = {**self.config, "config_sha256": hashlib.sha256(
+                        backend.bounded_json(self.config)).hexdigest(), "started_ns": 0,
+                        "deadline_ns": 30 * backend.SECOND}
+                    encoded = backend.encode_bootstrap(role, record, handles)
+                    worker = backend.PreparedRole(encoded, self.kernel.factory(role, None),
+                                                  self.hooks[1], self.hooks[3])
+                    self.kernel.token_elevation = int(fault == "elevated")
+                    self.kernel.token_length = 3 if fault == "short" else 4
+                    self.kernel.fail = {"query": "GetTokenInformation", "close": "CloseHandle"}.get(fault)
+                    with self.assertRaises((PermissionError, OSError)):
+                        worker.run(self.hooks[2])
+                    names = [name for _, name in self.kernel.events]
+                    self.assertNotIn("CreateJobObjectW", names)
+                    self.assertNotIn("CreateProcessW", names)
+                    if fault == "close":
+                        self.assertTrue(any(kind == "token" for _, kind in worker.owner.owned))
+                    else:
+                        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_fsync_failure_with_complete_success_bytes_is_exit_three(self):
+        session = self.prepare_session()
+        session.execute(self.independent_pause)
+        self.assertTrue(session.result["case_matched_expected_observation"])
+        output = Path(self.temp.name) / "complete-but-unconfirmed.json"
+        with patch("os.fsync", side_effect=OSError("injected durability failure")):
+            session.write_result(output)
+        self.assertEqual(output.read_bytes(), session.payload)
+        self.assertTrue(json.loads(output.read_bytes())["case_matched_expected_observation"])
+        self.assertEqual(session.exit_code(), 3)
+        self.assertFalse(session.output_durable)
+        self.assertTrue(session.entry_failed)
 
 
 if __name__ == "__main__":

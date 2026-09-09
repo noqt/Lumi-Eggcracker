@@ -120,7 +120,8 @@ limits, last-handle closure and inheritance need native qualification.
 Committed memory is not resident memory or a disk quota. The supervisor remains
 outside these jobs, with unbounded-by-job memory and an explicit availability
 dependency. At most five roles including supervisor and ten serial cases are
-proposed. The prepared serial driver accepts at most ten distinct fresh cases
+available in injected tests. The native packet decoder selects exactly ONE
+human_stop case, not a batch or automatic retry. The prepared serial test driver accepts at most ten distinct fresh cases
 and refuses to start the next after unresolved cleanup.
 
 Supervisor launches fixed observer/controller source commands with only selected
@@ -174,7 +175,7 @@ ownership, potentially losing observer and canary: the result is UNKNOWN.
 Each pipe permits at most 16 fixed frames. Evidence permits at most 128
 fixed-schema records; fields/counts are bounded before JSON serialization and
 validated again at finalization. Three 4 KiB pipe buffers and two maximum 16 KiB
-bootstrap wire records are reserved inside the combined 64 KiB case evidence
+bootstrap wire records, plus an 8 KiB controller journal, are reserved inside the combined 64 KiB case evidence
 limit. The bootstrap is canonical lower-case hex of bounded JSON, binding the
 role, exact three inherited handles, fixed paths, case, generation, configuration
 hash and shared start/deadline. It is bounded before JSON parsing and rejects
@@ -247,8 +248,8 @@ ancestors preserve the selected objects, not import/dependency closure. Director
 handles do not prevent adding child entries. Python bytecode-cache reads and OS
 DLL resolution still require the accepted runtime-loading baseline.
 
-The prepared role entry loads only the fixed backend sibling by explicit file
-location, without adding cwd or the repository to sys.path. This prepares the
+The prepared role entry compiles only bounded bytes of the fixed backend sibling,
+never a repository bytecode cache, without adding cwd or the repository to sys.path. This prepares the
 -I -S child-loading path, but imports are not a security sandbox. The entry is
 tested only with exact injected APIs and is unreachable from the native CLI.
 Before any native execution release, separately review native wiring of this
@@ -264,6 +265,83 @@ that run, required before efficacy or expanded-use claims, not a circular
 prerequisite to the first qualification call. The older top-level QEMU contract
 is a distinct mocked plan and cannot grant sleeper execution or restart safety.
 
+### Dormant native wiring and one-case failure contract
+
+The source-only entry now prepares fixed supervisor/role dispatch, canonical
+whole-packet SHA admission, runtime/cwd/temp consistency checks, a three-record
+exclusive controller journal, owned cleanup and bounded result writing. Both
+unconditional native gates remain. Default plan mode does not bind or call any
+native API. CLI options, environment variables and matching packet/digest pairs
+cannot remove the source gate or grant execution. A later, mechanically small
+gate-release candidate needs its own exact source hashes, complete packet hash,
+independent review and Chair grant naming the exact command. Digest equality is
+consistency with that separate approval, not authentication of a CLI caller.
+
+The selected first packet is one human_stop only: at most five trusted roles,
+fixed sleep60 target/canary, the existing job/resource limits, 29-second deadline
+fallback, latest accepted intervention at 30 seconds and five-second cleanup
+window. Deadline fallback cannot pass the human-stop observation. No retry or
+follow-on case is admitted by this packet. Actual supervisor-loss testing would
+need a separate surviving judge and scope; this packet does not select it.
+
+Before its first job or target, each prepared supervisor/controller/observer
+checks the executing process's own token. Only GetCurrentProcess's pseudo-handle,
+OpenProcessToken with TOKEN_QUERY, and GetTokenInformation TokenElevation with
+one four-byte DWORD are selected. The returned length must be exactly four and
+the value zero. Failed, elevated, unwritten, malformed or ambiguous output
+refuses admission; a successful token open transfers exact close responsibility.
+Only that returned token is closed, never the process pseudo-handle. Failed
+token close retains the handle and refuses downstream work. This measures
+elevation only, not identity, integrity level, all privileges or impersonation.
+Environment host/account strings and a launching-shell diagnostic are not a
+replacement for this executing-Python check. No credential/token contents are
+logged and no privilege changes are implemented.
+
+The host baseline for the proposed run is explicitly trusted current Windows
+with normal System32-only explicit DLL binding and trusted pinned portable
+Python loading. The selected runtime inventory includes observed source/cache
+files and selected native dependencies, not exhaustive Windows dependencies.
+system_dlls_verified remains false. Existing stdlib pyc reads are allowed within
+this baseline; hashes do not establish source/cache correspondence. Fixed source
+loading prevents the repository backend's unpinned pyc from taking precedence.
+Held files and ancestor/case-directory handles protect selected objects, not
+all child-directory additions or a compromised host. No sandbox claim follows.
+
+CaseJournal permits exactly START_INTENT, IDENTIFIED_SUSPENDED and STOP_REQUESTED
+in order, using exclusive creation, bounded records, flush and fsync. It is
+qualification evidence only, not durable restart authority or a power-loss
+guarantee. The final result including its newline is limited to 12 KiB; with
+the journal, pipe reservations and bootstrap wires this is at most 64 KiB.
+This is an application evidence budget, not an OS disk quota or heap limit.
+
+SupervisorSession retains the exact qualification owner across polling,
+serialization and exclusive output errors. No generator yields from a finally
+block and no destructor is treated as cleanup. An exceptional driver interruption
+attempts one finite, non-yielding, zero-wait abort with existing handles only;
+an already attempted cleanup is not retried or silently waived. Normal cleanup
+must observe zero owned-job membership before releasing pins. Any unresolved
+cleanup overrides an earlier stop observation: UNKNOWN/failed and exit 3.
+There is no infinite wait, automatic retry, next case or PID/name reacquisition.
+
+The exact CLI keeps unresolved ownership until supervisor process exit. OS
+teardown is expected to close its sole non-inherited kill-on-close jobs, but
+without observed zero it is NOT confirmed cleanup. Process exit releases both
+job and pin handles; target termination scheduling may lag pin release. This
+explicit loss-of-evidence terminal is accepted only for the trusted harmless
+sleep experiment, not for a VM or real workload. Sleep60 is not a hard scheduling
+or whole-harness lifetime guarantee. Failed/missing/partial output is likewise
+unconfirmed; fsync itself can block or fail and is not a surviving owner.
+Preserve artifacts after failure: no runtime replacement, pin-file reuse/removal,
+cleanup escalation or new case until a separately scoped recovery decision.
+
+Only expected early primary exit, valid protocol, live outside canary, complete
+owned-job-zero cleanup and successfully flushed/fsynced result allow CLI exit 0.
+Read a result together with the exit status; a file alone cannot prove successful
+output durability. Injected APIs always label results STUB_ONLY/STUB outcomes,
+including tests of the native packet wiring. Only the exact real NativeApi under
+native authority selects NATIVE_QUALIFICATION_RUN and observed native labels.
+No native result has been produced by the source-only preparation.
+
 ### Primary ABI/design references
 
 - [Process creation](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) and [STARTUPINFOEX](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-startupinfoexw).
@@ -271,3 +349,4 @@ is a distinct mocked plan and cannot grant sleeper execution or restart safety.
 - [Job basic limits](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information), [extended layout](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information) and [CPU hard cap](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information).
 - [DuplicateHandle rights and inheritance](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle), [creation FILETIME](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes) and [image identity](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew).
 - [Owned-job termination](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-terminatejobobject), [fixed job query](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject) and [basic accounting layout and reference lifetime](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information).
+- [Current-process token open](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-openprocesstoken), [fixed token query](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-gettokeninformation) and [four-byte elevation value](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-token_elevation).
