@@ -450,9 +450,29 @@ prior human-only or consumed grants do not authorise it. Stub success does not
 establish native Windows behaviour, a Linux boundary, durable real restart
 inhibition, adaptive-opponent resistance, or completion of the experiment brief.
 
+### Prepared cleanup exit-race reconciliation
+
+Prepared cleanup makes at most one TerminateProcess attempt per exact retained
+created role handle. A failed call captures its last-error immediately. Only
+code 5 permits one immediate zero-time wait on that same handle; only an exact
+signaled result reconciles the documented terminate-after-exit race. It proves
+current death, not which action caused it. A live, failed or unexpected wait,
+any other code, and every job-termination/query/close error remain UNKNOWN.
+There is no second termination attempt, PID lookup, rights expansion or added
+deadline. Later signaling cannot waive a failed immediate recheck. All retained
+owned jobs must still report zero active processes before pins are released.
+
+First-failure diagnostics include a fixed cleanup-operation label, or null
+outside cleanup. At most three fixed recheck records contain only a process
+ordinal, code 5 and a fixed wait-state label. No raw handles, identities, paths or
+exception messages are recorded; existing evidence budgets remain unchanged.
+These are injected-source semantics, not native qualification. Historical
+cleanup errors lacking an operation label remain unattributed and consumed.
+
 ### Primary ABI/design references
 
 - [Process creation](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) and [STARTUPINFOEX](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-startupinfoexw).
+- [Process termination, asynchronous completion and post-exit error 5](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess).
 - [Attribute lists, JOB_LIST and HANDLE_LIST](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute).
 - [Nested jobs and inherited limits](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs) and [fixed UI restriction layout](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_ui_restrictions).
 - [Job basic limits](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information), [extended layout](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information) and [CPU hard cap](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information).

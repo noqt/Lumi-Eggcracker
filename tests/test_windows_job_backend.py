@@ -1641,7 +1641,8 @@ class CompleteQualificationTests(unittest.TestCase):
                 result = run.run(self.independent_pause)
                 self.assertEqual(result["failure"], {
                     "stage": "PIN_ADMISSION", "error_class": "OS_ERROR", "code": 122,
-                    "code_domain": "ERRNO", "pin_phase": phase, "pin_index": 1})
+                    "code_domain": "ERRNO", "pin_phase": phase, "pin_index": 1,
+                    "cleanup_operation": None})
                 self.assertEqual(result["outcome"], "UNKNOWN")
                 self.assertFalse(result["case_matched_expected_observation"])
                 self.assertNotIn("CreateJobObjectW", [name for _, name in self.kernel.events])
@@ -2131,6 +2132,158 @@ class CompleteQualificationTests(unittest.TestCase):
         result = run.run(self.independent_pause)
         self.assertTrue(checked)
         self.assertTrue(result["canary_live_before_cleanup"])
+
+    def test_cleanup_terminate_after_exit_race_requires_exact_signaled_recheck(self):
+        for selected in ("observer", "controller", "canary"):
+            with self.subTest(role=selected):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                original = self.kernel.invoke
+                attempts, rechecks, accounting = [], [], []
+
+                def invoke(role, name, args, target=selected, run=run, original=original,
+                           attempts=attempts, rechecks=rechecks, accounting=accounting):
+                    if role == "supervisor" and run.cleanup_started:
+                        if name in ("WaitForSingleObject", "TerminateProcess"):
+                            obj = self.kernel.object(role, args[0])
+                            if obj.get("role") == target:
+                                if name == "WaitForSingleObject" and not attempts:
+                                    return backend.WAIT_TIMEOUT
+                                if name == "TerminateProcess":
+                                    attempts.append(args[0])
+                                    self.kernel.kill(self.kernel.tables[role][args[0]][0])
+                                    self.kernel.errors[role] = 5
+                                    return 0
+                                rechecks.append(args[0])
+                                self.kernel.errors[role] = 123  # Last-error must already be captured.
+                        if name == "QueryInformationJobObject":
+                            result = original(role, name, args)
+                            accounting.append(self.kernel.ptr(args[2], self.kernel.a.BasicAccounting)
+                                              .ActiveProcesses)
+                            return result
+                    return original(role, name, args)
+
+                self.kernel.invoke = invoke
+                result = run.run(self.independent_pause)
+                self.assertEqual(len(attempts), 1)
+                self.assertTrue(rechecks and all(handle == attempts[0] for handle in rechecks))
+                self.assertTrue(accounting and all(count == 0 for count in accounting))
+                self.assertTrue(result["owned_cleanup_confirmed"], result)
+                self.assertEqual(result["outcome"], "STUB_EARLY_PRIMARY_EXIT")
+                self.assertEqual(result["cleanup_termination_rechecks"][0]["error_code"], 5)
+                self.assertEqual(result["cleanup_termination_rechecks"][0]["wait_state"], "SIGNALED")
+                self.assertTrue(result["canary_live_before_cleanup"])
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_cleanup_failed_termination_recheck_never_waives_ambiguity(self):
+        for code, wait in ((5, backend.WAIT_TIMEOUT), (5, 0xFFFFFFFF), (5, 17),
+                           (6, backend.WAIT_OBJECT_0)):
+            with self.subTest(code=code, wait=wait):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                original = self.kernel.invoke
+                attempts, rechecks = [], []
+
+                def invoke(role, name, args, error_code=code, wait_state=wait,
+                           run=run, original=original, attempts=attempts, rechecks=rechecks):
+                    if (role == "supervisor" and run.cleanup_started
+                            and name in ("WaitForSingleObject", "TerminateProcess")
+                            and self.kernel.object(role, args[0]).get("role") == "canary"):
+                        if name == "TerminateProcess":
+                            attempts.append(args[0])
+                            self.kernel.errors[role] = error_code
+                            return 0
+                        if attempts:
+                            rechecks.append(args[0])
+                            return wait_state
+                    return original(role, name, args)
+
+                self.kernel.invoke = invoke
+                result = run.run(self.independent_pause)
+                self.assertEqual(len(attempts), 1)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertEqual(result["failure"]["code"], code)
+                self.assertEqual(result["failure"]["cleanup_operation"], "TERMINATE_PROCESS")
+                self.assertEqual(len(result["cleanup_termination_rechecks"]), int(code == 5))
+                self.assertTrue(result["cleanup_responsibility_retained"])
+                self.assertTrue(any(kind == "artifact" for _, kind in run.owner.owned))
+                self.assertTrue(any(kind == "job" for _, kind in run.owner.owned))
+                self.kernel.invoke = original
+                run.owner.cleanup()
+
+    def test_cleanup_outer_error_five_is_not_a_process_exit_race(self):
+        run = self.prepare_independent()
+        original = self.kernel.invoke
+
+        def invoke(role, name, args):
+            if role == "supervisor" and name == "TerminateJobObject":
+                self.kernel.errors[role] = 5
+                return 0
+            return original(role, name, args)
+
+        self.kernel.invoke = invoke
+        result = run.run(self.independent_pause)
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertEqual(result["failure"]["cleanup_operation"], "TERMINATE_OUTER")
+        self.assertEqual(result["cleanup_termination_rechecks"], [])
+        self.assertTrue(result["cleanup_responsibility_retained"])
+        self.kernel.invoke = original
+        run.owner.cleanup()
+
+    def test_cleanup_query_and_close_error_five_remain_unknown(self):
+        for api_name, expected in (("QueryInformationJobObject", "QUERY_EMPTY"),
+                                   ("CloseHandle", "CLOSE_DEAD")):
+            with self.subTest(api=api_name):
+                self.kernel = RoleKernel()
+                run = self.prepare_independent()
+                original = self.kernel.invoke
+
+                def invoke(role, name, args, selected=api_name, run=run, original=original):
+                    if role == "supervisor" and run.cleanup_started and name == selected:
+                        self.kernel.errors[role] = 5
+                        return 0
+                    return original(role, name, args)
+
+                self.kernel.invoke = invoke
+                result = run.run(self.independent_pause)
+                self.assertEqual(result["failure"]["cleanup_operation"], expected)
+                self.assertEqual(result["cleanup_termination_rechecks"], [])
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertTrue(result["cleanup_responsibility_retained"])
+                self.assertTrue(any(kind == "artifact" for _, kind in run.owner.owned))
+                self.kernel.invoke = original
+                run.owner.cleanup()
+
+    def test_cleanup_delayed_signal_does_not_waive_failed_immediate_recheck(self):
+        run = self.prepare_independent()
+        original = self.kernel.invoke
+        attempts, waits = [], []
+
+        def invoke(role, name, args):
+            if (role == "supervisor" and run.cleanup_started
+                    and name in ("TerminateProcess", "WaitForSingleObject")
+                    and self.kernel.object(role, args[0]).get("role") == "canary"):
+                if name == "TerminateProcess":
+                    attempts.append(args[0])
+                    self.kernel.errors[role] = 5
+                    return 0
+                if attempts:
+                    waits.append(args[0])
+                    self.kernel.kill(self.kernel.tables[role][args[0]][0])
+                    if len(waits) == 1:
+                        return backend.WAIT_TIMEOUT
+            return original(role, name, args)
+
+        self.kernel.invoke = invoke
+        result = run.run(self.independent_pause)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(result["cleanup_termination_rechecks"]), 1)
+        self.assertEqual(result["cleanup_termination_rechecks"][0]["wait_state"], "TIMEOUT")
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertTrue(result["cleanup_responsibility_retained"])
+        self.assertTrue(any(kind == "artifact" for _, kind in run.owner.owned))
+        self.kernel.invoke = original
+        run.owner.cleanup()
 
     def test_serial_case_bound_and_unresolved_cleanup_prevents_next_case(self):
         first = self.prepare_independent()
