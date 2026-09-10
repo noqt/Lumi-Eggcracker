@@ -90,7 +90,7 @@ class FakeKernel:
             self.deleted += 1
             return None
         if name == "CreateProcessW":
-            if args[2:6] != (None, None, 0, backend.CREATE_FLAGS):
+            if args[2:6] != (None, None, 0, 0x08080404):
                 raise ValueError("Inheritance or creation flags malformed")
             startup = self.ptr(args[8], a.StartupInfoEx)
             if startup.StartupInfo.cb != 112 or not startup.lpAttributeList:
@@ -240,6 +240,16 @@ class WindowsJobBackendTests(unittest.TestCase):
         self.assertEqual(limits.BasicLimitInformation.ActiveProcessLimit, 1)
         self.assertEqual(limits.JobMemoryLimit, 268435456)
         self.assertEqual((cpu.ControlFlags, cpu.CpuRate), (5, 1000))
+
+    def test_retained_launch_rejects_creation_flag_injection(self):
+        for flags in (backend.CREATE_FLAGS | 0x01000000, 0, True, 0x08080404 + 1):
+            with self.subTest(flags=flags):
+                self.setUp()
+                with patch.object(backend, "CREATE_FLAGS", flags), self.assertRaises(ValueError):
+                    self.start()
+                self.assertNotIn("CreateProcessW", self.fake.events)
+                self.assertNotIn("ResumeThread", self.fake.events)
+                self.assertFalse(self.fake.open_handles)
 
     def test_startup_failures_close_owned_handles_never_resume(self):
         for name in ("CreateJobObjectW", "SetInformationJobObject",
@@ -716,7 +726,7 @@ class RoleKernel:
             self.tables[child] = {}
             attrs = self.attributes[role]
             inherited = attrs.get(backend.HANDLE_LIST, [])
-            if bool(args[4]) != bool(inherited) or args[5] != backend.CREATE_FLAGS:
+            if bool(args[4]) != bool(inherited) or args[5] != 0x08080404:
                 raise ValueError("Wrong atomic launch flags")
             for handle in inherited:
                 entry = self.tables[role][handle]
@@ -1345,9 +1355,53 @@ class CompleteQualificationTests(unittest.TestCase):
                     self.assertNotIn("CreateJobObjectW", [name for _, name in self.kernel.events])
                     self.assertFalse(any(self.kernel.tables.values()))
 
-    def test_nested_unknown_breakaway_and_ui_flags_refuse_without_resume(self):
-        for flags, ui in ((0x800, 0), (0x1000, 0), (0x1800, 0), (0x8000, 0),
-                          (0xFFFFFFFF, 0), (0, 1), (0, 0xFFFFFFFF)):
+    def test_nested_explicit_breakaway_permission_never_requests_escape(self):
+        for flags in (0x800, 0x2800):
+            with self.subTest(flags=flags):
+                self.kernel = RoleKernel()
+                self.kernel.host_job = True
+                self.kernel.ancestor_limits.BasicLimitInformation.LimitFlags = flags
+                self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                submitted, original = [], self.kernel.invoke
+
+                def invoke(role, name, args, fallback=original, seen=submitted):
+                    if name == "CreateProcessW":
+                        seen.append((role, args[5]))
+                    if name == "SetInformationJobObject" and args[1] == 9:
+                        limits = self.kernel.ptr(args[2], self.kernel.a.ExtendedLimits)
+                        self.assertEqual(limits.BasicLimitInformation.LimitFlags, 0x2208)
+                        self.assertEqual(limits.BasicLimitInformation.LimitFlags & 0x1800, 0)
+                    return fallback(role, name, args)
+
+                self.kernel.invoke = invoke
+                result = self.prepare_independent().run(self.independent_pause)
+                self.assertTrue(result["case_matched_expected_observation"], result)
+                self.assertEqual(result["immediate_job_limit_flags"], flags)
+                self.assertTrue(result["immediate_job_breakaway_ok"])
+                self.assertIsNone(result["immediate_job_query"]["refusal"])
+                self.assertFalse(result["ancestor_chain_validated"])
+                self.assertEqual(submitted, [("supervisor", 0x08080404)] * 3
+                                 + [("controller", 0x08080404)])
+                self.assertEqual(backend.CREATE_FLAGS & 0x01000000, 0)
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_each_fixed_role_rejects_creation_flag_injection_without_resume(self):
+        for role in ("controller", "observer", "target", "canary"):
+            with self.subTest(role=role):
+                kernel = RoleKernel()
+                owner = backend.RoleHandles(kernel.factory("supervisor", None))
+                job = owner.job_limit(1, 256, 5000)
+                with patch.object(backend, "CREATE_FLAGS", backend.CREATE_FLAGS | 0x01000000):
+                    with self.assertRaises(ValueError):
+                        owner.launch(role, APP, CWD, "G:\\synthetic\\probe.py", (job,))
+                self.assertNotIn("CreateProcessW", [name for _, name in kernel.events])
+                self.assertNotIn("ResumeThread", [name for _, name in kernel.events])
+                self.assertFalse(any(kernel.tables.values()))
+
+    def test_nested_unknown_silent_breakaway_and_ui_flags_refuse_without_resume(self):
+        cases = ((0x1000, 0), (0x1800, 0), (0xFFFFFFFF, 0), (0, 1), (0, 0xFFFFFFFF),
+                 (0x2800, 1)) + tuple((1 << bit, 0) for bit in range(15, 32))
+        for flags, ui in cases:
             with self.subTest(flags=flags, ui=ui):
                 self.kernel = RoleKernel()
                 self.kernel.host_job = True
@@ -1523,12 +1577,13 @@ class CompleteQualificationTests(unittest.TestCase):
                                      for key in self.kernel.roles.values()))
                 self.assertFalse(any(self.kernel.tables.values()))
 
-    def test_nested_owned_cleanup_failure_retains_pins_without_ancestor_control(self):
+    def test_nested_owned_cleanup_failure_retains_pins_without_ancestor_control(self, flags=0):
         for fault in ("terminate", "query", "nonzero"):
             with self.subTest(fault=fault):
                 self.kernel = RoleKernel()
                 self.kernel.host_job = True
                 self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                self.kernel.ancestor_limits.BasicLimitInformation.LimitFlags = flags
                 run = self.prepare_independent()
                 original = self.kernel.invoke
                 controls = []
@@ -2026,11 +2081,21 @@ class CompleteQualificationTests(unittest.TestCase):
                 run.owner.cleanup()
                 self.assertFalse(any(self.kernel.tables.values()))
 
-    def test_partial_job_and_process_setup_requires_accounted_cleanup(self):
+    def test_explicit_breakaway_permission_does_not_weaken_cleanup(self):
+        self.test_nested_owned_cleanup_failure_retains_pins_without_ancestor_control(0x2800)
+
+    def test_explicit_breakaway_permission_partial_setup_requires_cleanup(self):
+        self.test_partial_job_and_process_setup_requires_accounted_cleanup(0x2800)
+
+    def test_partial_job_and_process_setup_requires_accounted_cleanup(self, flags=None):
         for api_name, maximum in (("CreateJobObjectW", 3), ("CreateProcessW", 3)):
             for ordinal in range(1, maximum + 1):
                 with self.subTest(api=api_name, ordinal=ordinal):
                     self.kernel = RoleKernel()
+                    if flags is not None:
+                        self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                        self.kernel.host_job = True
+                        self.kernel.ancestor_limits.BasicLimitInformation.LimitFlags = flags
                     run = self.prepare_independent()
                     fallback = self.kernel.invoke
                     counts = {api_name: 0}
