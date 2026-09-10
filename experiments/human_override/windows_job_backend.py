@@ -32,7 +32,14 @@ CASE_RESULT_LIMIT = 65536 - 3 * 4096 - 2 * 16384 - JOURNAL_LIMIT
 JOB_MODES = ("OUTSIDE_ONLY", "REQUIRE_INHERITED_NESTED")
 CONFIG_FIELDS = {"application", "cwd", "source", "generation", "case"}
 ANCESTOR_KNOWN_FLAGS = 0x7FFF
-ANCESTOR_BREAKAWAY_FLAGS = 0x1800
+ANCESTOR_SILENT_BREAKAWAY = 0x1000
+
+
+def fixed_creation_flags():
+    """Only suspended atomic job-list creation; never request parent breakaway."""
+    if type(CREATE_FLAGS) is not int or CREATE_FLAGS != 0x08080404:
+        raise ValueError("Unselected process creation flags")
+    return 0x08080404
 
 
 def supervisor_job_mode(config):
@@ -525,7 +532,7 @@ class RetainedJob:
                 # Explicit minimal environment, not inherited secrets or Python settings.
                 environment = wide(a, f"TEMP={cwd}\0TMP={cwd}\0TMPDIR={cwd}\0")
                 self._ok(api.CreateProcessW(wide(a, application), command, None, None, 0,
-                                           CREATE_FLAGS, environment, wide(a, cwd),
+                                           fixed_creation_flags(), environment, wide(a, cwd),
                                            a.c.cast(a.c.byref(startup),
                                                     a.c.POINTER(a.StartupInfo)),
                                            a.c.byref(process_info)), "CreateProcessW")
@@ -779,9 +786,9 @@ class RoleHandles(RetainedJob):
             return 0
         basic, flags = info.BasicLimitInformation, info.BasicLimitInformation.LimitFlags
         diagnostic["limit_flags"] = flags
-        if flags & (~ANCESTOR_KNOWN_FLAGS | ANCESTOR_BREAKAWAY_FLAGS):
+        if flags & (~ANCESTOR_KNOWN_FLAGS | ANCESTOR_SILENT_BREAKAWAY):
             diagnostic["refusal"] = "LIMIT_FLAGS"
-            raise ValueError("Unknown or breakaway immediate-job flags")
+            raise ValueError("Unknown or silent-breakaway immediate-job flags")
         checks = (
             (flags & 1 and not 0 < basic.MinimumWorkingSetSize <= basic.MaximumWorkingSetSize,
              "WORKING_SET"),
@@ -895,7 +902,7 @@ class RoleHandles(RetainedJob):
                 if len(command) >= 16384:
                     raise ValueError("Fixed role command exceeds bound")
                 result = api.CreateProcessW(wide(a, application), wide(a, command), None, None,
-                                            int(bool(temporary)), CREATE_FLAGS,
+                                            int(bool(temporary)), fixed_creation_flags(),
                                             wide(a, f"TEMP={cwd}\0TMP={cwd}\0TMPDIR={cwd}\0"),
                                             wide(a, cwd), a.c.cast(a.c.byref(startup),
                                                                  a.c.POINTER(a.StartupInfo)),
@@ -1950,6 +1957,8 @@ class PreparedQualification:
                 "supervisor_job_mode": supervisor_job_mode(self.config),
                 "supervisor_in_job": self.supervisor_in_job,
                 "immediate_job_limit_flags": self.immediate_job_flags,
+                "immediate_job_breakaway_ok": (None if self.immediate_job_flags is None
+                                               else bool(self.immediate_job_flags & 0x800)),
                 "immediate_job_ui_restrictions": self.immediate_job_ui,
                 "immediate_job_query": self.owner.immediate_job_query,
                 "ancestor_chain_validated": False,

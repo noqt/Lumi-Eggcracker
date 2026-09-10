@@ -309,7 +309,9 @@ def proposal():
             "preexisting_supervisor_job": "OUTSIDE_ONLY default refuses membership. Explicit "
                                           "hash-bound REQUIRE_INHERITED_NESTED requires membership "
                                           "and fixed immediate-job UI/limit checks; unknown flags, "
-                                          "UI/breakaway, failed or malformed queries refuse. "
+                                          "UI/silent-breakaway, failed or malformed queries refuse. "
+                                          "Explicit BREAKAWAY_OK permission accepted without ever "
+                                          "requesting escape; both creation paths validate fixed flags. "
                                           "No ancestor control or full-chain validation.",
             "limit": "Stub arguments, not installed native controls. Committed memory is not "
                      "resident memory or disk quota. Supervisor memory is not job-bounded. "

@@ -409,10 +409,20 @@ requires exactly FALSE. Failed calls or values other than 0/1 are refused.
 Nested mode then issues only two fixed read-only NULL-job queries: extended
 limits (class 9, 144 bytes) and UI restrictions (class 4, 4 bytes), with exact
 returned lengths. These expose the immediate job only, not the entire ancestor
-chain, and obtain no ancestor handle. Nonzero UI restrictions, breakaway flags,
+chain, and obtain no ancestor handle. Nonzero UI restrictions, silent breakaway,
 unknown flags outside the selected 0x7fff mask, and malformed selected limit
 values are refused before owned jobs or children are created. Known limits are
 not removed or loosened. Unqueried classes and higher ancestors remain unproved.
+
+Existing immediate-parent `JOB_OBJECT_LIMIT_BREAKAWAY_OK` (0x800) is accepted:
+this permits explicit breakaway only when process creation requests
+`CREATE_BREAKAWAY_FROM_JOB` (0x01000000), which this harness never requests.
+`SILENT_BREAKAWAY_OK` (0x1000), including its combination with 0x800, remains
+refused. Both creation paths validate the exact fixed flags 0x08080404 before
+submitting them to CreateProcessW; no caller flag override is available. All
+owned jobs retain flags 0x2208, with neither breakaway mode. This distinguishes
+compatibility with existing host permission from exercising escape or changing
+host policy. Injected tests cover 0x800 and 0x2800, not native compatibility.
 
 Each child is still created suspended with the fixed ordered atomic JOB_LIST,
 without breakaway or a substitute parent. Its exact retained process handle is
@@ -430,6 +440,8 @@ can share inherited ancestors with every role. Shared-ancestor interruption or
 missing observations remain UNKNOWN, not proof of successful independent stop.
 The result binds the selected mode and immediate observations and always records
 `ancestor_chain_validated: false`; it is not a full host compatibility audit.
+`immediate_job_breakaway_ok` records accepted immediate-parent permission, or
+null when limits were not admitted; it does not report that escape occurred.
 
 This mode is implemented for injected testing only. Public native refusal gates
 remain unconditional. A future agent-operated native run needs fresh acceptance
