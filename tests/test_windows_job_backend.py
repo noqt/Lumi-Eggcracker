@@ -1335,6 +1335,12 @@ class CompleteQualificationTests(unittest.TestCase):
                     result = self.prepare_independent().run(self.independent_pause)
                     self.assertEqual(result["failure"]["stage"],
                                      "HOST_JOB_LIMITS" if kind == 9 else "HOST_JOB_UI")
+                    query = result["immediate_job_query"]
+                    self.assertEqual(query["information_class"], kind)
+                    self.assertEqual(query["refusal"], "API_FAILURE" if fault == "api" else "RETURN_SIZE")
+                    self.assertEqual(query["returned_bytes"] is None, fault == "api")
+                    self.assertIsNone(query["limit_flags"])
+                    self.assertIsNone(query["ui_restrictions"])
                     self.assertEqual(result["outcome"], "UNKNOWN")
                     self.assertNotIn("CreateJobObjectW", [name for _, name in self.kernel.events])
                     self.assertFalse(any(self.kernel.tables.values()))
@@ -1351,6 +1357,10 @@ class CompleteQualificationTests(unittest.TestCase):
                 result = self.prepare_independent().run(self.independent_pause)
                 self.assertEqual(result["failure"]["stage"],
                                  "HOST_JOB_UI" if ui else "HOST_JOB_LIMITS")
+                query = result["immediate_job_query"]
+                self.assertEqual(query["refusal"], "UI_FLAGS" if ui else "LIMIT_FLAGS")
+                self.assertEqual(query["returned_bytes"], 4 if ui else 144)
+                self.assertEqual(query["ui_restrictions"] if ui else query["limit_flags"], ui or flags)
                 self.assertFalse(result["case_matched_expected_observation"])
                 self.assertNotIn("CreateProcessW", [name for _, name in self.kernel.events])
                 self.assertFalse(any(self.kernel.tables.values()))
@@ -1385,6 +1395,37 @@ class CompleteQualificationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             owner.immediate_job_information(9)
         self.assertEqual(owner.owned, [])  # NULL queries never create ancestor ownership.
+
+    def test_immediate_job_diagnostic_reasons_are_fixed_bounded_and_shape_gated(self):
+        cases = ((1, "WORKING_SET"), (2, "PROCESS_TIME"), (4, "JOB_TIME"),
+                 (0x44, "TIME_FLAGS"), (8, "ACTIVE_PROCESS"), (0x10, "AFFINITY"),
+                 (0x20, "PRIORITY"), (0x80, "SCHEDULING"), (0x100, "PROCESS_MEMORY"),
+                 (0x200, "JOB_MEMORY"), (0x4000, "SUBSET_AFFINITY"))
+        for flags, expected in cases:
+            with self.subTest(flags=flags):
+                self.kernel = RoleKernel()
+                self.kernel.host_job = True
+                basic = self.kernel.ancestor_limits.BasicLimitInformation
+                basic.LimitFlags = flags
+                if expected == "TIME_FLAGS":
+                    basic.PerJobUserTimeLimit = 1
+                if expected == "SCHEDULING":
+                    basic.SchedulingClass = 10
+                owner = backend.RoleHandles(self.kernel.factory("supervisor", None))
+                with self.assertRaises(ValueError):
+                    owner.immediate_job_information(9)
+                self.assertEqual(owner.immediate_job_query, {
+                    "information_class": 9, "returned_bytes": 144, "limit_flags": flags,
+                    "ui_restrictions": None, "refusal": expected})
+                self.assertLess(len(backend.bounded_json(owner.immediate_job_query)), 256)
+                self.assertEqual(owner.owned, [])
+                basic.LimitFlags = 0
+                self.assertEqual(owner.immediate_job_information(9), 0)
+                self.assertIsNone(owner.immediate_job_query["refusal"])
+                self.assertEqual(owner.immediate_job_information(4), 0)
+                self.assertEqual(owner.immediate_job_query, {
+                    "information_class": 4, "returned_bytes": 4, "limit_flags": None,
+                    "ui_restrictions": 0, "refusal": None})
 
     def test_each_owned_role_membership_rechecked_before_resume(self):
         for child in ("observer", "canary", "controller", "target"):
