@@ -267,6 +267,8 @@ def proposal():
             "Dormant one-case native packet wiring, exclusive journal and bounded result file",
             "Current-process TokenElevation DWORD preflight before jobs/targets; injected tests only",
             "Finite one-shot abort and retained session through CLI exit; unresolved cleanup is UNKNOWN",
+            "Hash-bound optional inherited-nested mode; fixed immediate-job queries, no ancestor control",
+            "Every created role's exact owned-job membership checked at creation and before resume",
         ],
         "target": {
             "runtime": "Existing pinned CPython 3.12.10 Windows x86_64 portable",
@@ -277,6 +279,7 @@ def proposal():
             "active_process_limit": 1,
             "cpu_rate_per_10000_of_parent": 5000,
             "intended_effective_system_cpu_percent": 10,
+            "cpu_limit_interpretation": "Configured ceiling without tighter ancestors, not reserved capacity",
             "children_or_breakaway": False,
             "inherited_handles": [],
             "startup_limit": "Interpreter/OS loading accesses runtime files. These flags are not "
@@ -290,7 +293,8 @@ def proposal():
             "observer": "Supervisor-created, inside outer but outside target inner job. Receives "
                         "only QUERY_LIMITED_INFORMATION|SYNCHRONIZE target handle by direct "
                         "DuplicateHandle into observer; never target terminate/job rights.",
-            "canary": "Fixed sleep outside outer job; check before intervention cleanup.",
+            "canary": "Fixed sleep outside owned outer job, not independent of inherited ancestors; "
+                      "check before intervention cleanup.",
         },
         "role_resource_plan": {
             "max_simultaneous_processes_including_supervisor": 5,
@@ -301,11 +305,15 @@ def proposal():
             "observer_job": {"active_processes": 1, "committed_memory_mib": 128,
                              "cpu_percent_of_outer": 25},
             "canary_job": {"active_processes": 1, "committed_memory_mib": 128, "system_cpu_percent": 5},
-            "preexisting_supervisor_job": "Refuse; no implicit compatibility or breakaway. "
-                                          "Fixed HOST_JOB_MEMBERSHIP and HOST_JOB_DEADLINE "
-                                          "diagnostics distinguish admission failures.",
+            "preexisting_supervisor_job": "OUTSIDE_ONLY default refuses membership. Explicit "
+                                          "hash-bound REQUIRE_INHERITED_NESTED requires membership "
+                                          "and fixed immediate-job UI/limit checks; unknown flags, "
+                                          "UI/breakaway, failed or malformed queries refuse. "
+                                          "No ancestor control or full-chain validation.",
             "limit": "Stub arguments, not installed native controls. Committed memory is not "
-                     "resident memory or disk quota. Supervisor memory is not job-bounded.",
+                     "resident memory or disk quota. Supervisor memory is not job-bounded. "
+                     "Inherited quotas can tighten configured caps; allocation is not guaranteed. "
+                     "Shared ancestor loss/canary death is UNKNOWN, never stop proof.",
         },
         "timing_controls": {
             "pin_manifest_metadata_validation_bytes": 2097152,
