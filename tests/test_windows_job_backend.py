@@ -1395,14 +1395,15 @@ class CompleteQualificationTests(unittest.TestCase):
                     self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
                     original, seen = self.kernel.invoke, [0]
 
-                    def invoke(role, name, args, selected=child, when=phase, fallback=original):
+                    def invoke(role, name, args, selected=child, when=phase, fallback=original,
+                               counts=seen):
                         answer = fallback(role, name, args)
                         if name == "IsProcessInJob" and args[1] is not None:
                             process = self.kernel.object(role, args[0])
                             if process["role"] == selected:
-                                seen[0] += 1
+                                counts[0] += 1
                                 rejection = 1 if when == "creation" else (3 if selected == "observer" else 2)
-                                if seen[0] == rejection:
+                                if counts[0] == rejection:
                                     self.kernel.ptr(args[2], self.kernel.a.c.c_int32).value = 0
                         return answer
 
@@ -1491,11 +1492,11 @@ class CompleteQualificationTests(unittest.TestCase):
                 original = self.kernel.invoke
                 controls = []
 
-                def invoke(role, name, args, selected=fault, fallback=original):
+                def invoke(role, name, args, selected=fault, fallback=original, calls=controls):
                     if name in ("SetInformationJobObject", "TerminateJobObject"):
                         self.assertIsNotNone(args[0])
                         self.assertEqual(self.kernel.object(role, args[0])["kind"], "job")
-                        controls.append((role, name, args[0]))
+                        calls.append((role, name, args[0]))
                     if selected == "terminate" and name == "TerminateJobObject":
                         return 0
                     if name == "QueryInformationJobObject" and args[0] is not None:
