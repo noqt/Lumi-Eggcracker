@@ -669,6 +669,7 @@ class RoleHandles(RetainedJob):
         self.requires_accounted_cleanup = False
         self.pin_phase, self.pin_index = "NOT_STARTED", 0
         self.resume_jobs = {}
+        self.immediate_job_query = None
 
     def own(self, handle, kind):
         if type(handle) is not int or not 0 < handle < 2**64 - 1:
@@ -759,30 +760,48 @@ class RoleHandles(RetainedJob):
             raise ValueError("Unselected immediate-job query")
         info = self.a.BasicUiRestrictions() if kind == 4 else self.a.ExtendedLimits()
         returned, size = self.a.DWORD(), self.a.c.sizeof(info)
+        diagnostic = {"information_class": kind, "returned_bytes": None,
+                      "limit_flags": None, "ui_restrictions": None,
+                      "refusal": "API_FAILURE"}
+        self.immediate_job_query = diagnostic
         self._ok(self.api.QueryInformationJobObject(None, kind, self.a.c.byref(info), size,
                                                    self.a.c.byref(returned)), "ImmediateJobQuery")
+        diagnostic["returned_bytes"] = returned.value
         if returned.value != size:
+            diagnostic["refusal"] = "RETURN_SIZE"
             raise ValueError("Malformed immediate-job return size")
         if kind == 4:
+            diagnostic["ui_restrictions"] = info.UIRestrictionsClass
             if info.UIRestrictionsClass != 0:
+                diagnostic["refusal"] = "UI_FLAGS"
                 raise ValueError("Immediate-job UI restrictions refused")
+            diagnostic["refusal"] = None
             return 0
         basic, flags = info.BasicLimitInformation, info.BasicLimitInformation.LimitFlags
+        diagnostic["limit_flags"] = flags
         if flags & (~ANCESTOR_KNOWN_FLAGS | ANCESTOR_BREAKAWAY_FLAGS):
+            diagnostic["refusal"] = "LIMIT_FLAGS"
             raise ValueError("Unknown or breakaway immediate-job flags")
-        if ((flags & 1 and not 0 < basic.MinimumWorkingSetSize <= basic.MaximumWorkingSetSize)
-                or (flags & 2 and basic.PerProcessUserTimeLimit <= 0)
-                or (flags & 4 and basic.PerJobUserTimeLimit <= 0)
-                or (flags & 0x44 == 0x44)
-                or (flags & 8 and basic.ActiveProcessLimit == 0)
-                or (flags & 0x10 and basic.Affinity == 0)
-                or (flags & 0x20 and basic.PriorityClass not in
-                    (0x20, 0x40, 0x80, 0x100, 0x4000, 0x8000))
-                or (flags & 0x80 and basic.SchedulingClass > 9)
-                or (flags & 0x100 and info.ProcessMemoryLimit == 0)
-                or (flags & 0x200 and info.JobMemoryLimit == 0)
-                or (flags & 0x4000 and not flags & 0x10)):
-            raise ValueError("Malformed selected immediate-job limits")
+        checks = (
+            (flags & 1 and not 0 < basic.MinimumWorkingSetSize <= basic.MaximumWorkingSetSize,
+             "WORKING_SET"),
+            (flags & 2 and basic.PerProcessUserTimeLimit <= 0, "PROCESS_TIME"),
+            (flags & 4 and basic.PerJobUserTimeLimit <= 0, "JOB_TIME"),
+            (flags & 0x44 == 0x44, "TIME_FLAGS"),
+            (flags & 8 and basic.ActiveProcessLimit == 0, "ACTIVE_PROCESS"),
+            (flags & 0x10 and basic.Affinity == 0, "AFFINITY"),
+            (flags & 0x20 and basic.PriorityClass not in
+             (0x20, 0x40, 0x80, 0x100, 0x4000, 0x8000), "PRIORITY"),
+            (flags & 0x80 and basic.SchedulingClass > 9, "SCHEDULING"),
+            (flags & 0x100 and info.ProcessMemoryLimit == 0, "PROCESS_MEMORY"),
+            (flags & 0x200 and info.JobMemoryLimit == 0, "JOB_MEMORY"),
+            (flags & 0x4000 and not flags & 0x10, "SUBSET_AFFINITY"),
+        )
+        for rejected, reason in checks:
+            if rejected:
+                diagnostic["refusal"] = reason
+                raise ValueError("Malformed selected immediate-job limits")
+        diagnostic["refusal"] = None
         return flags
 
     def terminate_outer(self, job):
@@ -1932,6 +1951,7 @@ class PreparedQualification:
                 "supervisor_in_job": self.supervisor_in_job,
                 "immediate_job_limit_flags": self.immediate_job_flags,
                 "immediate_job_ui_restrictions": self.immediate_job_ui,
+                "immediate_job_query": self.owner.immediate_job_query,
                 "ancestor_chain_validated": False,
                 "case": self.config["case"], "outcome": outcome,
                 "launch_pins": (("HELD_NATIVE_OBJECTS" if native else "HELD_STUB_OBJECTS")

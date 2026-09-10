@@ -269,6 +269,7 @@ def proposal():
             "Finite one-shot abort and retained session through CLI exit; unresolved cleanup is UNKNOWN",
             "Hash-bound optional inherited-nested mode; fixed immediate-job queries, no ancestor control",
             "Every created role's exact owned-job membership checked at creation and before resume",
+            "Bounded immediate-job query refusal reason and validated-shape flags; no query added",
         ],
         "target": {
             "runtime": "Existing pinned CPython 3.12.10 Windows x86_64 portable",

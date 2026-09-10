@@ -51,6 +51,7 @@
     },
     "inherited_job_admission": {
       "status": "SOURCE_AND_INJECTED_TESTS_ONLY",
+      "bounded_diagnostic": "Latest fixed query records information class, returned bytes only after API success, flags only after exact return size, and fixed first refusal reason. No extra query or relaxed predicate; old HOST_JOB_LIMITS/VALUE remains ambiguous. Existing result/case budgets unchanged.",
       "queries": "Existing QueryInformationJobObject(NULL): class9 ExtendedLimits144 bytes and class4 BasicUiRestrictions4 bytes, exact returned lengths. No ancestor handle, name, PID enumeration or parent mutation.",
       "unknown": "Membership sentinel must become exactly0/1. Unknown LimitFlags outside0x7FFF, either breakaway flag0x1800, nonzero UI, failed/wrong-length queries or malformed flagged limits refuse. Only selected immediate facts checked; no complete ancestry/capacity/lifetime proof.",
       "containment": "Ordered atomic suspended JOB_LIST unchanged. Verify every expected owned job on exact retained created process at creation and immediately before resume; failure never falls back or resumes that process.",

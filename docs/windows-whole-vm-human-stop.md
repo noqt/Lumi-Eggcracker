@@ -378,6 +378,16 @@ HOST_JOB_DEADLINE identifies the later deadline check. Admission refusal retains
 precedence over deadline refusal. An older combined HOST_JOB/VALUE result stays
 ambiguous; new source labels never change historical evidence.
 
+The latest immediate-job query additionally records only fixed information class,
+returned byte count after API success, flags after exact-size validation, and a
+fixed refusal reason (API_FAILURE, RETURN_SIZE, UI_FLAGS, LIMIT_FLAGS or the
+selected invalid limit field). Missing or malformed buffers never supply flag
+values. This small record distinguishes admission branches without another query,
+exception text, paths or unrelated process data. A null refusal marks that query's
+accepted shape and values only, not host compatibility. Old HOST_JOB_LIMITS/VALUE
+results without this record stay ambiguous. Refusal predicates and evidence
+budgets are unchanged; the diagnostic itself grants no retry or native probe.
+
 Diagnostics share the unchanged 12 KiB final-result and 64 KiB total case-evidence
 limits. Serialization failure retains the constant emergency record; output
 failure can retain diagnostics only in the live session, without rewriting or
