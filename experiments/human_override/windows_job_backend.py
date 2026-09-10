@@ -1727,6 +1727,8 @@ class PreparedQualification:
         self.supervisor_in_job = None
         self.immediate_job_flags = None
         self.immediate_job_ui = None
+        self.cleanup_operation = None
+        self.cleanup_termination_rechecks = []
 
     def note_failure(self, error):
         """First failure only; no exception text, paths, arguments or type names."""
@@ -1758,7 +1760,13 @@ class PreparedQualification:
                     code, domain = candidate, label
                     break
         self.failure = {"stage": stage, "error_class": category, "code": code,
-                        "code_domain": domain, "pin_phase": phase, "pin_index": index}
+                        "code_domain": domain, "pin_phase": phase, "pin_index": index,
+                        "cleanup_operation": (
+                            self.cleanup_operation if stage == "CLEANUP" and
+                            self.cleanup_operation in (
+                                "TERMINATE_OUTER", "PRE_TERMINATE_WAIT", "TERMINATE_PROCESS",
+                                "POST_TERMINATE_WAIT", "WAIT_ALL", "CLOSE_DEAD", "QUERY_EMPTY",
+                                "CLOSE_REMAINDER") else None)}
 
     def now(self):
         tick = self.clock()
@@ -1970,6 +1978,7 @@ class PreparedQualification:
                 "current_process_non_elevated": self.non_elevated,
                 "protocol_valid": self.protocol_valid,
                 "failure": self.failure,
+                "cleanup_termination_rechecks": self.cleanup_termination_rechecks,
                 "case_matched_expected_observation": (
                     self.config["case"] == "human_stop" and self.cleaned and self.protocol_valid
                     and self.outcome == "STUB_EARLY_PRIMARY_EXIT" and self.canary_live),
@@ -1978,6 +1987,33 @@ class PreparedQualification:
                 "terminal_cleanup": ("CONFIRMED" if self.cleaned else
                                      "UNCONFIRMED_PROCESS_EXIT_RELEASES_RETAINED_HANDLES"),
                 "evidence": self.evidence.finish(), "evidence_bytes": self.evidence.bytes_written}
+
+    def terminate_cleanup_process(self, process, ordinal):
+        """One owned cleanup attempt; a code-5 race needs immediate signal proof.
+
+        This proves only current process state, never termination causation.
+        Outer-job termination and every other error remain strict failures.
+        """
+        sup = self.owner
+        if (not self.cleanup_started or (process, "process") not in sup.owned
+                or type(ordinal) is not int or not 1 <= ordinal <= 3):
+            raise ValueError("Cleanup requires exact retained created process")
+        self.cleanup_operation = "TERMINATE_PROCESS"
+        if sup.api.TerminateProcess(process, 91):
+            return
+        code = sup.api.last_error()  # Capture before ANY further API call.
+        if type(code) is int and code == 5:
+            self.cleanup_operation = "POST_TERMINATE_WAIT"
+            state = sup.api.WaitForSingleObject(process, 0)
+            label = ("SIGNALED" if state == WAIT_OBJECT_0 else
+                     "TIMEOUT" if state == WAIT_TIMEOUT else
+                     "FAILED" if state == 0xFFFFFFFF else "UNEXPECTED")
+            self.cleanup_termination_rechecks.append(
+                {"process_ordinal": ordinal, "error_code": 5, "wait_state": label})
+            if state == WAIT_OBJECT_0:
+                return
+        self.cleanup_operation = "TERMINATE_PROCESS"
+        raise OSError(code, "ExactCleanupTermination")
 
     def cleanup_steps(self):
         if self.cleanup_started:
@@ -1990,23 +2026,29 @@ class PreparedQualification:
         # cannot prove target death after the observer has been lost.
         if self.outer is not None and (self.outer, "job") in sup.owned:
             try:
+                self.cleanup_operation = "TERMINATE_OUTER"
                 sup.terminate_outer(self.outer)
             except (OSError, ValueError) as error:
                 self.note_failure(error)
                 failed = True
+        ordinal = 0
         for process, kind in sup.owned[:]:
             if kind == "process":
+                ordinal += 1
                 try:
+                    self.cleanup_operation = "PRE_TERMINATE_WAIT"
                     state = sup.api.WaitForSingleObject(process, 0)
                     if state == WAIT_TIMEOUT:
-                        sup.terminate(process)  # Canary/partial-start exact owned cleanup only.
+                        self.terminate_cleanup_process(process, ordinal)
                     elif state != WAIT_OBJECT_0:
+                        self.note_failure(ValueError("Ambiguous cleanup wait"))
                         failed = True
                 except (OSError, ValueError) as error:
                     self.note_failure(error)
                     failed = True
         for _ in range(51):
             try:
+                self.cleanup_operation = "WAIT_ALL"
                 signaled = all(sup.api.WaitForSingleObject(process, 0) == WAIT_OBJECT_0
                                for process, kind in sup.owned if kind == "process")
                 if signaled:
@@ -2015,13 +2057,16 @@ class PreparedQualification:
                     # releasing only confirmed-dead process/thread references.
                     for handle, kind in sup.owned[:]:
                         if kind in ("process", "thread"):
+                            self.cleanup_operation = "CLOSE_DEAD"
                             sup.release(handle)
+                    self.cleanup_operation = "QUERY_EMPTY"
                     empty = all(sup.active_processes(job) == 0
                                 for job, kind in sup.owned if kind == "job")
                     if empty and not failed:
                         self.record("owned_jobs_empty")
                         # Stop on closure failure before touching remaining pins.
                         for handle, _ in sorted(sup.owned[:], key=lambda entry: entry[1] == "artifact"):
+                            self.cleanup_operation = "CLOSE_REMAINDER"
                             sup.release(handle)
                         self.cleaned = not sup.owned and not sup.cleanup_errors
                         break
