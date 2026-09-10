@@ -1391,9 +1391,9 @@ class CompleteQualificationTests(unittest.TestCase):
                 kernel = RoleKernel()
                 owner = backend.RoleHandles(kernel.factory("supervisor", None))
                 job = owner.job_limit(1, 256, 5000)
-                with patch.object(backend, "CREATE_FLAGS", backend.CREATE_FLAGS | 0x01000000):
-                    with self.assertRaises(ValueError):
-                        owner.launch(role, APP, CWD, "G:\\synthetic\\probe.py", (job,))
+                with (patch.object(backend, "CREATE_FLAGS", backend.CREATE_FLAGS | 0x01000000),
+                      self.assertRaises(ValueError)):
+                    owner.launch(role, APP, CWD, "G:\\synthetic\\probe.py", (job,))
                 self.assertNotIn("CreateProcessW", [name for _, name in kernel.events])
                 self.assertNotIn("ResumeThread", [name for _, name in kernel.events])
                 self.assertFalse(any(kernel.tables.values()))
