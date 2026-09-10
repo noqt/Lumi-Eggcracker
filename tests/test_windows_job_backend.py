@@ -2141,7 +2141,8 @@ class CompleteQualificationTests(unittest.TestCase):
                 original = self.kernel.invoke
                 attempts, rechecks, accounting = [], [], []
 
-                def invoke(role, name, args, target=selected):
+                def invoke(role, name, args, target=selected, run=run, original=original,
+                           attempts=attempts, rechecks=rechecks, accounting=accounting):
                     if role == "supervisor" and run.cleanup_started:
                         if name in ("WaitForSingleObject", "TerminateProcess"):
                             obj = self.kernel.object(role, args[0])
@@ -2183,17 +2184,18 @@ class CompleteQualificationTests(unittest.TestCase):
                 original = self.kernel.invoke
                 attempts, rechecks = [], []
 
-                def invoke(role, name, args, error_code=code, wait_state=wait):
-                    if role == "supervisor" and run.cleanup_started:
-                        if name in ("WaitForSingleObject", "TerminateProcess"):
-                            if self.kernel.object(role, args[0]).get("role") == "canary":
-                                if name == "TerminateProcess":
-                                    attempts.append(args[0])
-                                    self.kernel.errors[role] = error_code
-                                    return 0
-                                if attempts:
-                                    rechecks.append(args[0])
-                                    return wait_state
+                def invoke(role, name, args, error_code=code, wait_state=wait,
+                           run=run, original=original, attempts=attempts, rechecks=rechecks):
+                    if (role == "supervisor" and run.cleanup_started
+                            and name in ("WaitForSingleObject", "TerminateProcess")
+                            and self.kernel.object(role, args[0]).get("role") == "canary"):
+                        if name == "TerminateProcess":
+                            attempts.append(args[0])
+                            self.kernel.errors[role] = error_code
+                            return 0
+                        if attempts:
+                            rechecks.append(args[0])
+                            return wait_state
                     return original(role, name, args)
 
                 self.kernel.invoke = invoke
@@ -2236,7 +2238,7 @@ class CompleteQualificationTests(unittest.TestCase):
                 run = self.prepare_independent()
                 original = self.kernel.invoke
 
-                def invoke(role, name, args, selected=api_name):
+                def invoke(role, name, args, selected=api_name, run=run, original=original):
                     if role == "supervisor" and run.cleanup_started and name == selected:
                         self.kernel.errors[role] = 5
                         return 0
