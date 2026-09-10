@@ -676,6 +676,10 @@ class RoleHandles(RetainedJob):
         self.requires_accounted_cleanup = False
         self.pin_phase, self.pin_index = "NOT_STARTED", 0
         self.resume_jobs = {}
+        # A tentative process/thread -> job mapping is not cleanup authority.
+        # Only a binding that survived the exact membership verification is
+        # eligible for the bounded outer-job await path.
+        self.verified_resume_jobs = {}
         self.immediate_job_query = None
 
     def own(self, handle, kind):
@@ -694,7 +698,12 @@ class RoleHandles(RetainedJob):
         self.owned.remove(entries[0])
         self.bound_identities.pop(handle, None)
         self.job_contracts.pop(handle, None)
-        self.resume_jobs.pop(handle, None)
+        for mapping in (self.resume_jobs, self.verified_resume_jobs):
+            mapping.pop(handle, None)
+            for thread, binding in tuple(mapping.items()):
+                if (type(binding) is tuple and binding
+                        and binding[0] == handle):
+                    mapping.pop(thread, None)
 
     def cleanup(self):
         for handle, _ in sorted(self.owned[:], key=lambda entry: entry[1] != "job"):
@@ -812,7 +821,7 @@ class RoleHandles(RetainedJob):
         return flags
 
     def terminate_outer(self, job):
-        if ((job, "job") not in self.owned
+        if (sum(entry == (job, "job") for entry in self.owned) != 1
                 or self.job_contracts.get(job) != (3, 640, 2000)):
             raise ValueError("Only exact retained supervisor outer job may be terminated")
         self._ok(self.api.TerminateJobObject(job, 91), "OwnedOuterTermination")
@@ -934,11 +943,36 @@ class RoleHandles(RetainedJob):
                         raise OSError("Temporary inheritance cleanup failed")
 
     def verify_resume_jobs(self, thread):
-        if (thread, "thread") not in self.owned or thread not in self.resume_jobs:
+        # Treat the map entry as tentative until every exact retained job has
+        # passed membership verification.  Any failure rolls back both the
+        # tentative and verified records while leaving owned handles for the
+        # caller's normal bounded cleanup.
+        if type(thread) is not int:
             raise ValueError("Resume requires exact created thread/job binding")
-        process, jobs = self.resume_jobs[thread]
-        if not all(self.membership(process, job) for job in jobs):
-            raise ValueError("Created process missing expected owned job")
+        self.verified_resume_jobs.pop(thread, None)
+        try:
+            if (sum(entry == (thread, "thread") for entry in self.owned) != 1
+                    or thread not in self.resume_jobs):
+                raise ValueError("Resume requires exact created thread/job binding")
+            binding = self.resume_jobs[thread]
+            if (type(binding) is not tuple or len(binding) != 2
+                    or type(binding[0]) is not int or type(binding[1]) is not tuple
+                    or not 1 <= len(binding[1]) <= 2
+                    or any(type(job) is not int for job in binding[1])
+                    or len(set(binding[1])) != len(binding[1])
+                    or binding[0] == thread
+                    or sum(entry == (binding[0], "process") for entry in self.owned) != 1
+                    or any(sum(entry == (job, "job") for entry in self.owned) != 1
+                           for job in binding[1])):
+                raise ValueError("Resume binding is malformed or not exclusively owned")
+            process, jobs = binding
+            if not all(self.membership(process, job) for job in jobs):
+                raise ValueError("Created process missing expected owned job")
+            self.verified_resume_jobs[thread] = (process, thread, jobs)
+        except BaseException:
+            self.resume_jobs.pop(thread, None)
+            self.verified_resume_jobs.pop(thread, None)
+            raise
 
     def resume(self, thread):
         self.verify_resume_jobs(thread)
@@ -1729,6 +1763,8 @@ class PreparedQualification:
         self.immediate_job_ui = None
         self.cleanup_operation = None
         self.cleanup_termination_rechecks = []
+        self.cleanup_termination_diagnostics = []
+        self.outer_dispatch_succeeded = False
 
     def note_failure(self, error):
         """First failure only; no exception text, paths, arguments or type names."""
@@ -1979,6 +2015,8 @@ class PreparedQualification:
                 "protocol_valid": self.protocol_valid,
                 "failure": self.failure,
                 "cleanup_termination_rechecks": self.cleanup_termination_rechecks,
+                "cleanup_termination_diagnostics": self.cleanup_termination_diagnostics,
+                "outer_dispatch_succeeded": self.outer_dispatch_succeeded,
                 "case_matched_expected_observation": (
                     self.config["case"] == "human_stop" and self.cleaned and self.protocol_valid
                     and self.outcome == "STUB_EARLY_PRIMARY_EXIT" and self.canary_live),
@@ -1987,6 +2025,77 @@ class PreparedQualification:
                 "terminal_cleanup": ("CONFIRMED" if self.cleaned else
                                      "UNCONFIRMED_PROCESS_EXIT_RELEASES_RETAINED_HANDLES"),
                 "evidence": self.evidence.finish(), "evidence_bytes": self.evidence.bytes_written}
+
+    def _cleanup_disposition(self, ordinal, disposition):
+        """Record at most three fixed cleanup dispositions without identities."""
+        if (type(ordinal) is not int or not 1 <= ordinal <= 3
+                or disposition not in ("ALREADY_SIGNALED", "OUTER_DISPATCH_AWAITED",
+                                       "EXACT_TERMINATE")):
+            raise ValueError("Invalid bounded cleanup disposition")
+        if len(self.cleanup_termination_diagnostics) < 3:
+            self.cleanup_termination_diagnostics.append(
+                {"process_ordinal": ordinal, "disposition": disposition})
+
+    def _can_await_outer_member(self, process):
+        """Return whether *process* has a retained, verified outer binding.
+
+        This deliberately consults only source-owned marker state and retained
+        handle tables.  It never asks the OS/stub for fresh membership during
+        cleanup and never consults role names or ``self.roles``.
+        """
+        sup = self.owner
+        outer = self.outer
+        if (not self.outer_dispatch_succeeded or sup is None
+                or type(outer) is not int or type(process) is not int
+                or type(sup.owned) is not list or type(sup.job_contracts) is not dict
+                or type(sup.cleanup_errors) is not list or sup.cleanup_errors
+                or sup.job_contracts.get(outer) != (3, 640, 2000)
+                or sum(entry == (outer, "job") for entry in sup.owned) != 1
+                or sum(entry == (process, "process") for entry in sup.owned) != 1):
+            return False
+        markers = getattr(sup, "verified_resume_jobs", None)
+        tentative = getattr(sup, "resume_jobs", None)
+        if type(markers) is not dict or type(tentative) is not dict:
+            return False
+        matches = []
+        marker_claims = 0
+        for thread, binding in tuple(markers.items()):
+            if (type(thread) is not int or type(binding) is not tuple
+                    or len(binding) != 3):
+                return False
+            bound_process, bound_thread, jobs = binding
+            if (type(bound_process) is not int or type(bound_thread) is not int
+                    or type(jobs) is not tuple or not 1 <= len(jobs) <= 2
+                    or any(type(job) is not int for job in jobs)
+                    or len(set(jobs)) != len(jobs)):
+                return False
+            if bound_process != process:
+                continue
+            marker_claims += 1
+            if (bound_thread != thread or outer not in jobs
+                    or sum(entry == (thread, "thread") for entry in sup.owned) != 1
+                    or tentative.get(thread) != (process, jobs)):
+                continue
+            if any(sum(entry == (job, "job") for entry in sup.owned) != 1
+                   for job in jobs):
+                continue
+            matches.append(thread)
+        tentative_claims = 0
+        for thread, binding in tuple(tentative.items()):
+            if (type(thread) is not int or type(binding) is not tuple
+                    or len(binding) != 2):
+                return False
+            bound_process, jobs = binding
+            if (type(bound_process) is not int or type(jobs) is not tuple
+                    or not 1 <= len(jobs) <= 2
+                    or any(type(job) is not int for job in jobs)
+                    or len(set(jobs)) != len(jobs)):
+                return False
+            if bound_process != process:
+                continue
+            tentative_claims += 1
+        # One process must have exactly one verified process/thread binding.
+        return len(matches) == 1 and marker_claims == 1 and tentative_claims == 1
 
     def terminate_cleanup_process(self, process, ordinal):
         """One owned cleanup attempt; a code-5 race needs immediate signal proof.
@@ -2022,12 +2131,14 @@ class PreparedQualification:
         self.stage = "CLEANUP"
         sup = self.owner
         failed = bool(sup.cleanup_errors)
+        self.outer_dispatch_succeeded = False
         # Keep the outer job handle for accounting. Last-close dispatch alone
         # cannot prove target death after the observer has been lost.
-        if self.outer is not None and (self.outer, "job") in sup.owned:
+        if self.outer is not None:
             try:
                 self.cleanup_operation = "TERMINATE_OUTER"
                 sup.terminate_outer(self.outer)
+                self.outer_dispatch_succeeded = True
             except (OSError, ValueError) as error:
                 self.note_failure(error)
                 failed = True
@@ -2039,7 +2150,13 @@ class PreparedQualification:
                     self.cleanup_operation = "PRE_TERMINATE_WAIT"
                     state = sup.api.WaitForSingleObject(process, 0)
                     if state == WAIT_TIMEOUT:
-                        self.terminate_cleanup_process(process, ordinal)
+                        if self._can_await_outer_member(process):
+                            self._cleanup_disposition(ordinal, "OUTER_DISPATCH_AWAITED")
+                        else:
+                            self._cleanup_disposition(ordinal, "EXACT_TERMINATE")
+                            self.terminate_cleanup_process(process, ordinal)
+                    elif state == WAIT_OBJECT_0:
+                        self._cleanup_disposition(ordinal, "ALREADY_SIGNALED")
                     elif state != WAIT_OBJECT_0:
                         self.note_failure(ValueError("Ambiguous cleanup wait"))
                         failed = True
@@ -2049,8 +2166,16 @@ class PreparedQualification:
         for _ in range(51):
             try:
                 self.cleanup_operation = "WAIT_ALL"
-                signaled = all(sup.api.WaitForSingleObject(process, 0) == WAIT_OBJECT_0
-                               for process, kind in sup.owned if kind == "process")
+                wait_states = []
+                for process, kind in sup.owned:
+                    if kind != "process":
+                        continue
+                    state = sup.api.WaitForSingleObject(process, 0)
+                    wait_states.append(state)
+                    if state not in (WAIT_TIMEOUT, WAIT_OBJECT_0):
+                        self.note_failure(ValueError("Ambiguous cleanup wait"))
+                        failed = True
+                signaled = all(state == WAIT_OBJECT_0 for state in wait_states)
                 if signaled:
                     # Accounting may retain terminated members until process
                     # references close. Preserve job + artifact handles while

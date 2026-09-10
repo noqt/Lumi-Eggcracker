@@ -263,6 +263,8 @@ def proposal():
             "Supervisor uses observer reports, retained role handles and its own clock only",
             "Fixed isolated-mode backend loader and injected role entry; native CLI still refuses",
             "Exact owned outer-job termination plus bounded job-empty accounting before pin release",
+            "Transactional verified process/thread bindings permit outer-member await only after a successful exact outer dispatch; canary and unverified members use direct cleanup",
+            "Bounded cleanup ordinal dispositions and actual outer-dispatch status; no handles, paths or causal labels",
             "At most ten serial prepared cases; unresolved cleanup prevents the next case",
             "Dormant one-case native packet wiring, exclusive journal and bounded result file",
             "Current-process TokenElevation DWORD preflight before jobs/targets; injected tests only",
