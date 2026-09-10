@@ -196,6 +196,16 @@ BasicAccountingInformation for every retained job, including partial-setup jobs.
 Only verified ActiveProcesses=0 allows closing jobs and releasing artifact pins.
 The outer count covers the nested target when its observer has been lost;
 controller/observer exit or last-job-handle-close dispatch alone is insufficient.
+After this cleanup invocation's exact retained outer TerminateJobObject call
+returns success, a controller/observer process may skip redundant
+TerminateProcess only when its own retained process/thread binding has already
+passed exact membership verification in that same outer job and the handles,
+job and (3-process, 640-MiB, 2000-rate) contract remain uniquely retained.
+The verified marker is transactional: failed membership, duplicate or
+malformed mappings, a missing/closed thread, a wrong outer job or a partial
+binding falls back to direct disposal. A successful outer dispatch permits
+awaiting a member but never proves exit; a failed dispatch never suppresses
+direct disposal. The canary is outside the outer job and remains direct.
 Accounting can retain terminated members until process references are released,
 so signaled process references close before the zero-count poll, not after it.
 Job termination/query/close failure, malformed size/count or nonzero counts keep
@@ -279,6 +289,9 @@ cannot remove the source gate or grant execution. A later, mechanically small
 gate-release candidate needs its own exact source hashes, complete packet hash,
 independent review and Chair grant naming the exact command. Digest equality is
 consistency with that separate approval, not authentication of a CLI caller.
+The result also reports only bounded ordinal/disposition cleanup diagnostics
+(`ALREADY_SIGNALED`, `OUTER_DISPATCH_AWAITED`, `EXACT_TERMINATE`) and the
+actual outer-dispatch boolean; it contains no handles, paths or causal labels.
 
 The selected first packet is one human_stop only: at most five trusted roles,
 fixed sleep60 target/canary, the existing job/resource limits, 29-second deadline
