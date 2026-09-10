@@ -29,6 +29,18 @@ CREATE_LOCK = threading.RLock()
 SECOND = 1_000_000_000
 JOURNAL_LIMIT = 8192
 CASE_RESULT_LIMIT = 65536 - 3 * 4096 - 2 * 16384 - JOURNAL_LIMIT
+JOB_MODES = ("OUTSIDE_ONLY", "REQUIRE_INHERITED_NESTED")
+CONFIG_FIELDS = {"application", "cwd", "source", "generation", "case"}
+ANCESTOR_KNOWN_FLAGS = 0x7FFF
+ANCESTOR_BREAKAWAY_FLAGS = 0x1800
+
+
+def supervisor_job_mode(config):
+    """Omitted mode preserves the original outside-only contract and digest."""
+    mode = config.get("supervisor_job_mode", "OUTSIDE_ONLY")
+    if type(mode) is not str or mode not in JOB_MODES:
+        raise ValueError("Unknown supervisor job mode")
+    return mode
 
 
 def native_backend(*_args, **_kwargs):
@@ -297,6 +309,9 @@ def make_abi():
         # Only the CpuRate union arm is used; both union and DWORD are 4 bytes.
         _fields_ = [("ControlFlags", dword), ("CpuRate", dword)]
 
+    class BasicUiRestrictions(c.Structure):
+        _fields_ = [("UIRestrictionsClass", dword)]
+
     class StartupInfo(c.Structure):
         _fields_ = [("cb", dword), ("lpReserved", handle), ("lpDesktop", handle),
                     ("lpTitle", handle)] + [(name, dword) for name in (
@@ -361,7 +376,8 @@ def make_abi():
     return SimpleNamespace(c=c, DWORD=dword, WORD=word, SIZE_T=size, HANDLE=handle,
                            FileTime=FileTime, BasicLimits=BasicLimits,
                            IoCounters=IoCounters, ExtendedLimits=ExtendedLimits,
-                           CpuLimits=CpuLimits, StartupInfo=StartupInfo,
+                           CpuLimits=CpuLimits, BasicUiRestrictions=BasicUiRestrictions,
+                           StartupInfo=StartupInfo,
                            StartupInfoEx=StartupInfoEx, ProcessInformation=ProcessInformation,
                            FileInformation=FileInformation, BasicAccounting=BasicAccounting,
                            signatures=signatures)
@@ -652,6 +668,7 @@ class RoleHandles(RetainedJob):
         self.job_contracts = {}
         self.requires_accounted_cleanup = False
         self.pin_phase, self.pin_index = "NOT_STARTED", 0
+        self.resume_jobs = {}
 
     def own(self, handle, kind):
         if type(handle) is not int or not 0 < handle < 2**64 - 1:
@@ -669,6 +686,7 @@ class RoleHandles(RetainedJob):
         self.owned.remove(entries[0])
         self.bound_identities.pop(handle, None)
         self.job_contracts.pop(handle, None)
+        self.resume_jobs.pop(handle, None)
 
     def cleanup(self):
         for handle, _ in sorted(self.owned[:], key=lambda entry: entry[1] != "job"):
@@ -722,6 +740,50 @@ class RoleHandles(RetainedJob):
                                                  a.c.sizeof(cpu)), "RoleCpuLimit")
         self.job_contracts[job] = (processes, memory_mib, cpu_rate)
         return job
+
+    def membership(self, process, job):
+        """Exact current/retained process and optional retained job only."""
+        if process != 2**64 - 1 and (process, "process") not in self.owned:
+            raise ValueError("Membership requires exact owned process")
+        if job is not None and (job, "job") not in self.owned:
+            raise ValueError("Membership requires exact owned job")
+        value = self.a.c.c_int32(-1)
+        self._ok(self.api.IsProcessInJob(process, job, self.a.c.byref(value)), "JobMembership")
+        if value.value not in (0, 1):
+            raise ValueError("Ambiguous membership result")
+        return bool(value.value)
+
+    def immediate_job_information(self, kind):
+        """Fixed read-only NULL queries; no ancestor handle is obtained."""
+        if kind not in (4, 9):
+            raise ValueError("Unselected immediate-job query")
+        info = self.a.BasicUiRestrictions() if kind == 4 else self.a.ExtendedLimits()
+        returned, size = self.a.DWORD(), self.a.c.sizeof(info)
+        self._ok(self.api.QueryInformationJobObject(None, kind, self.a.c.byref(info), size,
+                                                   self.a.c.byref(returned)), "ImmediateJobQuery")
+        if returned.value != size:
+            raise ValueError("Malformed immediate-job return size")
+        if kind == 4:
+            if info.UIRestrictionsClass != 0:
+                raise ValueError("Immediate-job UI restrictions refused")
+            return 0
+        basic, flags = info.BasicLimitInformation, info.BasicLimitInformation.LimitFlags
+        if flags & (~ANCESTOR_KNOWN_FLAGS | ANCESTOR_BREAKAWAY_FLAGS):
+            raise ValueError("Unknown or breakaway immediate-job flags")
+        if ((flags & 1 and not 0 < basic.MinimumWorkingSetSize <= basic.MaximumWorkingSetSize)
+                or (flags & 2 and basic.PerProcessUserTimeLimit <= 0)
+                or (flags & 4 and basic.PerJobUserTimeLimit <= 0)
+                or (flags & 0x44 == 0x44)
+                or (flags & 8 and basic.ActiveProcessLimit == 0)
+                or (flags & 0x10 and basic.Affinity == 0)
+                or (flags & 0x20 and basic.PriorityClass not in
+                    (0x20, 0x40, 0x80, 0x100, 0x4000, 0x8000))
+                or (flags & 0x80 and basic.SchedulingClass > 9)
+                or (flags & 0x100 and info.ProcessMemoryLimit == 0)
+                or (flags & 0x200 and info.JobMemoryLimit == 0)
+                or (flags & 0x4000 and not flags & 0x10)):
+            raise ValueError("Malformed selected immediate-job limits")
+        return flags
 
     def terminate_outer(self, job):
         if ((job, "job") not in self.owned
@@ -822,6 +884,8 @@ class RoleHandles(RetainedJob):
                 self._ok(result, "RoleCreateSuspended")
                 process = self.own(info.hProcess, "process")
                 thread = self.own(info.hThread, "thread")
+                self.resume_jobs[thread] = (process, tuple(jobs))
+                self.verify_resume_jobs(thread)
                 return process, thread, tuple(temporary)
             except BaseException:
                 if not self.requires_accounted_cleanup:
@@ -843,7 +907,15 @@ class RoleHandles(RetainedJob):
                             self.cleanup()
                         raise OSError("Temporary inheritance cleanup failed")
 
+    def verify_resume_jobs(self, thread):
+        if (thread, "thread") not in self.owned or thread not in self.resume_jobs:
+            raise ValueError("Resume requires exact created thread/job binding")
+        process, jobs = self.resume_jobs[thread]
+        if not all(self.membership(process, job) for job in jobs):
+            raise ValueError("Created process missing expected owned job")
+
     def resume(self, thread):
+        self.verify_resume_jobs(thread)
         if self.api.ResumeThread(thread) != 1:
             raise ValueError("Unexpected role suspend count")
 
@@ -1199,9 +1271,10 @@ def decode_bootstrap(encoded):
         raise ValueError("Invalid role bootstrap JSON") from error
     if bounded_json(value, 8192) != raw:
         raise ValueError("Noncanonical/duplicate bootstrap encoding")
-    if type(value) is not dict or set(value) != {
+    fields = {
             "role", "handles", "application", "cwd", "source", "generation", "case",
-            "config_sha256", "started_ns", "deadline_ns"}:
+            "config_sha256", "started_ns", "deadline_ns"}
+    if type(value) is not dict or set(value) not in (fields, fields | {"supervisor_job_mode"}):
         raise ValueError("Unexpected bootstrap fields")
     if type(value["role"]) is not str or value["role"] not in ("controller", "observer"):
         raise ValueError("Invalid independent role")
@@ -1221,7 +1294,8 @@ def decode_bootstrap(encoded):
             or not 0 <= value["started_ns"] < value["deadline_ns"] < 2**63
             or value["deadline_ns"] - value["started_ns"] != 30 * SECOND):
         raise ValueError("Invalid bootstrap identity/deadline")
-    config = {name: value[name] for name in ("application", "cwd", "source", "generation", "case")}
+    supervisor_job_mode(value)
+    config = {name: value[name] for name in CONFIG_FIELDS | {"supervisor_job_mode"} if name in value}
     if hashlib.sha256(bounded_json(config)).hexdigest() != digest:
         raise ValueError("Bootstrap configuration hash mismatch")
     return value
@@ -1248,9 +1322,10 @@ def stub_admission(grant, approved, config, inventory, authority="STUB_ONLY"):
     """
     if authority not in ("STUB_ONLY", "NATIVE_QUALIFICATION"):
         raise PermissionError("Unselected qualification authority")
-    if type(config) is not dict or set(config) != {
-            "application", "cwd", "source", "generation", "case"}:
+    if type(config) is not dict or set(config) not in (
+            CONFIG_FIELDS, CONFIG_FIELDS | {"supervisor_job_mode"}):
         raise ValueError("Exact fixed probe configuration required")
+    supervisor_job_mode(config)
     for key in ("application", "cwd", "source"):
         exact_path(config[key])
     if (type(config["generation"]) is not int or not 1 <= config["generation"] < 2**63
@@ -1623,13 +1698,17 @@ class PreparedQualification:
         self.cleanup_started = self.abort_started = False
         self.non_elevated = False
         self.stage, self.failure = "SETUP", None
+        self.supervisor_in_job = None
+        self.immediate_job_flags = None
+        self.immediate_job_ui = None
 
     def note_failure(self, error):
         """First failure only; no exception text, paths, arguments or type names."""
         if self.failure is not None:
             return
         stages = ("SETUP", "TOKEN_PREFLIGHT", "PIN_ADMISSION", "HOST_JOB",
-                  "HOST_JOB_MEMBERSHIP", "HOST_JOB_DEADLINE", "JOBS",
+                  "HOST_JOB_MEMBERSHIP", "HOST_JOB_LIMITS", "HOST_JOB_UI",
+                  "HOST_JOB_DEADLINE", "JOBS",
                   "PIPES", "ROLES", "OBSERVE", "CLEANUP", "SERIALIZE", "OUTPUT")
         phases = ("NOT_STARTED", "BINDING", "MANIFEST", "ANCESTORS", "OPEN_DIRECTORY",
                   "OPEN_FILE", "FILE_IDENTITY", "FINAL_PATH", "HASH_FILE", "RECHECK_FILE")
@@ -1686,12 +1765,16 @@ class PreparedQualification:
             sup, self.grant, self.approved, c, self.inventory,
             self.physical["source_root"], self.physical["sources"], self.authority)
         self.stage = "HOST_JOB"
-        in_job = sup.a.c.c_int32()
-        sup._ok(sup.api.IsProcessInJob(sup.api.GetCurrentProcess(), None,
-                                      sup.a.c.byref(in_job)), "SupervisorJobCheck")
-        if in_job.value:
+        self.supervisor_in_job = sup.membership(sup.api.GetCurrentProcess(), None)
+        mode = supervisor_job_mode(c)
+        if self.supervisor_in_job != (mode == "REQUIRE_INHERITED_NESTED"):
             self.stage = "HOST_JOB_MEMBERSHIP"
             raise ValueError("Unqualified supervisor job")
+        if mode == "REQUIRE_INHERITED_NESTED":
+            self.stage = "HOST_JOB_LIMITS"
+            self.immediate_job_flags = sup.immediate_job_information(9)
+            self.stage = "HOST_JOB_UI"
+            self.immediate_job_ui = sup.immediate_job_information(4)
         self.stage = "HOST_JOB_DEADLINE"
         if self.now() >= self.deadline - SECOND:
             raise ValueError("Overdue setup")
@@ -1845,6 +1928,11 @@ class PreparedQualification:
                 "generation": self.config["generation"], "config_sha256": self.digest,
                 "source_sha256": self.grant["source_sha256"],
                 "runtime_sha256": self.grant["runtime_sha256"],
+                "supervisor_job_mode": supervisor_job_mode(self.config),
+                "supervisor_in_job": self.supervisor_in_job,
+                "immediate_job_limit_flags": self.immediate_job_flags,
+                "immediate_job_ui_restrictions": self.immediate_job_ui,
+                "ancestor_chain_validated": False,
                 "case": self.config["case"], "outcome": outcome,
                 "launch_pins": (("HELD_NATIVE_OBJECTS" if native else "HELD_STUB_OBJECTS")
                                 if self.artifacts else "REFUSED"),
@@ -2054,11 +2142,13 @@ class StubQualification:
             self.artifacts = pin_physical_launch(
                 sup, self.grant, self.approved, c, self.inventory,
                 self.physical["source_root"], self.physical["sources"])
-        in_job = sup.a.c.c_int32()
-        sup._ok(sup.api.IsProcessInJob(sup.api.GetCurrentProcess(), None,
-                                       sup.a.c.byref(in_job)), "SupervisorJobCheck")
-        if in_job.value:
+        in_job = sup.membership(sup.api.GetCurrentProcess(), None)
+        mode = supervisor_job_mode(c)
+        if in_job != (mode == "REQUIRE_INHERITED_NESTED"):
             raise ValueError("Pre-existing supervisor job is not qualified; no breakaway")
+        if mode == "REQUIRE_INHERITED_NESTED":
+            sup.immediate_job_information(9)
+            sup.immediate_job_information(4)
         outer = sup.job_limit(3, 640, 2000)
         observer_job = sup.job_limit(1, 128, 2500)  # 25% of outer 20% = 5% system.
         canary_job = sup.job_limit(1, 128, 500)

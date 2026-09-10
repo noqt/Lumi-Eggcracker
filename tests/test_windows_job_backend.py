@@ -176,7 +176,8 @@ class WindowsJobBackendTests(unittest.TestCase):
     def test_abi_layouts_and_offsets(self):
         a = self.fake.a
         expected = {"FileTime": 8, "BasicLimits": 64, "IoCounters": 48,
-                    "ExtendedLimits": 144, "CpuLimits": 8, "StartupInfo": 104,
+                    "ExtendedLimits": 144, "CpuLimits": 8, "BasicUiRestrictions": 4,
+                    "StartupInfo": 104,
                     "StartupInfoEx": 112, "ProcessInformation": 24, "FileInformation": 52}
         for name, size in expected.items():
             self.assertEqual(a.c.sizeof(getattr(a, name)), size, name)
@@ -514,6 +515,10 @@ class RoleKernel:
         self.tick = 0
         self.fail = None
         self.host_job = False
+        self.ancestor_limits = self.a.ExtendedLimits()
+        self.ancestor_ui = 0
+        self.ancestor_queries = []
+        self.membership_checks = []
         self.ordinal = 0
         self.fail_ordinal = None
         self.reject_dead_identity = False
@@ -620,7 +625,14 @@ class RoleKernel:
             self.ptr(args[3], a.DWORD).value = len(data)
             return 1
         if name == "IsProcessInJob":
-            self.ptr(args[2], a.c.c_int32).value = int(self.host_job)
+            if args[0] == 2**64 - 1 and args[1] is None:
+                answer = self.host_job
+            else:
+                process = self.object(role, args[0])
+                job = self.tables[role][args[1]][0]
+                self.membership_checks.append((process["role"], job, process["resumed"]))
+                answer = job in process["jobs"]
+            self.ptr(args[2], a.c.c_int32).value = int(answer)
             return 1
         if name == "CreateJobObjectW":
             return self.new(role, "job")
@@ -636,6 +648,17 @@ class RoleKernel:
                     self.kill(process_id)
             return 1
         if name == "QueryInformationJobObject":
+            if args[0] is None:
+                if not self.host_job or args[1] not in (4, 9):
+                    raise ValueError("Unselected NULL job query")
+                self.ancestor_queries.append((role, args[1]))
+                info = (a.BasicUiRestrictions(self.ancestor_ui) if args[1] == 4
+                        else self.ancestor_limits)
+                if args[3] != a.c.sizeof(info):
+                    raise ValueError("Wrong immediate job query size")
+                a.c.memmove(args[2], a.c.byref(info), a.c.sizeof(info))
+                self.ptr(args[4], a.DWORD).value = a.c.sizeof(info)
+                return 1
             if args[1] != 1 or args[3] != a.c.sizeof(a.BasicAccounting):
                 raise ValueError("Only fixed basic accounting query allowed")
             identity = self.tables[role][args[0]][0]
@@ -1232,6 +1255,284 @@ class CompleteQualificationTests(unittest.TestCase):
         self.assertEqual(result["failure"]["error_class"], "VALUE")
         self.assertEqual(result["outcome"], "UNKNOWN")
         self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_nested_mode_success_binds_result_roles_and_owned_memberships(self):
+        self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+        self.kernel.host_job = True
+        self.kernel.ancestor_limits.BasicLimitInformation.LimitFlags = 0x2400
+        run = self.prepare_independent()
+        result = run.run(self.independent_pause)
+        self.assertTrue(result["case_matched_expected_observation"], (result, self.role_errors))
+        self.assertEqual(result["supervisor_job_mode"], "REQUIRE_INHERITED_NESTED")
+        self.assertTrue(result["supervisor_in_job"])
+        self.assertEqual(result["immediate_job_limit_flags"], 0x2400)
+        self.assertEqual(result["immediate_job_ui_restrictions"], 0)
+        self.assertFalse(result["ancestor_chain_validated"])
+        self.assertEqual(self.kernel.ancestor_queries, [("supervisor", 9), ("supervisor", 4)])
+        for encoded in self.kernel.bootstraps.values():
+            self.assertEqual(backend.decode_bootstrap(encoded)["supervisor_job_mode"],
+                             "REQUIRE_INHERITED_NESTED")
+        counts = {role: sum(row[0] == role for row in self.kernel.membership_checks)
+                  for role in ("observer", "canary", "controller", "target")}
+        self.assertEqual(counts, {"observer": 4, "canary": 2, "controller": 2, "target": 2})
+        self.assertTrue(all(not resumed for _, _, resumed in self.kernel.membership_checks))
+        self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_supervisor_job_mode_default_and_mismatched_membership_refuse(self):
+        for mode, membership in ((None, True), ("OUTSIDE_ONLY", True),
+                                  ("REQUIRE_INHERITED_NESTED", False)):
+            with self.subTest(mode=mode):
+                self.kernel = RoleKernel()
+                self.config.pop("supervisor_job_mode", None)
+                if mode is not None:
+                    self.config["supervisor_job_mode"] = mode
+                self.kernel.host_job = membership
+                result = self.prepare_independent().run(self.independent_pause)
+                self.assertEqual(result["failure"]["stage"], "HOST_JOB_MEMBERSHIP")
+                self.assertEqual(result["supervisor_job_mode"], mode or "OUTSIDE_ONLY")
+                self.assertFalse(result["case_matched_expected_observation"])
+                self.assertEqual(self.kernel.ancestor_queries, [])
+                self.assertNotIn("CreateJobObjectW", [name for _, name in self.kernel.events])
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_nested_mode_is_exact_and_hash_bound_before_api(self):
+        self.prepare()
+        for mode in (None, True, 1, [], {}, "nested", "", "REQUIRE_INHERITED_NESTED"):
+            with self.subTest(mode=mode):
+                changed = {**self.config, "supervisor_job_mode": mode}
+                with self.assertRaises((ValueError, TypeError)):
+                    backend.StubQualification(self.grant, self.grant, changed,
+                                              self.inventory, *self.hooks)
+        record = {**self.config, "config_sha256": self.grant["config_sha256"],
+                  "started_ns": 0, "deadline_ns": 30 * backend.SECOND}
+        for mode in ("OUTSIDE_ONLY", "REQUIRE_INHERITED_NESTED", False):
+            with self.assertRaises(ValueError):
+                backend.encode_bootstrap("controller", {**record, "supervisor_job_mode": mode},
+                                         (101, 102, 103))
+        self.assertEqual(self.kernel.events, [])
+
+    def test_nested_query_failures_and_ambiguous_lengths_precede_jobs(self):
+        for kind in (9, 4):
+            for fault in ("api", "zero_length", "short", "long"):
+                with self.subTest(kind=kind, fault=fault):
+                    self.kernel = RoleKernel()
+                    self.kernel.host_job = True
+                    self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                    original = self.kernel.invoke
+
+                    def invoke(role, name, args, selected=kind, failure=fault, fallback=original):
+                        if name == "QueryInformationJobObject" and args[:2] == (None, selected):
+                            if failure == "api":
+                                return 0
+                            answer = fallback(role, name, args)
+                            self.kernel.ptr(args[4], self.kernel.a.DWORD).value = (
+                                0 if failure == "zero_length" else args[3] +
+                                (-1 if failure == "short" else 1))
+                            return answer
+                        return fallback(role, name, args)
+
+                    self.kernel.invoke = invoke
+                    result = self.prepare_independent().run(self.independent_pause)
+                    self.assertEqual(result["failure"]["stage"],
+                                     "HOST_JOB_LIMITS" if kind == 9 else "HOST_JOB_UI")
+                    self.assertEqual(result["outcome"], "UNKNOWN")
+                    self.assertNotIn("CreateJobObjectW", [name for _, name in self.kernel.events])
+                    self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_nested_unknown_breakaway_and_ui_flags_refuse_without_resume(self):
+        for flags, ui in ((0x800, 0), (0x1000, 0), (0x1800, 0), (0x8000, 0),
+                          (0xFFFFFFFF, 0), (0, 1), (0, 0xFFFFFFFF)):
+            with self.subTest(flags=flags, ui=ui):
+                self.kernel = RoleKernel()
+                self.kernel.host_job = True
+                self.kernel.ancestor_limits.BasicLimitInformation.LimitFlags = flags
+                self.kernel.ancestor_ui = ui
+                self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                result = self.prepare_independent().run(self.independent_pause)
+                self.assertEqual(result["failure"]["stage"],
+                                 "HOST_JOB_UI" if ui else "HOST_JOB_LIMITS")
+                self.assertFalse(result["case_matched_expected_observation"])
+                self.assertNotIn("CreateProcessW", [name for _, name in self.kernel.events])
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_nested_selected_limit_values_are_validated(self):
+        for flags in (1, 2, 4, 8, 0x10, 0x20, 0x44, 0x100, 0x200, 0x4000):
+            with self.subTest(flags=flags):
+                self.kernel = RoleKernel()
+                self.kernel.host_job = True
+                self.kernel.ancestor_limits.BasicLimitInformation.LimitFlags = flags
+                self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                result = self.prepare_independent().run(self.independent_pause)
+                self.assertEqual(result["failure"]["stage"], "HOST_JOB_LIMITS")
+                self.assertFalse(any(self.kernel.tables.values()))
+        self.kernel = RoleKernel()
+        self.kernel.host_job = True
+        limits = self.kernel.ancestor_limits
+        basic = limits.BasicLimitInformation
+        basic.LimitFlags = 0x67BF  # All recognized non-breakaway flags except PRESERVE_JOB_TIME.
+        basic.MinimumWorkingSetSize, basic.MaximumWorkingSetSize = 1, 2
+        basic.PerProcessUserTimeLimit = basic.PerJobUserTimeLimit = 1
+        basic.ActiveProcessLimit, basic.Affinity, basic.PriorityClass = 1, 1, 0x20
+        basic.SchedulingClass = 9
+        limits.ProcessMemoryLimit = limits.JobMemoryLimit = 1
+        owner = backend.RoleHandles(self.kernel.factory("supervisor", None))
+        self.assertEqual(owner.immediate_job_information(9), 0x67BF)
+        basic.SchedulingClass = 10
+        with self.assertRaises(ValueError):
+            owner.immediate_job_information(9)
+        basic.SchedulingClass = 9
+        basic.MinimumWorkingSetSize = 3
+        with self.assertRaises(ValueError):
+            owner.immediate_job_information(9)
+        self.assertEqual(owner.owned, [])  # NULL queries never create ancestor ownership.
+
+    def test_each_owned_role_membership_rechecked_before_resume(self):
+        for child in ("observer", "canary", "controller", "target"):
+            for phase in ("creation", "resume"):
+                with self.subTest(child=child, phase=phase):
+                    self.kernel = RoleKernel()
+                    self.kernel.host_job = True
+                    self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                    original, seen = self.kernel.invoke, [0]
+
+                    def invoke(role, name, args, selected=child, when=phase, fallback=original,
+                               counts=seen):
+                        answer = fallback(role, name, args)
+                        if name == "IsProcessInJob" and args[1] is not None:
+                            process = self.kernel.object(role, args[0])
+                            if process["role"] == selected:
+                                counts[0] += 1
+                                rejection = 1 if when == "creation" else (3 if selected == "observer" else 2)
+                                if counts[0] == rejection:
+                                    self.kernel.ptr(args[2], self.kernel.a.c.c_int32).value = 0
+                        return answer
+
+                    self.kernel.invoke = invoke
+                    result = self.prepare_independent().run(self.independent_pause)
+                    self.assertFalse(result["case_matched_expected_observation"], result)
+                    self.assertFalse(self.kernel.objects[self.kernel.roles[child]]["resumed"])
+                    self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_nested_shared_ancestor_loss_is_unknown_not_stop_success(self):
+        self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+        self.kernel.host_job = True
+        run = self.prepare_independent()
+        pause = self.independent_pause
+        killed = [False]
+
+        def lose_ancestor(amount):
+            pause(amount)
+            if run.live_tick is not None and not killed[0]:
+                killed[0] = True
+                for identity in list(self.kernel.roles.values()):
+                    self.kernel.kill(identity)
+
+        result = run.run(lose_ancestor)
+        self.assertTrue(killed[0])
+        self.assertEqual(result["outcome"], "UNKNOWN")
+        self.assertFalse(result["case_matched_expected_observation"])
+        self.assertFalse(result["canary_live_before_cleanup"])
+        self.assertFalse(result["ancestor_chain_validated"])
+
+    def test_nested_admission_deadline_and_ambiguous_membership_fail_closed(self):
+        for fault in ("deadline", "ambiguous"):
+            with self.subTest(fault=fault):
+                self.kernel = RoleKernel()
+                self.kernel.host_job = True
+                self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                original = self.kernel.invoke
+
+                def invoke(role, name, args, selected=fault, fallback=original):
+                    answer = fallback(role, name, args)
+                    if selected == "deadline" and name == "QueryInformationJobObject":
+                        self.kernel.tick = 29 * backend.SECOND
+                    if selected == "ambiguous" and name == "IsProcessInJob":
+                        self.kernel.ptr(args[2], self.kernel.a.c.c_int32).value = -1
+                    return answer
+
+                self.kernel.invoke = invoke
+                result = self.prepare_independent().run(self.independent_pause)
+                self.assertEqual(result["failure"]["stage"],
+                                 "HOST_JOB_DEADLINE" if fault == "deadline" else "HOST_JOB")
+                self.assertNotIn("CreateJobObjectW", [name for _, name in self.kernel.events])
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_nested_owned_membership_api_and_ambiguous_values_prevent_resume(self):
+        for fault in ("api", "unchanged", "ambiguous"):
+            with self.subTest(fault=fault):
+                self.kernel = RoleKernel()
+                self.kernel.host_job = True
+                self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                original = self.kernel.invoke
+
+                def invoke(role, name, args, selected=fault, fallback=original):
+                    if name == "IsProcessInJob" and args[1] is not None:
+                        if selected == "api":
+                            return 0
+                        if selected == "ambiguous":
+                            self.kernel.ptr(args[2], self.kernel.a.c.c_int32).value = 2
+                        return 1
+                    return fallback(role, name, args)
+
+                self.kernel.invoke = invoke
+                result = self.prepare_independent().run(self.independent_pause)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertFalse(result["case_matched_expected_observation"])
+                self.assertFalse(any(self.kernel.objects[key]["resumed"]
+                                     for key in self.kernel.roles.values()))
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_nested_owned_cleanup_failure_retains_pins_without_ancestor_control(self):
+        for fault in ("terminate", "query", "nonzero"):
+            with self.subTest(fault=fault):
+                self.kernel = RoleKernel()
+                self.kernel.host_job = True
+                self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                run = self.prepare_independent()
+                original = self.kernel.invoke
+                controls = []
+
+                def invoke(role, name, args, selected=fault, fallback=original, calls=controls):
+                    if name in ("SetInformationJobObject", "TerminateJobObject"):
+                        self.assertIsNotNone(args[0])
+                        self.assertEqual(self.kernel.object(role, args[0])["kind"], "job")
+                        calls.append((role, name, args[0]))
+                    if selected == "terminate" and name == "TerminateJobObject":
+                        return 0
+                    if name == "QueryInformationJobObject" and args[0] is not None:
+                        if selected == "query":
+                            return 0
+                        answer = fallback(role, name, args)
+                        if selected == "nonzero":
+                            self.kernel.ptr(args[2], self.kernel.a.BasicAccounting).ActiveProcesses = 1
+                        return answer
+                    return fallback(role, name, args)
+
+                self.kernel.invoke = invoke
+                result = run.run(self.independent_pause)
+                self.assertTrue(controls)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertTrue(result["cleanup_responsibility_retained"])
+                self.assertTrue(any(kind == "artifact" for _, kind in run.owner.owned))
+                self.assertTrue(any(kind == "job" for _, kind in run.owner.owned))
+                self.kernel.invoke = original
+                run.owner.cleanup()
+                self.assertFalse(any(self.kernel.tables.values()))
+
+    def test_nested_creation_and_limit_failures_do_not_fall_back(self):
+        for operation in ("CreateJobObjectW", "SetInformationJobObject",
+                          "UpdateProcThreadAttribute", "CreateProcessW"):
+            with self.subTest(operation=operation):
+                self.kernel = RoleKernel()
+                self.kernel.host_job = True
+                self.config["supervisor_job_mode"] = "REQUIRE_INHERITED_NESTED"
+                run = self.prepare_independent()
+                self.kernel.fail = operation
+                result = run.run(self.independent_pause)
+                self.assertEqual(result["outcome"], "UNKNOWN")
+                self.assertFalse(result["case_matched_expected_observation"])
+                self.assertNotIn("ResumeThread", [name for _, name in self.kernel.events])
+                self.assertFalse(any(self.kernel.tables.values()))
 
     def test_fixed_failure_diagnostics_identify_pin_api_and_redact_details(self):
         for operation, phase in (("CreateFileW", "OPEN_DIRECTORY"),

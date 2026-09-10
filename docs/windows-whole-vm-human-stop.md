@@ -111,8 +111,11 @@ The controller solely owns the target inner job: one process, 256 MiB, proposed
 50% of the parent's CPU allowance (intended 10% system). The observer rate is
 25% of the parent (intended 5% system). The outside canary has its own one-process
 128 MiB job and proposed 5% system CPU cap. All outer jobs belong only to the
-supervisor; no job handle is inherited. No compatible host-job assumption or
-breakaway fallback is permitted: a preexisting supervisor job refuses setup.
+supervisor; no job handle is inherited. The default OUTSIDE_ONLY mode rejects
+preexisting supervisor jobs. The separately hash-bound inherited-nested mode
+below has explicit admission checks, never a breakaway fallback. In that mode
+ancestor quotas may tighten these configured caps; system CPU allocation is not
+guaranteed and the canary is not independent of inherited ancestors.
 
 These are stubbed arguments and arithmetic, not observed native enforcement.
 Actual parent/JOB_LIST nesting, active-process counts, committed-memory/CPU
@@ -367,14 +370,13 @@ No exception message, dynamic type name, path, process argument, identity or
 credential is recorded. Later cleanup failures do not replace the first cause.
 This diagnostic is not a complete event/API trace; null does not prove success.
 
-Host-job admission preserves its existing refusal and call order. HOST_JOB
-identifies query-stage failure; HOST_JOB_MEMBERSHIP identifies nonzero returned
-membership; HOST_JOB_DEADLINE identifies the later clock/deadline check after
-zero membership. Membership refusal takes precedence, as before. Injected tests
-exercise each branch, simultaneous membership/deadline rejection and successful
-admission to owned-job creation. No extra API, compatibility mode, breakaway or
-native eligibility probe is added. An older combined HOST_JOB/VALUE result
-remains ambiguous; these new source labels do not change historical evidence.
+Default OUTSIDE_ONLY admission preserves existing refusal and call order.
+HOST_JOB identifies query failure or an ambiguous membership value;
+HOST_JOB_MEMBERSHIP identifies a mode/membership mismatch. HOST_JOB_LIMITS and
+HOST_JOB_UI identify the new nested-mode immediate-job admission queries;
+HOST_JOB_DEADLINE identifies the later deadline check. Admission refusal retains
+precedence over deadline refusal. An older combined HOST_JOB/VALUE result stays
+ambiguous; new source labels never change historical evidence.
 
 Diagnostics share the unchanged 12 KiB final-result and 64 KiB total case-evidence
 limits. Serialization failure retains the constant emergency record; output
@@ -383,10 +385,54 @@ retrying a partial result. Exit status remains essential. The failed immutable
 qualification artifacts and consumed grant are not reusable: any further native
 attempt requires a fresh reviewed snapshot, exact packet and separate grant.
 
+### Explicit inherited-job preparation mode
+
+The optional `supervisor_job_mode` field accepts exactly `OUTSIDE_ONLY` or
+`REQUIRE_INHERITED_NESTED`. Omission preserves the original OUTSIDE_ONLY
+configuration and digest. An explicit field participates in the configuration
+hash and each role bootstrap; adding or changing it invalidates existing bound
+admission. There is no automatic mode selection or retry after refusal.
+
+After the existing elevation and launch-pin checks, nested mode requires the
+current-process `IsProcessInJob` query to return exactly TRUE; outside-only mode
+requires exactly FALSE. Failed calls or values other than 0/1 are refused.
+Nested mode then issues only two fixed read-only NULL-job queries: extended
+limits (class 9, 144 bytes) and UI restrictions (class 4, 4 bytes), with exact
+returned lengths. These expose the immediate job only, not the entire ancestor
+chain, and obtain no ancestor handle. Nonzero UI restrictions, breakaway flags,
+unknown flags outside the selected 0x7fff mask, and malformed selected limit
+values are refused before owned jobs or children are created. Known limits are
+not removed or loosened. Unqueried classes and higher ancestors remain unproved.
+
+Each child is still created suspended with the fixed ordered atomic JOB_LIST,
+without breakaway or a substitute parent. Its exact retained process handle is
+checked against every selected owned job both after creation and immediately
+before resume. Failed, false or ambiguous membership prevents resume and enters
+existing owned-only cleanup; it never falls back to ordinary process creation.
+Owned-job limits, retained pins, query-only observation and zero-process cleanup
+requirements remain unchanged. No parent-job termination, modification, handle
+acquisition, privilege change or host-policy change is introduced.
+
+Inherited limits can be stricter than the configured owned-job ceilings and can
+prevent creation or progress. CPU percentages are ceilings relative to the job
+hierarchy, not guaranteed capacity. The canary is outside the owned outer job but
+can share inherited ancestors with every role. Shared-ancestor interruption or
+missing observations remain UNKNOWN, not proof of successful independent stop.
+The result binds the selected mode and immediate observations and always records
+`ancestor_chain_validated: false`; it is not a full host compatibility audit.
+
+This mode is implemented for injected testing only. Public native refusal gates
+remain unconditional. A future agent-operated native run needs fresh acceptance
+of the actual changed source and whole procedure, plus its own exact run scope;
+prior human-only or consumed grants do not authorise it. Stub success does not
+establish native Windows behaviour, a Linux boundary, durable real restart
+inhibition, adaptive-opponent resistance, or completion of the experiment brief.
+
 ### Primary ABI/design references
 
 - [Process creation](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) and [STARTUPINFOEX](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-startupinfoexw).
 - [Attribute lists, JOB_LIST and HANDLE_LIST](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute).
+- [Nested jobs and inherited limits](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs) and [fixed UI restriction layout](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_ui_restrictions).
 - [Job basic limits](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_limit_information), [extended layout](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information) and [CPU hard cap](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_cpu_rate_control_information).
 - [DuplicateHandle rights and inheritance](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle), [creation FILETIME](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocesstimes) and [image identity](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew).
 - [Owned-job termination](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-terminatejobobject), [fixed job query](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject) and [basic accounting layout and reference lifetime](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_basic_accounting_information).
