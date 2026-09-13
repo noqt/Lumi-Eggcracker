@@ -47,7 +47,11 @@ harmless synthetic process tree and shows whether the kill mechanism worked.
 > survives. Run the supported disposable path and report the observed pass,
 > redacted failure, friction, or reproducible miss from that exact run. We are
 > opening three design-partner places for people who will challenge the four
-> supported profiles. There is no telemetry, paid plan or sales call.
+> supported profiles. There is no telemetry. This evaluation and the existing
+> free support routes require no purchase or sales call. Any optional one-off
+> assistance is separate: a nonbinding proposal, not currently available to
+> purchase. Interest in that proposal does not change access to or handling of
+> free support.
 
 **Start with the read-only host check.** It makes no network request and creates
 no workspace, build, installation or service. [Check compatibility
