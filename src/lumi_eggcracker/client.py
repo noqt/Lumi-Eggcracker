@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import socket
 import struct
+from collections.abc import Callable
 from typing import Any
 
 from .jsonio import JsonInputError
@@ -34,7 +36,9 @@ SOCKETS = {
 }
 
 
-def _receive(connection: socket.socket) -> dict[str, Any]:
+def _receive(
+    connection: socket.socket, *, decode: Callable[[str], Any] | None = None
+) -> dict[str, Any]:
     header_chunks: list[bytes] = []
     remaining = 4
     while remaining:
@@ -55,7 +59,8 @@ def _receive(connection: socket.socket) -> dict[str, Any]:
         chunks.append(chunk)
         length -= len(chunk)
     try:
-        value = json.loads(b"".join(chunks).decode("utf-8"))
+        text = b"".join(chunks).decode("utf-8")
+        value = json.loads(text) if decode is None else decode(text)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise JsonInputError(f"invalid supervisor response: {error}") from error
     if not isinstance(value, dict):
@@ -84,4 +89,71 @@ def request(action: str, **args: Any) -> dict[str, Any]:
         raise JsonInputError(str(response["value"]))
     if not isinstance(response["value"], dict):
         raise JsonInputError("supervisor value is invalid")
+    return response["value"]
+
+
+def _strict_doctor_json(text: str) -> Any:
+    depth = 0
+    quoted = False
+    escaped = False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            if depth > 64:
+                raise ValueError("excessive nesting")
+        elif character in "]}":
+            depth -= 1
+
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    def constant(_value: str) -> None:
+        raise ValueError("nonfinite value")
+
+    def number(value: str) -> float:
+        result = float(value)
+        if not math.isfinite(result):
+            raise ValueError("nonfinite value")
+        return result
+
+    def integer(value: str) -> int:
+        if len(value.lstrip("-")) > 4096:
+            raise ValueError("oversized integer")
+        return int(value)
+
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number, parse_int=integer)
+
+
+def doctor_strict() -> dict[str, Any]:
+    """Query only doctor with empty arguments and strict, redacted response validation."""
+    payload = b'{"action":"doctor","args":{}}'
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(30.0)
+            connection.connect(SOCKETS["doctor"])
+            connection.sendall(struct.pack("!I", len(payload)) + payload)
+            response = _receive(connection, decode=_strict_doctor_json)
+        if (
+            set(response) != {"ok", "value"}
+            or type(response["ok"]) is not bool
+            or not response["ok"]
+            or not isinstance(response["value"], dict)
+        ):
+            raise ValueError("invalid envelope")
+    except (OSError, JsonInputError, ValueError, RecursionError):
+        raise JsonInputError("doctor response unavailable") from None
     return response["value"]

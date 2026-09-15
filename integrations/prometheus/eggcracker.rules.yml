@@ -1,0 +1,48 @@
+# Opt in targets with eggcracker_monitor="true" on their node_exporter scrape.
+# All matching is per job and instance; missing is not a global absent().
+groups:
+  - name: eggcracker-reported-health
+    interval: 30s
+    rules:
+      - alert: EggcrackerExporterDown
+        expr: up{eggcracker_monitor="true"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Monitoring exporter unavailable; Eggcracker health is unknown
+      - alert: EggcrackerMetricsMissing
+        expr: (up{eggcracker_monitor="true"} == 1) unless on(job, instance) eggcracker_collection_timestamp_seconds
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Expected Eggcracker collection is absent
+      - alert: EggcrackerCollectionStale
+        expr: ((time() - eggcracker_collection_timestamp_seconds > 180) and on(job, instance) (up{eggcracker_monitor="true"} == 1))
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Eggcracker collection has stopped or publication is failing
+      - alert: EggcrackerClockSkew
+        expr: ((eggcracker_collection_timestamp_seconds - time() > 60) and on(job, instance) (up{eggcracker_monitor="true"} == 1))
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Eggcracker collection clock is ahead; freshness is unknown
+      - alert: EggcrackerQueryFailed
+        expr: (eggcracker_query_valid == 0) and on(job, instance) (time() - eggcracker_collection_timestamp_seconds <= 180) and on(job, instance) (eggcracker_collection_timestamp_seconds - time() <= 60) and on(job, instance) (up{eggcracker_monitor="true"} == 1)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Doctor query is unavailable; reported health is unknown
+      - alert: EggcrackerReportedUnhealthy
+        expr: ((eggcracker_reported_ready == 0) or (eggcracker_discovery_healthy == 0) or (eggcracker_receipt_storage_healthy == 0) or (eggcracker_installation_healthy == 0)) and on(job, instance) (eggcracker_query_valid == 1) and on(job, instance) (time() - eggcracker_collection_timestamp_seconds <= 180) and on(job, instance) (eggcracker_collection_timestamp_seconds - time() <= 60) and on(job, instance) (up{eggcracker_monitor="true"} == 1)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Supervisor reports unready or unhealthy; not a measured containment failure

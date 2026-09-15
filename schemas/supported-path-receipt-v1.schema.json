@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/noqt/Lumi-Eggcracker/schemas/supported-path-receipt-v1.schema.json",
+  "title": "Lumi Eggcracker supported-path receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "recorded_at_utc",
+    "supported_environment",
+    "supported_path",
+    "exact_command",
+    "expected_result",
+    "observed_result",
+    "permission_to_quote",
+    "privacy"
+  ],
+  "properties": {
+    "schema_version": {"const": "lumi-eggcracker-supported-path-receipt-v1"},
+    "recorded_at_utc": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "supported_environment": {"const": "disposable-native-ubuntu-24.04-cgroup-v2"},
+    "supported_path": {"const": "containment-primitive-probe"},
+    "exact_command": {
+      "const": "sudo /usr/bin/python3 -I -S scripts/containment_probe.py --i-understand-this-kills-a-test-tree"
+    },
+    "expected_result": {
+      "const": "result=TERMINATED,target_survivors=0,canary_survived=true,root_populated=0,cleanup_complete=true,exit=0"
+    },
+    "observed_result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "result",
+            "target_survivors",
+            "canary_survived",
+            "root_populated",
+            "cleanup_complete",
+            "source_commit",
+            "source_tree_sha256"
+          ],
+          "properties": {
+            "outcome": {"const": "supported-success"},
+            "result": {"const": "TERMINATED"},
+            "target_survivors": {"const": 0},
+            "canary_survived": {"const": true},
+            "root_populated": {"const": 0},
+            "cleanup_complete": {"const": true},
+            "source_commit": {
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "source_tree_sha256": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "outcome",
+            "blocker_stage",
+            "blocker_code",
+            "source_commit",
+            "source_tree_sha256"
+          ],
+          "properties": {
+            "outcome": {"const": "reproducible-blocker"},
+            "blocker_stage": {
+              "enum": ["host-preflight", "command-start", "probe-execution", "receipt-check"]
+            },
+            "blocker_code": {
+              "enum": [
+                "CGROUP_KILL_REQUIRED",
+                "CGROUP_V2_REQUIRED",
+                "COMMAND_FAILED",
+                "OTHER_REDACTED_BLOCKER",
+                "PIDFD_REQUIRED",
+                "RECEIPT_INVALID",
+                "RECEIPT_MISSING",
+                "ROOT_REQUIRED",
+                "SOURCE_IDENTITY_REQUIRED",
+                "SYSTEMD_REQUIRED",
+                "UNSUPPORTED_HOST"
+              ]
+            },
+            "source_commit": {
+              "type": "string",
+              "maxLength": 40,
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "source_tree_sha256": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "permission_to_quote": {"type": "boolean"},
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "redacted",
+        "secrets_collected",
+        "source_code_collected",
+        "credentials_collected",
+        "personal_data_collected",
+        "raw_environment_collected",
+        "raw_argv_collected",
+        "raw_output_collected",
+        "network_or_upload_used"
+      ],
+      "properties": {
+        "redacted": {"const": true},
+        "secrets_collected": {"const": false},
+        "source_code_collected": {"const": false},
+        "credentials_collected": {"const": false},
+        "personal_data_collected": {"const": false},
+        "raw_environment_collected": {"const": false},
+        "raw_argv_collected": {"const": false},
+        "raw_output_collected": {"const": false},
+        "network_or_upload_used": {"const": false}
+      }
+    }
+  }
+}

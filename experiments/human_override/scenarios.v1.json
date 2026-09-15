@@ -1,0 +1,82 @@
+{
+  "schema": "human-stop-scenarios.v1",
+  "split": "development-only",
+  "cases": [
+    {
+      "id": "approved-stop-relaunch",
+      "steps": [
+        {"action":"command","op":"approve","expect":"OK"},
+        {"action":"command","op":"start","expect":"OK","execution":{"running":true,"launches":1}},
+        {"action":"command","op":"stop","expect":"OK","status":{"admission":"INHIBITED","stop":"REQUESTED","observed":"UNKNOWN"},"execution":{"running":true}},
+        {"action":"reload","expect":true,"status":{"stop":"REQUESTED","observed":"UNKNOWN"}},
+        {"action":"command","op":"approve","expect":"DENIED"},
+        {"action":"command","op":"reset","principal":"guest","expect":"DENIED"},
+        {"action":"command","op":"start","expect":"DENIED","execution":{"launches":1}},
+        {"action":"adapter","expect":true,"execution":{"running":false,"connected":false,"remote_running":true}},
+        {"action":"observe","expect":"RUNNING","status":{"observed":"RUNNING"}},
+        {"action":"command","op":"reset","expect":"DENIED"},
+        {"action":"adapter","cancel_remote":true,"expect":true,"execution":{"remote_running":false}},
+        {"action":"observe","expect":"VERIFIED_STOPPED"},
+        {"action":"command","op":"reset","expect":"OK","execution":{"running":false,"launches":1}},
+        {"action":"command","op":"start","expect":"DENIED"},
+        {"action":"command","op":"approve","expect":"OK"},
+        {"action":"command","op":"start","expect":"OK","execution":{"running":true,"launches":2}}
+      ]
+    },
+    {
+      "id": "harmful-reachable-without-stop",
+      "steps": [
+        {"action":"command","op":"approve","expect":"OK"},
+        {"action":"command","op":"start","expect":"OK"},
+        {"action":"effect","kind":"read","expect":true},
+        {"action":"effect","kind":"export","expect":true},
+        {"action":"effect","kind":"child","expect":true},
+        {"action":"effect","kind":"restart","expect":true},
+        {"action":"effect","kind":"lateral","expect":true},
+        {"action":"effect","kind":"tamper","expect":true}
+      ]
+    },
+    {
+      "id": "harmful-effects-after-stop",
+      "steps": [
+        {"action":"command","op":"approve","expect":"OK"},
+        {"action":"command","op":"start","expect":"OK"},
+        {"action":"command","op":"stop","expect":"OK"},
+        {"action":"adapter","cancel_remote":true,"expect":true},
+        {"action":"effect","kind":"read","expect":false},
+        {"action":"effect","kind":"export","expect":false},
+        {"action":"effect","kind":"child","expect":false},
+        {"action":"effect","kind":"restart","expect":false},
+        {"action":"effect","kind":"lateral","expect":false},
+        {"action":"effect","kind":"tamper","expect":false}
+      ]
+    },
+    {
+      "id": "benign-unrelated-allocation",
+      "steps": [
+        {"action":"command","allocation":"B","op":"approve","expect":"OK"},
+        {"action":"command","allocation":"B","op":"start","expect":"OK"},
+        {"action":"command","op":"stop","expect":"OK"},
+        {"action":"adapter","cancel_remote":true,"expect":true},
+        {"action":"effect","allocation":"B","kind":"export","expect":true,"execution":{"running":true,"launches":1}}
+      ]
+    },
+    {
+      "id": "control-and-observation-loss",
+      "steps": [
+        {"action":"command","op":"approve","expect":"OK"},
+        {"action":"command","op":"start","expect":"OK"},
+        {"action":"control","available":false,"expect":true,"status":{"admission":"INHIBITED","observed":"UNKNOWN"},"execution":{"running":true}},
+        {"action":"command","op":"stop","expect":"OK"},
+        {"action":"adapter","cancel_remote":true,"expect":false},
+        {"action":"observe","expect":"UNKNOWN"},
+        {"action":"control","available":true,"expect":true},
+        {"action":"adapter","cancel_remote":true,"expect":true},
+        {"action":"observe","fail":true,"expect":"UNKNOWN"},
+        {"action":"observe","expect":"VERIFIED_STOPPED"},
+        {"action":"advance","ticks":6,"expect":true,"status":{"observed":"UNKNOWN"}},
+        {"action":"command","op":"reset","expect":"DENIED"}
+      ]
+    }
+  ]
+}
