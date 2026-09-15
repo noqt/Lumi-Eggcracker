@@ -1,0 +1,97 @@
+{
+  "schema": "noqt.huggingface_distribution.v1",
+  "mode": "DERIVED_READ_ONLY_MIRROR",
+  "canonical": {
+    "repository": "https://github.com/noqt/Lumi-Eggcracker",
+    "branch": "main",
+    "checkout_directory": "Lumi-Eggcracker"
+  },
+  "target": {
+    "repo_id": "noqt/eggcracker",
+    "repo_type": "space",
+    "space_sdk": "static",
+    "url": "https://huggingface.co/spaces/noqt/eggcracker",
+    "checkout_directory": "eggcracker"
+  },
+  "sync_triggers": [
+    "PUSH_TO_MAIN",
+    "RELEASE_PUBLISHED",
+    "WORKFLOW_DISPATCH"
+  ],
+  "release_reference": {
+    "tag": "v1.0.10",
+    "tag_url": "https://github.com/noqt/Lumi-Eggcracker/releases/tag/v1.0.10",
+    "tag_object": "4041dbb59054d1a0b9506f4d12a18d504348d3f6",
+    "source_commit": "27cb6dfa0884896025976f8583398c9db7ac9a30",
+    "source_commit_url": "https://github.com/noqt/Lumi-Eggcracker/commit/27cb6dfa0884896025976f8583398c9db7ac9a30",
+    "release_manifest": {
+      "name": "release-manifest.json",
+      "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/release-manifest.json",
+      "sha256": "e74f3442524873e4aa46639438ada1820feb34e6b8ddd7c55d4d7e4fe3e4892a",
+      "source_commit": "27cb6dfa0884896025976f8583398c9db7ac9a30",
+      "artifact": {
+        "name": "lumi-eggcracker-1.0.10.pyz",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/lumi-eggcracker-1.0.10.pyz",
+        "sha256": "5b8a191129d3e7e77b5b9ae896433ecfc6c81eeb8ff64079d49ee8165b0d9fa9"
+      },
+      "source_archive": {
+        "name": "lumi-eggcracker-1.0.10-source.zip",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/lumi-eggcracker-1.0.10-source.zip",
+        "sha256": "acdcdba36a8db1c07a54120410ceed33b25beea894e467caaa98112d759bf161"
+      }
+    },
+    "assets": [
+      {
+        "name": "eggcracker-release-key.asc",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/eggcracker-release-key.asc",
+        "sha256": "1c86d09e657a653edbe32be2182f683a3caf1b98bd6973192bbcb8e3c5fa1313"
+      },
+      {
+        "name": "lumi-eggcracker-1.0.10-linux.zip",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/lumi-eggcracker-1.0.10-linux.zip",
+        "sha256": "64fe6c39c623536ac4aef9e5a1c947a4a1011c2c337a38737d6480b8dc49f12e"
+      },
+      {
+        "name": "lumi-eggcracker-1.0.10-source.zip",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/lumi-eggcracker-1.0.10-source.zip",
+        "sha256": "acdcdba36a8db1c07a54120410ceed33b25beea894e467caaa98112d759bf161"
+      },
+      {
+        "name": "lumi-eggcracker-1.0.10.pyz",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/lumi-eggcracker-1.0.10.pyz",
+        "sha256": "5b8a191129d3e7e77b5b9ae896433ecfc6c81eeb8ff64079d49ee8165b0d9fa9"
+      },
+      {
+        "name": "release-manifest.json",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/release-manifest.json",
+        "sha256": "e74f3442524873e4aa46639438ada1820feb34e6b8ddd7c55d4d7e4fe3e4892a"
+      },
+      {
+        "name": "SHA256SUMS",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/SHA256SUMS",
+        "sha256": "9b01ca17ca8b1f9176818f6e699a332622fd5e253609661767138f71c87fe896"
+      },
+      {
+        "name": "SHA256SUMS.asc",
+        "url": "https://github.com/noqt/Lumi-Eggcracker/releases/download/v1.0.10/SHA256SUMS.asc",
+        "sha256": "79b08515ce0e4c84172ba587769d4a0dbba3c69d14777c05b1ac62243bdae5b3"
+      }
+    ]
+  },
+  "excluded_prefixes": [
+    ".git/",
+    ".github/",
+    "docs/huggingface/"
+  ],
+  "overlays": {
+    "readme_preamble": "docs/huggingface/README_PREAMBLE.md",
+    "static_index": "docs/huggingface/index.html"
+  },
+  "source_marker": "HUGGINGFACE_SYNC.json",
+  "manifest": "HUGGINGFACE_MANIFEST.json",
+  "credential_secret": "HF_TOKEN",
+  "direct_hub_edits": "PROHIBITED_AND_OVERWRITTEN",
+  "forbidden_public_reference_sha256": [
+    "361f4fb6bd466aad815b170a480aec80de2248582244cb6fd1ee30d942208cfd"
+  ]
+}

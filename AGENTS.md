@@ -22,6 +22,19 @@ of current public state. On an instruction, source, documentation, or evidence
 conflict, preserve the state and stop the affected claim or mutation until the
 conflict is reconciled.
 
+The Hugging Face Space at `https://huggingface.co/spaces/noqt/eggcracker` is a
+derived distribution mirror, never an independent source of product truth.
+Changes originate on GitHub `main`; direct Hub edits are prohibited because the
+next sync overwrites them. Build the Hub snapshot only with
+`scripts/build_huggingface_surface.py` and `huggingface-sync-policy.json`. Every
+GitHub `main` update and published release must trigger
+`.github/workflows/sync-huggingface.yml`; manual dispatch is allowed on `main`.
+There is no scheduled drift-repair proposal. A successful sync must publish the
+exact source revision marker and pass remote checksum verification at the
+returned upload commit. If either fails, do not describe the Hub surface as
+current. Never place Hub credentials in the repository, generated snapshot,
+logs, or command arguments.
+
 ## Destructive enforcement boundary
 
 Eggcracker is a privileged native-Linux enforcement daemon, not an alert-only

@@ -6,6 +6,7 @@ with an existing Prometheus/node_exporter workflow.
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
 [v1.0.10 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v1.0.10)
+· [Hugging Face distribution](https://huggingface.co/spaces/noqt/eggcracker)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
 · [Inert developer contract example](docs/security-control-handoff.md)

@@ -1,0 +1,114 @@
+name: Sync Hugging Face distribution
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: huggingface-distribution-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: mirror-and-verify
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'release' && 'main' || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Bind the exact triggering source commit
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "release" ]]; then
+            test "$RELEASE_TAG" = "v1.0.10"
+            release_tag_object="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{tag}")"
+            release_source_revision="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+            test "$release_tag_object" = "4041dbb59054d1a0b9506f4d12a18d504348d3f6"
+            test "$release_source_revision" = "27cb6dfa0884896025976f8583398c9db7ac9a30"
+            source_ref='main'
+            source_revision="$(git rev-parse --verify HEAD)"
+          else
+            source_ref='main'
+            source_revision="$GITHUB_SHA"
+          fi
+          test "$source_revision" = "$(git rev-parse --verify "$source_revision^{commit}")"
+          test "$source_revision" = "$(git rev-parse HEAD)"
+          git diff --no-ext-diff --quiet HEAD --
+          test -z "$(git ls-files --others --exclude-standard)"
+          {
+            echo "SOURCE_REF=$source_ref"
+            echo "SOURCE_REVISION=$source_revision"
+          } >> "$GITHUB_ENV"
+          echo "HUGGINGFACE_SOURCE_REVISION=$source_revision"
+
+      - name: Build the revision-bound distribution snapshot
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python scripts/build_huggingface_surface.py
+          --source-root .
+          --output .hf-staging
+          --source-revision "$SOURCE_REVISION"
+
+      - name: Install the pinned Hugging Face CLI
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+          PIP_NO_CACHE_DIR: "1"
+        run: |
+          python -m pip install huggingface_hub==1.7.1
+          test "$(hf --version)" = "1.7.1"
+          hf upload --help | grep -F -- '--repo-type'
+
+      - name: Require the repository-scoped Hub credential
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${HF_TOKEN:-}" ]]; then
+            echo "::error::Missing HF_TOKEN; distribution status remains INCOMPLETE and no upload was attempted."
+            exit 1
+          fi
+
+      - name: Upload the snapshot with a compare-and-swap parent
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: >-
+          python scripts/upload_huggingface_surface.py
+          --repo-id noqt/eggcracker
+          --repo-type space
+          --folder .hf-staging
+          --revision main
+          --source-revision "$SOURCE_REVISION"
+          --source-root .
+          --output .hf-upload.json
+
+      - name: Verify the complete remote file set at the returned upload commit
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: >-
+          python scripts/verify_huggingface_surface.py
+          --repo-id noqt/eggcracker
+          --repo-type space
+          --staging .hf-staging
+          --upload-record .hf-upload.json
+          --source-revision "$SOURCE_REVISION"
+          --readback "$RUNNER_TEMP/hf-readback-${GITHUB_RUN_ID}"
+          --report .hf-readback.json
