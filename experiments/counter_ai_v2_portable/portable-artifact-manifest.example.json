@@ -1,0 +1,12 @@
+{
+  "schema": "counter-ai-v2.artifact-manifest.v2",
+  "status": "EXAMPLE_NOT_AUTHORIZATION",
+  "source": {
+    "experiments/counter_ai_v2/native_demo.py": "cb836ab6fcc4c0f0bd9108725810d1f3e89c9f9b84e4f15d526d2836e36d84a2",
+    "experiments/counter_ai_v2/workload.py": "fbbf8739ef69890c3c7ab49696768d4d2ea643ce4dd364952909589bf5765ad1"
+  },
+  "materialization": {
+    "rule": "After materialization, compute this file's SHA256 externally and bind that digest only in the independent accepted record and source manifest; never edit this file after acceptance."
+  },
+  "fresh_run_rule": "Use a new run_id, run_nonce, result path, and run directory for every authorized run."
+}

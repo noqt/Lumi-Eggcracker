@@ -1,0 +1,62 @@
+{
+  "schema": "counter-ai-v2.direct-linux-protocol.v1",
+  "status": "SOURCE_ONLY_OFF_BY_DEFAULT",
+  "purpose": "Reproduce the exact frozen v2 native stop/latch demonstration on an explicitly supplied disposable Linux host; this file is not an acceptance record.",
+  "frozen_core": {
+    "experiments/counter_ai_v2/__init__.py": "f575ebebdd9d763e40f78c4036ab68e73cc13814277db6d95dc8c85037933769",
+    "experiments/counter_ai_v2/native_demo.py": "cb836ab6fcc4c0f0bd9108725810d1f3e89c9f9b84e4f15d526d2836e36d84a2",
+    "experiments/counter_ai_v2/workload.py": "fbbf8739ef69890c3c7ab49696768d4d2ea643ce4dd364952909589bf5765ad1"
+  },
+  "execution_gate": {
+    "default": "OFF_BY_DEFAULT",
+    "required": [
+      "independent technical acceptance",
+      "independent Risk acceptance",
+      "fresh run_id and 32-hex run_nonce",
+      "exact native/workload/artifact source hashes",
+      "root-controlled separate acceptance and source-manifest records",
+      "disposable Linux root with cgroup-v2 and dedicated counter-v2/counter-v2-canary accounts"
+    ],
+    "examples": "portable-source-manifest.example.json and portable-artifact-manifest.example.json are placeholders, not authorization"
+  },
+  "command": {
+    "interpreter": "explicit operator-supplied executable",
+    "flags": ["-I", "-B"],
+    "shell": false,
+    "native_script": "experiments/counter_ai_v2/native_demo.py",
+    "workload_script": "experiments/counter_ai_v2/workload.py",
+    "runner": "direct native CLI only; private QEMU runner is not copied"
+  },
+  "boundary": {
+    "network": {"mode": "none", "host_shares": [], "passthrough": []},
+    "host": "No host security, service, account, mount, credential, or third-party endpoint changes",
+    "guest": "Root controller, selected private cgroup-v2 allocation, trusted root observer, separate unprivileged canary",
+    "observer": "Process/logically independent trusted-root observation, not privilege-separated assurance"
+  },
+  "limits": {
+    "selected_cpu_seconds": 5,
+    "selected_memory_bytes": 268435456,
+    "selected_max_processes": 32,
+    "fake_sink_bytes": 16777216,
+    "observer_stop_timeout_seconds": 2,
+    "vm_memory_mib": 1024,
+    "vm_vcpus": 2,
+    "qemu_machine": "q35",
+    "qemu_accel": "tcg",
+    "qemu_tcg_tb_cache_mib": 128,
+    "qemu_wall_seconds": 600
+  },
+  "evidence": {
+    "request": "controller forced-stop request",
+    "self_report": "workload marker only; not external stop proof",
+    "external_stop": "cgroup-v2 observer result plus secondary process census",
+    "canary": "independent heartbeat continuity",
+    "missing": "UNKNOWN, never success"
+  },
+  "not_claimed": [
+    "portable or independent efficacy qualification",
+    "native07 validation of a changed source path",
+    "QEMU execution by this direct route",
+    "holdout access, detector efficacy, production enforcement, or public safety assurance"
+  ]
+}

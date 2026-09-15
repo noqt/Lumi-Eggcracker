@@ -1,0 +1,8 @@
+{
+  "schema": "counter-ai-v2.source-manifest.v1",
+  "native_demo_sha256": "cb836ab6fcc4c0f0bd9108725810d1f3e89c9f9b84e4f15d526d2836e36d84a2",
+  "workload_sha256": "fbbf8739ef69890c3c7ab49696768d4d2ea643ce4dd364952909589bf5765ad1",
+  "artifact_manifest_sha256": "REPLACE_WITH_MATERIALIZED_ARTIFACT_MANIFEST_SHA256",
+  "run_id": "REPLACE_WITH_FRESH_V2_RUN_ID",
+  "run_nonce": "REPLACE_WITH_FRESH_32_LOWERCASE_HEX_NONCE"
+}
