@@ -46,7 +46,13 @@ def upload_surface(
         raise UploadError("only the configured Space repository type is supported")
     if not COMMIT_PATTERN.fullmatch(source_revision):
         raise UploadError("source revision must be an exact 40-character commit")
-    folder = Path(folder).resolve(strict=True)
+    output = Path(output)
+    if output.exists() or output.is_symlink():
+        raise UploadError(f"output already exists: {output}")
+    folder = Path(folder)
+    if folder.is_symlink():
+        raise UploadError("upload folder must not be a symlink")
+    folder = folder.resolve(strict=True)
     if not folder.is_dir() or folder.is_symlink():
         raise UploadError("upload folder must be a regular directory")
     marker_path = folder / "HUGGINGFACE_SYNC.json"

@@ -83,7 +83,10 @@ def verify_surface(
     readback: Path,
     report: Path,
 ) -> dict[str, Any]:
-    staging = Path(staging).resolve(strict=True)
+    staging = Path(staging)
+    if staging.is_symlink():
+        raise VerificationError("staging surface must not be a symlink")
+    staging = staging.resolve(strict=True)
     if not staging.is_dir() or staging.is_symlink():
         raise VerificationError("staging surface must be a regular directory")
     marker = _read_json(staging / "HUGGINGFACE_SYNC.json", "staging marker")
@@ -125,7 +128,10 @@ def verify_surface(
     token = os.environ.get("HF_TOKEN", "")
     if not token:
         raise VerificationError("HF_TOKEN is missing; distribution remains INCOMPLETE")
-    readback = Path(readback).resolve()
+    readback = Path(readback)
+    if readback.is_symlink():
+        raise VerificationError("readback directory must not be a symlink")
+    readback = readback.resolve()
     if readback.exists() or readback.is_symlink():
         raise VerificationError("readback directory must be fresh")
     try:
@@ -155,12 +161,15 @@ def verify_surface(
                     local_dir=readback,
                     token=token,
                 )
-            ).resolve()
+            )
+            if downloaded.is_symlink():
+                raise VerificationError(f"Hub readback is not a regular file: {relative}")
+            downloaded = downloaded.resolve()
             try:
                 downloaded.relative_to(readback)
             except ValueError as error:
                 raise VerificationError("Hub download escaped the readback directory") from error
-            if downloaded.is_symlink() or not downloaded.is_file():
+            if not downloaded.is_file():
                 raise VerificationError(f"Hub readback is not a regular file: {relative}")
             expected_digest = _sha256(staging / relative)
             if _sha256(downloaded) != expected_digest:

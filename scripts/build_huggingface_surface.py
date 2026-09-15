@@ -83,13 +83,17 @@ def _validated_release_reference(policy: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise SurfaceBuildError("sync policy release manifest binding is invalid")
     assets = release.get("assets")
-    if not isinstance(assets, list) or {item.get("name") for item in assets if isinstance(item, dict)} != set(BOUND_RELEASE_ASSETS):
+    if (
+        not isinstance(assets, list)
+        or len(assets) != len(BOUND_RELEASE_ASSETS)
+        or {item.get("name") for item in assets if isinstance(item, dict)} != set(BOUND_RELEASE_ASSETS)
+    ):
         raise SurfaceBuildError("sync policy release asset set is invalid")
     for item in assets:
         if not isinstance(item, dict):
             raise SurfaceBuildError("sync policy release asset entry is invalid")
         name = item.get("name")
-        if item.get("url") != release_root + name or item.get("sha256") != BOUND_RELEASE_ASSETS.get(name):
+        if not isinstance(name, str) or item.get("url") != release_root + name or item.get("sha256") != BOUND_RELEASE_ASSETS.get(name):
             raise SurfaceBuildError(f"sync policy release asset binding is invalid: {name}")
     for name, digest in BOUND_RELEASE_ASSETS.items():
         if not SHA256_PATTERN.fullmatch(digest):
