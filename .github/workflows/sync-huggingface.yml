@@ -67,14 +67,24 @@ jobs:
           --output .hf-staging
           --source-revision "$SOURCE_REVISION"
 
-      - name: Install the pinned Hugging Face CLI
+      - name: Install the pinned Hugging Face Hub client
         env:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
           PIP_NO_CACHE_DIR: "1"
         run: |
           python -m pip install huggingface_hub==1.7.1
-          test "$(hf --version)" = "1.7.1"
-          hf upload --help | grep -F -- '--repo-type'
+          python - <<'PY'
+          from importlib.metadata import version
+
+          from huggingface_hub import HfApi, RepoFile
+          from huggingface_hub import errors as hub_errors
+
+          assert version("huggingface_hub") == "1.7.1"
+          assert callable(HfApi.create_commit)
+          assert RepoFile is not None
+          assert hub_errors is not None
+          print("huggingface_hub 1.7.1 SDK surface OK")
+          PY
 
       - name: Require the repository-scoped Hub credential
         shell: bash
