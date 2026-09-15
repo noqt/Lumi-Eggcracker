@@ -197,8 +197,10 @@ class HuggingFaceSurfaceTest(unittest.TestCase):
             self.assertIn(f"SOURCE COMMIT · {revision[:12]}", index)
             stale_revision = "bf6910dbd83d30a50a486f84" + "ac0fa96a0244e23e"
             self.assertNotIn(stale_revision, index)
-            self.assertNotIn("NOQT", readme + index)
-            self.assertIn("noqt", readme + index)
+            self.assertNotIn("Official NOQT", readme)
+            self.assertIn("Official noqt", readme)
+            self.assertNotIn("NOQT / EGGCRACKER", index)
+            self.assertIn("noqt / Lumi Eggcracker", index)
 
             current_vllm = ROOT / "scripts" / "check_vllm_compatibility.py"
             mirrored_vllm = output / "scripts" / "check_vllm_compatibility.py"
