@@ -6,8 +6,7 @@
     "experiments/counter_ai_v2/workload.py": "fbbf8739ef69890c3c7ab49696768d4d2ea643ce4dd364952909589bf5765ad1"
   },
   "materialization": {
-    "artifact_manifest_sha256": "COMPUTE_AFTER_MATERIALIZATION",
-    "rule": "Hash this exact materialized file and bind the digest in the independent accepted record and source manifest; never edit it after acceptance."
+    "rule": "After materialization, compute this file's SHA256 externally and bind that digest only in the independent accepted record and source manifest; never edit this file after acceptance."
   },
   "fresh_run_rule": "Use a new run_id, run_nonce, result path, and run directory for every authorized run."
 }

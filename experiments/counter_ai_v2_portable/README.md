@@ -26,7 +26,9 @@ copies of the two examples, replace every `REPLACE_WITH_*` value, and place
 them in root-controlled paths. The artifact manifest must be hashed after
 materialization; its digest must be copied into both the accepted record and
 the source manifest. The source manifest must bind the same fresh `run_id` and
-32-hex `run_nonce`.
+32-hex `run_nonce`. The native and workload scripts, plus every ancestor used
+to reach them, must be root-owned and not writable by the workload, group, or
+other users; the frozen core rejects symlinks and unsafe ownership/permissions.
 
 The direct route has no implicit path or host default. On a disposable Linux
 root with cgroup-v2 and the two dedicated unprivileged accounts already
