@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -37,18 +38,20 @@ def _write_once(path: Path, value: dict[str, Any]) -> None:
 
 def _remote_source_revision(api: Any, repo_id: str, repo_type: str, parent: str, token: str) -> str:
     try:
-        marker_path = Path(
-            api.hf_hub_download(
-                repo_id=repo_id,
-                filename=REMOTE_MARKER,
-                repo_type=repo_type,
-                revision=parent,
-                token=token,
+        with tempfile.TemporaryDirectory(prefix="hf-sync-parent-marker-") as marker_dir:
+            marker_path = Path(
+                api.hf_hub_download(
+                    repo_id=repo_id,
+                    filename=REMOTE_MARKER,
+                    repo_type=repo_type,
+                    revision=parent,
+                    local_dir=marker_dir,
+                    token=token,
+                )
             )
-        )
-        if marker_path.is_symlink() or not marker_path.is_file():
-            raise UploadError("remote source marker is not a regular file")
-        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            if marker_path.is_symlink() or not marker_path.is_file():
+                raise UploadError("remote source marker is not a regular file")
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
     except UploadError:
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
