@@ -14,7 +14,7 @@ with an existing Prometheus/node_exporter workflow.
 · [Current-run Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a)
 · [Private security report](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new)
 
-Maintained by [NOQT](https://github.com/noqt), which builds open-source software for security and risk. This is an alpha; independent field use and assurance remain unproved.
+Maintained by [noqt](https://github.com/noqt), which builds open-source software for security and risk. This is an alpha; independent field use and assurance remain unproved.
 
 ## The kill switch outside the sandbox
 
