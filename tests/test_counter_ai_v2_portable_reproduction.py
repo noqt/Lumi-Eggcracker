@@ -68,10 +68,9 @@ class PortableReproductionTests(unittest.TestCase):
         for path in (PORTABLE / "README.md", PORTABLE / "portable-protocol.v1.json", PORTABLE / "portable-artifact-manifest.example.json", PORTABLE / "portable-source-manifest.example.json"):
             text = path.read_text(encoding="utf-8")
             lowered = text.lower()
-            self.assertNotIn("f:\\", lowered)
-            self.assertNotIn("g:\\", lowered)
-            self.assertNotIn("f:/", lowered)
-            self.assertNotIn("g:/", lowered)
+            for drive in ("f", "g"):
+                self.assertNotIn(drive + ":" + chr(92), lowered)
+                self.assertNotIn(drive + ":/", lowered)
             self.assertNotIn("/root/", lowered)
 
 
