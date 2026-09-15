@@ -18,6 +18,12 @@ COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 MARKER_SCHEMA = "noqt.huggingface_sync.v1"
 UPLOAD_SCHEMA = "noqt.huggingface_upload.v1"
 REMOTE_MARKER = "HUGGINGFACE_SYNC.json"
+# One-time first-migration bridge for the known public Space parent that
+# predates the source marker.  The bridge is intentionally bound to both the
+# exact parent and the independently observed source commit; all other
+# missing, malformed, or unreadable markers remain fail-closed.
+LEGACY_BOOTSTRAP_PARENT = "c089755e699c75c68e926613d59219bf4feebac5"
+LEGACY_BOOTSTRAP_SOURCE = "bf6910dbd83d30a50a486f84ac0fa96a0244e23e"
 
 
 class UploadError(RuntimeError):
@@ -34,6 +40,24 @@ def _write_once(path: Path, value: dict[str, Any]) -> None:
         raise UploadError(f"output already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _is_missing_remote_marker_error(error: BaseException) -> bool:
+    """Recognize only the Hub client's missing-entry exception variants."""
+
+    # huggingface_hub 1.7.1 exposes both names from huggingface_hub.errors;
+    # older clients called the remote 404 RemoteEntryNotFoundError.  Do not
+    # classify transport/auth/permission errors as a missing marker.
+    try:
+        from huggingface_hub import errors as hub_errors
+    except (ImportError, AttributeError):
+        return False
+    missing_types = tuple(
+        error_type
+        for name in ("EntryNotFoundError", "RemoteEntryNotFoundError")
+        if isinstance(error_type := getattr(hub_errors, name, None), type)
+    )
+    return bool(missing_types) and isinstance(error, missing_types)
 
 
 def _remote_source_revision(api: Any, repo_id: str, repo_type: str, parent: str, token: str) -> str:
@@ -54,7 +78,9 @@ def _remote_source_revision(api: Any, repo_id: str, repo_type: str, parent: str,
             marker = json.loads(marker_path.read_text(encoding="utf-8"))
     except UploadError:
         raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+    except Exception as error:
+        if parent == LEGACY_BOOTSTRAP_PARENT and _is_missing_remote_marker_error(error):
+            return LEGACY_BOOTSTRAP_SOURCE
         raise UploadError("remote source marker is unreadable; distribution remains INCOMPLETE") from error
     if not isinstance(marker, dict):
         raise UploadError("remote source marker is not an object; distribution remains INCOMPLETE")

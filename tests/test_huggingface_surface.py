@@ -23,7 +23,12 @@ from build_huggingface_surface import (
     _validated_release_reference,
     build_surface,
 )
-from upload_huggingface_surface import UploadError, upload_surface
+from upload_huggingface_surface import (
+    LEGACY_BOOTSTRAP_PARENT,
+    LEGACY_BOOTSTRAP_SOURCE,
+    UploadError,
+    upload_surface,
+)
 from verify_huggingface_surface import VerificationError, verify_surface
 
 
@@ -192,6 +197,99 @@ class HuggingFaceSurfaceTest(unittest.TestCase):
                 patch.dict(os.environ, {"HF_TOKEN": "test-token"}),
                 patch.dict(sys.modules, {"huggingface_hub": fake_hub}),
                 self.assertRaisesRegex(UploadError, "not an ancestor"),
+            ):
+                upload_surface(
+                    repo_id="noqt/eggcracker",
+                    repo_type="space",
+                    folder=staging,
+                    revision="main",
+                    source_revision=candidate,
+                    output=Path(temp_dir) / "upload-result.json",
+                    source_root=ROOT,
+                )
+            fake_api.upload_folder.assert_not_called()
+
+    def test_upload_allows_only_the_pinned_first_migration_parent_without_marker(self) -> None:
+        candidate = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", LEGACY_BOOTSTRAP_SOURCE, candidate],
+                check=False,
+            ).returncode,
+            0,
+        )
+
+        class EntryNotFoundError(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            staging, _, _ = self._minimal_surface(Path(temp_dir), candidate)
+            fake_commit = SimpleNamespace(
+                oid="3" * 40,
+                commit_url="https://huggingface.co/spaces/noqt/eggcracker/commit/" + "3" * 40,
+            )
+            fake_api = SimpleNamespace(
+                repo_info=lambda **_: SimpleNamespace(sha=LEGACY_BOOTSTRAP_PARENT),
+                hf_hub_download=Mock(side_effect=EntryNotFoundError("marker is absent")),
+                upload_folder=Mock(return_value=fake_commit),
+            )
+            fake_hub = SimpleNamespace(
+                HfApi=lambda **_: fake_api,
+                errors=SimpleNamespace(EntryNotFoundError=EntryNotFoundError),
+            )
+            output = Path(temp_dir) / "upload-result.json"
+            with (
+                patch.dict(os.environ, {"HF_TOKEN": "test-token"}),
+                patch.dict(sys.modules, {"huggingface_hub": fake_hub}),
+            ):
+                result = upload_surface(
+                    repo_id="noqt/eggcracker",
+                    repo_type="space",
+                    folder=staging,
+                    revision="main",
+                    source_revision=candidate,
+                    output=output,
+                    source_root=ROOT,
+                )
+
+            self.assertEqual(candidate, result["source_revision"])
+            self.assertEqual(LEGACY_BOOTSTRAP_PARENT, result["parent_commit"])
+            self.assertEqual(LEGACY_BOOTSTRAP_PARENT, fake_api.hf_hub_download.call_args.kwargs["revision"])
+            fake_api.upload_folder.assert_called_once()
+            self.assertEqual(LEGACY_BOOTSTRAP_PARENT, fake_api.upload_folder.call_args.kwargs["parent_commit"])
+            self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["upload_commit"], "3" * 40)
+
+    def test_upload_rejects_missing_marker_for_any_other_parent(self) -> None:
+        candidate = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+        class EntryNotFoundError(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            staging, _, _ = self._minimal_surface(Path(temp_dir), candidate)
+            fake_api = SimpleNamespace(
+                repo_info=lambda **_: SimpleNamespace(sha="d" * 40),
+                hf_hub_download=Mock(side_effect=EntryNotFoundError("marker is absent")),
+                upload_folder=Mock(),
+            )
+            fake_hub = SimpleNamespace(
+                HfApi=lambda **_: fake_api,
+                errors=SimpleNamespace(EntryNotFoundError=EntryNotFoundError),
+            )
+            with (
+                patch.dict(os.environ, {"HF_TOKEN": "test-token"}),
+                patch.dict(sys.modules, {"huggingface_hub": fake_hub}),
+                self.assertRaisesRegex(UploadError, "remote source marker is unreadable"),
             ):
                 upload_surface(
                     repo_id="noqt/eggcracker",
