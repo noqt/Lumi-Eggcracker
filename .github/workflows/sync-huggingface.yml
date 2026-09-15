@@ -97,6 +97,7 @@ jobs:
           --folder .hf-staging
           --revision main
           --source-revision "$SOURCE_REVISION"
+          --source-root .
           --output .hf-upload.json
 
       - name: Verify the complete remote file set at the returned upload commit

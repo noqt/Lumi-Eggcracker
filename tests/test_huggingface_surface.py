@@ -8,7 +8,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -133,6 +134,7 @@ class HuggingFaceSurfaceTest(unittest.TestCase):
         self.assertNotIn("source_ref='${{ github.event.release.tag_name }}'", workflow)
         self.assertIn("upload_huggingface_surface.py", workflow)
         self.assertIn("verify_huggingface_surface.py", workflow)
+        self.assertIn("--source-root .", workflow)
         self.assertIn("parent_commit", (ROOT / "scripts" / "upload_huggingface_surface.py").read_text(encoding="utf-8"))
 
     def test_upload_and_readback_fail_closed_without_hub_auth(self) -> None:
@@ -159,6 +161,48 @@ class HuggingFaceSurfaceTest(unittest.TestCase):
                         readback=Path(temp_dir) / "readback",
                         report=report,
                     )
+
+    def test_upload_rejects_stale_candidate_after_newer_remote_source(self) -> None:
+        candidate = subprocess.run(
+            ["git", "rev-parse", "HEAD^"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        remote_source = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            staging, _, _ = self._minimal_surface(Path(temp_dir), candidate)
+            remote_marker = Path(temp_dir) / "remote-marker.json"
+            remote_marker.write_text(
+                json.dumps({"schema": "noqt.huggingface_sync.v1", "source_revision": remote_source}),
+                encoding="utf-8",
+            )
+            fake_api = SimpleNamespace(
+                repo_info=lambda **_: SimpleNamespace(sha="2" * 40),
+                hf_hub_download=lambda **_: str(remote_marker),
+                upload_folder=Mock(),
+            )
+            fake_hub = SimpleNamespace(HfApi=lambda **_: fake_api)
+            with (
+                patch.dict(os.environ, {"HF_TOKEN": "test-token"}),
+                patch.dict(sys.modules, {"huggingface_hub": fake_hub}),
+                self.assertRaisesRegex(UploadError, "not an ancestor"),
+            ):
+                upload_surface(
+                    repo_id="noqt/eggcracker",
+                    repo_type="space",
+                    folder=staging,
+                    revision="main",
+                    source_revision=candidate,
+                    output=Path(temp_dir) / "upload-result.json",
+                    source_root=ROOT,
+                )
+            fake_api.upload_folder.assert_not_called()
 
     def test_builds_exact_tracked_surface_with_reviewed_overlays(self) -> None:
         revision = subprocess.run(

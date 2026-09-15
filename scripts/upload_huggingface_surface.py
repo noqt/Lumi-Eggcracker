@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from typing import Any
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 MARKER_SCHEMA = "noqt.huggingface_sync.v1"
 UPLOAD_SCHEMA = "noqt.huggingface_upload.v1"
+REMOTE_MARKER = "HUGGINGFACE_SYNC.json"
 
 
 class UploadError(RuntimeError):
@@ -33,6 +35,55 @@ def _write_once(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _remote_source_revision(api: Any, repo_id: str, repo_type: str, parent: str, token: str) -> str:
+    try:
+        marker_path = Path(
+            api.hf_hub_download(
+                repo_id=repo_id,
+                filename=REMOTE_MARKER,
+                repo_type=repo_type,
+                revision=parent,
+                token=token,
+            )
+        )
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise UploadError("remote source marker is not a regular file")
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except UploadError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise UploadError("remote source marker is unreadable; distribution remains INCOMPLETE") from error
+    if not isinstance(marker, dict):
+        raise UploadError("remote source marker is not an object; distribution remains INCOMPLETE")
+    source_revision = marker.get("source_revision")
+    if marker.get("schema") != MARKER_SCHEMA or not isinstance(source_revision, str) or not COMMIT_PATTERN.fullmatch(source_revision):
+        raise UploadError("remote source marker has no exact source commit; distribution remains INCOMPLETE")
+    return source_revision
+
+
+def _require_source_ancestry(source_root: Path, ancestor: str, descendant: str) -> None:
+    source_root = Path(source_root)
+    if source_root.is_symlink():
+        raise UploadError("source root must not be a symlink")
+    try:
+        source_root = source_root.resolve(strict=True)
+    except OSError as error:
+        raise UploadError("source root is unavailable; distribution remains INCOMPLETE") from error
+    if not source_root.is_dir():
+        raise UploadError("source root is not a directory; distribution remains INCOMPLETE")
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_root), "merge-base", "--is-ancestor", ancestor, descendant],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        raise UploadError("cannot verify remote source ancestry; distribution remains INCOMPLETE") from error
+    if result.returncode != 0:
+        raise UploadError("remote source is not an ancestor of the candidate; distribution remains INCOMPLETE")
+
+
 def upload_surface(
     *,
     repo_id: str,
@@ -41,6 +92,7 @@ def upload_surface(
     revision: str,
     source_revision: str,
     output: Path,
+    source_root: Path = Path("."),
 ) -> dict[str, Any]:
     if repo_type != "space":
         raise UploadError("only the configured Space repository type is supported")
@@ -79,6 +131,8 @@ def upload_surface(
         parent = api.repo_info(repo_id=repo_id, repo_type=repo_type, revision=revision).sha
         if not isinstance(parent, str) or not COMMIT_PATTERN.fullmatch(parent):
             raise UploadError("remote parent revision is not an exact commit")
+        remote_source_revision = _remote_source_revision(api, repo_id, repo_type, parent, token)
+        _require_source_ancestry(source_root, remote_source_revision, source_revision)
         commit = api.upload_folder(
             repo_id=repo_id,
             repo_type=repo_type,
@@ -128,6 +182,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--revision", required=True)
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--source-root", type=Path, default=Path("."))
     return parser
 
 
@@ -141,6 +196,7 @@ def main() -> int:
             revision=args.revision,
             source_revision=args.source_revision,
             output=args.output,
+            source_root=args.source_root,
         )
     except UploadError as error:
         print(f"HUGGINGFACE_SYNC_INCOMPLETE: {error}", file=sys.stderr)
