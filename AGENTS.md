@@ -27,11 +27,13 @@ derived distribution mirror, never an independent source of product truth.
 Changes originate on GitHub `main`; direct Hub edits are prohibited because the
 next sync overwrites them. Build the Hub snapshot only with
 `scripts/build_huggingface_surface.py` and `huggingface-sync-policy.json`. Every
-GitHub `main` update must trigger `.github/workflows/sync-huggingface.yml`; the
-daily run repairs out-of-band drift. A successful sync must publish the exact
-source revision marker and pass remote checksum verification. If either fails,
-do not describe the Hub surface as current. Never place Hub credentials in the
-repository, generated snapshot, logs, or command arguments.
+GitHub `main` update and published release must trigger
+`.github/workflows/sync-huggingface.yml`; manual dispatch is allowed on `main`.
+There is no scheduled drift-repair proposal. A successful sync must publish the
+exact source revision marker and pass remote checksum verification at the
+returned upload commit. If either fails, do not describe the Hub surface as
+current. Never place Hub credentials in the repository, generated snapshot,
+logs, or command arguments.
 
 ## Destructive enforcement boundary
 

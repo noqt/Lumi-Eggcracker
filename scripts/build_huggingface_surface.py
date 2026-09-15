@@ -9,13 +9,30 @@ import json
 import re
 import subprocess
 import unicodedata
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 REVISION_PATTERN = re.compile(r"[0-9a-f]{40}")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 POLICY_SCHEMA = "noqt.huggingface_distribution.v1"
 MANIFEST_SCHEMA = "noqt.huggingface_manifest.v1"
 MARKER_SCHEMA = "noqt.huggingface_sync.v1"
+BOUND_RELEASE = {
+    "tag": "v1.0.10",
+    "tag_object": "4041dbb59054d1a0b9506f4d12a18d504348d3f6",
+    "source_commit": "27cb6dfa0884896025976f8583398c9db7ac9a30",
+    "release_manifest_sha256": "e74f3442524873e4aa46639438ada1820feb34e6b8ddd7c55d4d7e4fe3e4892a",
+}
+BOUND_RELEASE_ASSETS = {
+    "eggcracker-release-key.asc": "1c86d09e657a653edbe32be2182f683a3caf1b98bd6973192bbcb8e3c5fa1313",
+    "lumi-eggcracker-1.0.10-linux.zip": "64fe6c39c623536ac4aef9e5a1c947a4a1011c2c337a38737d6480b8dc49f12e",
+    "lumi-eggcracker-1.0.10-source.zip": "acdcdba36a8db1c07a54120410ceed33b25beea894e467caaa98112d759bf161",
+    "lumi-eggcracker-1.0.10.pyz": "5b8a191129d3e7e77b5b9ae896433ecfc6c81eeb8ff64079d49ee8165b0d9fa9",
+    "release-manifest.json": "e74f3442524873e4aa46639438ada1820feb34e6b8ddd7c55d4d7e4fe3e4892a",
+    "SHA256SUMS": "9b01ca17ca8b1f9176818f6e699a332622fd5e253609661767138f71c87fe896",
+    "SHA256SUMS.asc": "79b08515ce0e4c84172ba587769d4a0dbba3c69d14777c05b1ac62243bdae5b3",
+}
 WINDOWS_RESERVED_NAMES = {
     "AUX",
     "CON",
@@ -39,6 +56,45 @@ def _load_policy(payload: bytes) -> dict[str, Any]:
     if policy.get("schema") != POLICY_SCHEMA:
         raise SurfaceBuildError("unsupported Hugging Face sync policy schema")
     return policy
+
+
+def _validated_release_reference(policy: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the separately pinned public release boundary."""
+
+    release = policy.get("release_reference")
+    if not isinstance(release, dict):
+        raise SurfaceBuildError("sync policy has no release reference")
+    if any(release.get(key) != BOUND_RELEASE[key] for key in ("tag", "tag_object", "source_commit")):
+        raise SurfaceBuildError("sync policy release reference changed from the accepted v1.0.10 boundary")
+    tag = release["tag"]
+    release_root = f"https://github.com/noqt/Lumi-Eggcracker/releases/download/{tag}/"
+    if release.get("tag_url") != f"https://github.com/noqt/Lumi-Eggcracker/releases/tag/{tag}":
+        raise SurfaceBuildError("sync policy release tag link is not canonical")
+    if release.get("source_commit_url") != f"https://github.com/noqt/Lumi-Eggcracker/commit/{release['source_commit']}":
+        raise SurfaceBuildError("sync policy release source link is not canonical")
+    manifest = release.get("release_manifest")
+    if not isinstance(manifest, dict):
+        raise SurfaceBuildError("sync policy release manifest is incomplete")
+    if (
+        manifest.get("name") != "release-manifest.json"
+        or manifest.get("url") != release_root + "release-manifest.json"
+        or manifest.get("sha256") != BOUND_RELEASE["release_manifest_sha256"]
+        or manifest.get("source_commit") != BOUND_RELEASE["source_commit"]
+    ):
+        raise SurfaceBuildError("sync policy release manifest binding is invalid")
+    assets = release.get("assets")
+    if not isinstance(assets, list) or {item.get("name") for item in assets if isinstance(item, dict)} != set(BOUND_RELEASE_ASSETS):
+        raise SurfaceBuildError("sync policy release asset set is invalid")
+    for item in assets:
+        if not isinstance(item, dict):
+            raise SurfaceBuildError("sync policy release asset entry is invalid")
+        name = item.get("name")
+        if item.get("url") != release_root + name or item.get("sha256") != BOUND_RELEASE_ASSETS.get(name):
+            raise SurfaceBuildError(f"sync policy release asset binding is invalid: {name}")
+    for name, digest in BOUND_RELEASE_ASSETS.items():
+        if not SHA256_PATTERN.fullmatch(digest):
+            raise SurfaceBuildError(f"sync policy release digest is invalid: {name}")
+    return release
 
 
 def _git(source_root: Path, *arguments: str) -> bytes:
@@ -192,6 +248,7 @@ def build_surface(source_root: Path, output: Path, source_revision: str) -> dict
         policy = _load_policy(committed_files[PurePosixPath("huggingface-sync-policy.json")][1])
     except KeyError as exc:
         raise SurfaceBuildError("source commit has no Hugging Face sync policy") from exc
+    release_reference = _validated_release_reference(policy)
     excluded = policy.get("excluded_prefixes")
     if not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded):
         raise SurfaceBuildError("sync policy excluded_prefixes must be a string list")
@@ -277,6 +334,8 @@ def build_surface(source_root: Path, output: Path, source_revision: str) -> dict
         "schema": MANIFEST_SCHEMA,
         "source_repository": canonical["repository"],
         "source_revision": source_revision,
+        "source_url": values["SOURCE_URL"],
+        "release_reference": release_reference,
         "files": file_records,
     }
     manifest_bytes = _write_json(_destination(output, manifest_relative), manifest)
@@ -286,6 +345,8 @@ def build_surface(source_root: Path, output: Path, source_revision: str) -> dict
         "mode": policy["mode"],
         "source_repository": canonical["repository"],
         "source_revision": source_revision,
+        "source_url": values["SOURCE_URL"],
+        "release_reference": release_reference,
         "target": target["url"],
         "manifest": manifest_relative.as_posix(),
         "manifest_sha256": manifest_sha256,

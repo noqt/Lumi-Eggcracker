@@ -7,14 +7,22 @@ source and release authority. The Space is not a hosted Eggcracker runtime.
 ## Synchronisation contract
 
 - `huggingface-sync-policy.json` is the machine-readable mapping.
+- The latest separately pinned signed release boundary is v1.0.10 at commit
+  `27cb6dfa0884896025976f8583398c9db7ac9a30`; its release, source archive,
+  bundle, zipapp, key and checksum digests remain explicit policy links. A
+  current `main` snapshot is not silently relabelled as that release.
 - `scripts/build_huggingface_surface.py` copies tracked product files, excludes
   Git and GitHub-only control paths, and applies the reviewed Space metadata and
   static page.
 - Every snapshot contains `HUGGINGFACE_SYNC.json` with the exact GitHub commit
   and `HUGGINGFACE_MANIFEST.json` with content hashes.
-- `.github/workflows/sync-huggingface.yml` runs after every push to `main`, on
-  manual dispatch, and daily to repair out-of-band drift. It performs a true
-  mirror and verifies remote checksums after upload.
+- `.github/workflows/sync-huggingface.yml` runs after pushes to `main`, after a
+  published GitHub release, or by manual dispatch on `main`. It uploads only
+  after binding the exact source commit and current Hub parent commit, then
+  verifies the complete remote file set and hashes at the returned upload
+  commit. There is no scheduled drift repair.
+- A missing credential, failed upload, or failed readback leaves the sync job
+  visibly `INCOMPLETE`; it is not a claim that the Space is current.
 - Direct changes on Hugging Face are unsupported and will be overwritten.
 
 The workflow requires a fine-grained Hugging Face write token scoped only to
