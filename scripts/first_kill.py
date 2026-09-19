@@ -83,6 +83,109 @@ class FirstKillError(RuntimeError):
     """A user-actionable campaign failure."""
 
 
+PREFLIGHT_SCHEMA = "lumi-eggcracker.first-kill-preflight.v1"
+
+
+class PreflightDiagnostic:
+    """Stable, redacted metadata for one preflight refusal."""
+
+    __slots__ = ("failed_check", "next_action", "reason_code")
+
+    def __init__(self, failed_check: str, reason_code: str, next_action: str) -> None:
+        self.failed_check = failed_check
+        self.reason_code = reason_code
+        self.next_action = next_action
+
+
+PREFLIGHT_DIAGNOSTICS = {
+    "operator_database": PreflightDiagnostic(
+        "operator", "OPERATOR_DATABASE_UNAVAILABLE", "run on a host with POSIX account databases"
+    ),
+    "operator_required": PreflightDiagnostic(
+        "operator", "OPERATOR_REQUIRED", "provide a non-root operator identity"
+    ),
+    "operator_missing": PreflightDiagnostic(
+        "operator", "OPERATOR_ACCOUNT_MISSING", "provide an existing non-root operator identity"
+    ),
+    "operator_root": PreflightDiagnostic(
+        "operator", "OPERATOR_MUST_NOT_BE_ROOT", "provide a non-root operator identity"
+    ),
+    "host_root": PreflightDiagnostic(
+        "host", "ROOT_REQUIRED", "rerun as root on the supported disposable host"
+    ),
+    "host_platform": PreflightDiagnostic(
+        "host", "NATIVE_LINUX_REQUIRED", "run on a supported native Linux host"
+    ),
+    "host_wsl": PreflightDiagnostic(
+        "host", "WSL_UNSUPPORTED", "run on a supported native Linux host"
+    ),
+    "host_memory": PreflightDiagnostic(
+        "host", "HOST_MEMORY_UNAVAILABLE", "run on a host with verifiable physical memory"
+    ),
+    "host_memory_limit": PreflightDiagnostic(
+        "host", "HOST_MEMORY_INSUFFICIENT", "use a host meeting the minimum memory requirement"
+    ),
+    "host_disk": PreflightDiagnostic(
+        "host", "ROOT_DISK_UNAVAILABLE", "run on a host with verifiable root free space"
+    ),
+    "host_disk_limit": PreflightDiagnostic(
+        "host", "ROOT_DISK_INSUFFICIENT", "use a host meeting the minimum root free-space requirement"
+    ),
+    "host_cgroup": PreflightDiagnostic(
+        "host", "PIDS_CONTROLLER_UNAVAILABLE", "run on a host with cgroup v2 and the pids controller"
+    ),
+    "host_pidfd": PreflightDiagnostic(
+        "host", "PIDFD_UNAVAILABLE", "run with Python/Linux pidfd support enabled"
+    ),
+    "host_command": PreflightDiagnostic(
+        "tool_availability", "REQUIRED_COMMAND_MISSING", "provide all required host commands"
+    ),
+    "build_tool": PreflightDiagnostic(
+        "tool_availability", "BUILD_TOOL_MISSING", "provide the required build tooling"
+    ),
+    "install_target": PreflightDiagnostic(
+        "clean_install_targets", "INSTALL_TARGET_EXISTS", "remove conflicting installation targets before retrying"
+    ),
+    "workload_database": PreflightDiagnostic(
+        "clean_install_targets", "WORKLOAD_IDENTITY_DATABASE_UNAVAILABLE", "run on a host with POSIX account databases"
+    ),
+    "workload_residue": PreflightDiagnostic(
+        "clean_install_targets", "WORKLOAD_IDENTITY_EXISTS", "remove residual workload identity before retrying"
+    ),
+    "local_git": PreflightDiagnostic(
+        "local_annotated_tag_identity", "LOCAL_GIT_UNAVAILABLE", "run from a readable local Git checkout"
+    ),
+    "tag_unsupported": PreflightDiagnostic(
+        "local_annotated_tag_identity", "QUALIFIED_TAG_REQUIRED", "use the qualified local release tag"
+    ),
+    "tag_not_annotated": PreflightDiagnostic(
+        "local_annotated_tag_identity", "ANNOTATED_TAG_REQUIRED", "use the qualified local annotated tag"
+    ),
+    "tag_commit": PreflightDiagnostic(
+        "local_annotated_tag_identity", "TAG_COMMIT_UNAVAILABLE", "use a qualified tag that resolves to a commit"
+    ),
+    "unexpected": PreflightDiagnostic(
+        "preflight", "PREFLIGHT_CHECK_FAILED", "review supported-host and local-release requirements before retrying"
+    ),
+}
+
+
+class PreflightFailure(FirstKillError):
+    """A FirstKillError carrying only trusted preflight diagnostic metadata."""
+
+    def __init__(self, message: str, diagnostic_key: str) -> None:
+        diagnostic = PREFLIGHT_DIAGNOSTICS[diagnostic_key]
+        self.failed_check = diagnostic.failed_check
+        self.reason_code = diagnostic.reason_code
+        self.next_action = diagnostic.next_action
+        super().__init__(message)
+
+
+def preflight_failure(diagnostic_key: str, message: str) -> PreflightFailure:
+    """Create a refusal with a trusted diagnostic selected at the check site."""
+    return PreflightFailure(message, diagnostic_key)
+
+
 def say(message: str) -> None:
     print(f"[eggcracker] {message}", flush=True)
 
@@ -273,16 +376,20 @@ def require_root_directory(path: Path, description: str, *, private: bool) -> No
 
 def operator_name(explicit: str | None) -> str:
     if pwd is None:
-        raise FirstKillError("first-kill requires the POSIX passwd database")
+        raise preflight_failure(
+            "operator_database", "first-kill requires the POSIX passwd database"
+        )
     value = explicit or os.environ.get("SUDO_USER")
     if not value or value == "root":
-        raise FirstKillError("run through sudo and pass --operator <your-login>")
+        raise preflight_failure(
+            "operator_required", "run through sudo and pass --operator <your-login>"
+        )
     try:
         account = pwd.getpwnam(value)
     except KeyError as error:
-        raise FirstKillError("operator account does not exist") from error
+        raise preflight_failure("operator_missing", "operator account does not exist") from error
     if account.pw_uid == 0:
-        raise FirstKillError("the operator must be a non-root login")
+        raise preflight_failure("operator_root", "the operator must be a non-root login")
     return value
 
 
@@ -291,13 +398,18 @@ def require_host_commands() -> None:
     for binary in REQUIRED_HOST_COMMANDS:
         path = Path(binary)
         if not path.is_file() or not os.access(path, os.X_OK):
-            raise FirstKillError(f"required host command is missing or not executable: {binary}")
+            raise preflight_failure(
+                "host_command",
+                f"required host command is missing or not executable: {binary}",
+            )
 
 
 def require_clean_workload_identity() -> None:
     """Reject residue that a clean demonstration cannot safely claim or remove."""
     if pwd is None or grp is None:
-        raise FirstKillError("first-kill requires the POSIX account databases")
+        raise preflight_failure(
+            "workload_database", "first-kill requires the POSIX account databases"
+        )
     for lookup, identity in (
         (pwd.getpwnam, "account"),
         (grp.getgrnam, "group"),
@@ -306,7 +418,9 @@ def require_clean_workload_identity() -> None:
             lookup(WORKLOAD_USER)
         except KeyError:
             continue
-        raise FirstKillError(f"refusing a pre-existing Eggcracker workload {identity}")
+        raise preflight_failure(
+            "workload_residue", f"refusing a pre-existing Eggcracker workload {identity}"
+        )
 
 
 def total_memory_bytes() -> int:
@@ -315,14 +429,14 @@ def total_memory_bytes() -> int:
         pages = os.sysconf("SC_PHYS_PAGES")
         page_size = os.sysconf("SC_PAGE_SIZE")
     except (OSError, ValueError) as error:
-        raise FirstKillError("first-kill could not verify host memory") from error
+        raise preflight_failure("host_memory", "first-kill could not verify host memory") from error
     if (
         not isinstance(pages, int)
         or not isinstance(page_size, int)
         or pages < 1
         or page_size < 1
     ):
-        raise FirstKillError("first-kill could not verify host memory")
+        raise preflight_failure("host_memory", "first-kill could not verify host memory")
     return pages * page_size
 
 
@@ -331,33 +445,43 @@ def free_root_bytes() -> int:
     try:
         free = shutil.disk_usage("/").free
     except OSError as error:
-        raise FirstKillError("first-kill could not verify free root disk space") from error
+        raise preflight_failure(
+            "host_disk", "first-kill could not verify free root disk space"
+        ) from error
     if not isinstance(free, int) or free < 0:
-        raise FirstKillError("first-kill could not verify free root disk space")
+        raise preflight_failure("host_disk", "first-kill could not verify free root disk space")
     return free
 
 
 def compatibility(operator: str) -> None:
     if os.geteuid() != 0:
-        raise FirstKillError("run as root, for example: sudo python3 scripts/first_kill.py ...")
+        raise preflight_failure(
+            "host_root", "run as root, for example: sudo python3 scripts/first_kill.py ..."
+        )
     if platform.system() != "Linux":
-        raise FirstKillError("first-kill requires native Linux; Windows and macOS are unsupported")
+        raise preflight_failure(
+            "host_platform", "first-kill requires native Linux; Windows and macOS are unsupported"
+        )
     if "microsoft" in platform.release().lower() or os.environ.get("WSL_DISTRO_NAME"):
-        raise FirstKillError("first-kill requires native Linux; WSL2 is unsupported")
+        raise preflight_failure("host_wsl", "first-kill requires native Linux; WSL2 is unsupported")
     if total_memory_bytes() < MIN_TOTAL_MEMORY_BYTES:
-        raise FirstKillError(
+        raise preflight_failure(
+            "host_memory_limit",
             "first-kill requires at least 7 GiB of kernel-reported memory "
-            "(normally an 8 GiB provisioned VM)"
+            "(normally an 8 GiB provisioned VM)",
         )
     if free_root_bytes() < MIN_FREE_ROOT_BYTES:
-        raise FirstKillError(
-            "first-kill requires at least 8 GiB free on the root filesystem"
+        raise preflight_failure(
+            "host_disk_limit",
+            "first-kill requires at least 8 GiB free on the root filesystem",
         )
     controllers = Path("/sys/fs/cgroup/cgroup.controllers")
     if not controllers.is_file() or "pids" not in controllers.read_text(encoding="ascii").split():
-        raise FirstKillError("unified cgroup v2 with the pids controller is required")
+        raise preflight_failure(
+            "host_cgroup", "unified cgroup v2 with the pids controller is required"
+        )
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
-        raise FirstKillError("this Python/Linux host lacks the required pidfd primitives")
+        raise preflight_failure("host_pidfd", "this Python/Linux host lacks the required pidfd primitives")
     require_host_commands()
     required_tool_groups = (
         (("cmake",), "CMake"),
@@ -366,17 +490,21 @@ def compatibility(operator: str) -> None:
     )
     for commands, description in required_tool_groups:
         if not any(shutil.which(command) for command in commands):
-            raise FirstKillError(f"required build tooling is missing: {description}")
+            raise preflight_failure("build_tool", f"required build tooling is missing: {description}")
     for target in INSTALL_TARGETS:
         if target.exists() or target.is_symlink():
-            raise FirstKillError(f"refusing to overwrite an existing installation target: {target}")
+            raise preflight_failure(
+                "install_target", f"refusing to overwrite an existing installation target: {target}"
+            )
     require_clean_workload_identity()
     try:
         if pwd is None:
-            raise FirstKillError("first-kill requires the POSIX passwd database")
+            raise preflight_failure(
+                "operator_database", "first-kill requires the POSIX passwd database"
+            )
         pwd.getpwnam(operator)
     except KeyError as error:
-        raise FirstKillError("operator account does not exist") from error
+        raise preflight_failure("operator_missing", "operator account does not exist") from error
 
 
 def repository_root() -> Path:
@@ -387,16 +515,20 @@ def repository_root() -> Path:
             check=False,
         )
     except FirstKillError as error:
-        raise FirstKillError("could not inspect the local Git checkout") from error
+        raise preflight_failure("local_git", "could not inspect the local Git checkout") from error
     if probe.returncode or probe.stdout.strip() != "true":
-        raise FirstKillError("first-kill must be run from a Git checkout containing the signed tag")
+        raise preflight_failure(
+            "local_git", "first-kill must be run from a Git checkout containing the signed tag"
+        )
     return root
 
 
 def local_release_identity(root: Path, tag: str) -> str:
     """Verify the qualified local annotated tag without network or GPG state."""
     if tag != DEFAULT_TAG:
-        raise FirstKillError(f"preflight supports only the qualified local tag {DEFAULT_TAG}")
+        raise preflight_failure(
+            "tag_unsupported", f"preflight supports only the qualified local tag {DEFAULT_TAG}"
+        )
     reference = f"refs/tags/{tag}"
     try:
         kind = run(["/usr/bin/git", "-C", str(root), "cat-file", "-t", reference], check=False)
@@ -405,22 +537,62 @@ def local_release_identity(root: Path, tag: str) -> str:
             check=False,
         )
     except FirstKillError as error:
-        raise FirstKillError("could not inspect the qualified local release tag") from error
+        raise preflight_failure(
+            "local_git", "could not inspect the qualified local release tag"
+        ) from error
     if kind.returncode or kind.stdout.strip() != "tag":
-        raise FirstKillError(f"the local {tag} reference is missing or is not an annotated tag")
+        raise preflight_failure(
+            "tag_not_annotated", f"the local {tag} reference is missing or is not an annotated tag"
+        )
     commit = resolved.stdout.strip()
     if resolved.returncode or len(commit) != 40 or any(
         character not in "0123456789abcdef" for character in commit.lower()
     ):
-        raise FirstKillError(f"the local {tag} tag does not resolve to a commit")
+        raise preflight_failure("tag_commit", f"the local {tag} tag does not resolve to a commit")
     return commit
+
+
+def _safe_preflight_tag(tag: str) -> str:
+    """Expose only the fixed qualified tag; every other argument is untrusted."""
+    return DEFAULT_TAG if tag == DEFAULT_TAG else "<redacted>"
+
+
+def _preflight_diagnostic(error: BaseException) -> PreflightDiagnostic:
+    if isinstance(error, PreflightFailure):
+        return PreflightDiagnostic(error.failed_check, error.reason_code, error.next_action)
+    return PREFLIGHT_DIAGNOSTICS["unexpected"]
+
+
+def _print_preflight_blocked(tag: str, error: BaseException) -> None:
+    diagnostic = _preflight_diagnostic(error)
+    print(
+        json.dumps(
+            {
+                "changes_made": False,
+                "failed_check": diagnostic.failed_check,
+                "mode": "preflight-only",
+                "next_action": diagnostic.next_action,
+                "reason_code": diagnostic.reason_code,
+                "result": "PREFLIGHT_BLOCKED",
+                "schema": PREFLIGHT_SCHEMA,
+                "supported": False,
+                "tag": _safe_preflight_tag(tag),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 def run_preflight(operator_value: str | None, tag: str) -> int:
     """Run read-only host and local-release availability checks."""
-    operator = operator_name(operator_value)
-    compatibility(operator)
-    commit = local_release_identity(repository_root(), tag)
+    try:
+        operator = operator_name(operator_value)
+        compatibility(operator)
+        commit = local_release_identity(repository_root(), tag)
+    except Exception as error:  # noqa: BLE001 - bounded preflight output must not leak failures
+        _print_preflight_blocked(tag, error)
+        return 2
     print(
         json.dumps(
             {
@@ -434,6 +606,8 @@ def run_preflight(operator_value: str | None, tag: str) -> int:
                 ],
                 "mode": "preflight-only",
                 "result": "PREFLIGHT_PASSED",
+                "schema": PREFLIGHT_SCHEMA,
+                "supported": True,
                 "tag": tag,
                 "tag_commit": commit,
             },
@@ -917,11 +1091,7 @@ def main(argv: list[str] | None = None) -> int:
             incompatible.append("--accept-third-party-downloads")
         if incompatible:
             parser.error("--preflight-only cannot be combined with " + ", ".join(incompatible))
-        try:
-            return run_preflight(args.operator, args.tag)
-        except FirstKillError as error:
-            print(f"eggcracker preflight: {error}", file=sys.stderr)
-            return 2
+        return run_preflight(args.operator, args.tag)
     if not args.accept_third_party_downloads:
         parser.error("--accept-third-party-downloads is required because the demo downloads a real model")
 
