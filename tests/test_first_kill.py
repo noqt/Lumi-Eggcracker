@@ -24,7 +24,7 @@ SPEC.loader.exec_module(first_kill)
 
 class FirstKillTests(unittest.TestCase):
     def test_default_release_identity_is_the_1_0_candidate(self) -> None:
-        self.assertEqual("v1.0.10", first_kill.DEFAULT_TAG)
+        self.assertEqual("v1.0.11", first_kill.DEFAULT_TAG)
 
     def test_preflight_exits_before_every_mutating_or_network_step(self) -> None:
         output = io.StringIO()
@@ -67,10 +67,148 @@ class FirstKillTests(unittest.TestCase):
             forbidden.assert_not_called()
         summary = json.loads(output.getvalue())
         self.assertEqual("PREFLIGHT_PASSED", summary["result"])
+        self.assertEqual(first_kill.PREFLIGHT_SCHEMA, summary["schema"])
+        self.assertTrue(summary["supported"])
         self.assertEqual(TAG_COMMIT, summary["tag_commit"])
         self.assertNotIn("qualified_commit", summary)
         self.assertFalse(summary["changes_made"])
         self.assertNotIn("/checkout", output.getvalue())
+
+    def test_preflight_incompatibilities_emit_trusted_bounded_diagnostics(self) -> None:
+        canary = "SECRET_PATH=/private/operator-name pid=424242 --danger"
+        non_default_tag = "v9.9.9"
+        blocked_fields = {
+            "changes_made",
+            "failed_check",
+            "mode",
+            "next_action",
+            "reason_code",
+            "result",
+            "schema",
+            "supported",
+            "tag",
+        }
+        cases = (
+            ("operator_database", "operator"),
+            ("operator_required", "operator"),
+            ("operator_missing", "operator"),
+            ("operator_root", "operator"),
+            ("host_root", "compatibility"),
+            ("host_platform", "compatibility"),
+            ("host_cgroup", "compatibility"),
+            ("host_pidfd", "compatibility"),
+            ("host_command", "compatibility"),
+            ("build_tool", "compatibility"),
+            ("install_target", "compatibility"),
+            ("local_git", "repository"),
+            ("tag_unsupported", "identity"),
+            ("tag_not_annotated", "identity"),
+            ("tag_commit", "identity"),
+            ("unexpected", "identity"),
+        )
+        self.assertEqual(
+            first_kill.DEFAULT_TAG,
+            first_kill._safe_preflight_tag(first_kill.DEFAULT_TAG),
+        )
+        self.assertEqual("<redacted>", first_kill._safe_preflight_tag(non_default_tag))
+        for diagnostic_key, stage in cases:
+            with self.subTest(diagnostic_key=diagnostic_key):
+                output = io.StringIO()
+                errors = io.StringIO()
+                with (
+                    mock.patch.object(first_kill, "operator_name", return_value="tester") as operator,
+                    mock.patch.object(first_kill, "compatibility") as compatibility,
+                    mock.patch.object(
+                        first_kill, "repository_root", return_value=Path("/private/repo")
+                    ) as root,
+                    mock.patch.object(
+                        first_kill, "local_release_identity", return_value=TAG_COMMIT
+                    ) as identity,
+                    mock.patch.object(first_kill, "prepare_workspace") as prepare_workspace,
+                    mock.patch.object(first_kill, "release_files") as release_files,
+                    mock.patch.object(first_kill, "verify_tag") as verify_tag,
+                    mock.patch.object(first_kill, "verify_checksum_signature") as signature,
+                    mock.patch.object(first_kill, "verify_bundle_checksum") as checksum,
+                    mock.patch.object(first_kill, "install_release") as install,
+                    mock.patch.object(first_kill, "run_real_smoke") as smoke,
+                    mock.patch.object(first_kill.tempfile, "mkdtemp") as make_temporary,
+                    mock.patch.object(first_kill, "download") as download,
+                    mock.patch.object(first_kill.urllib.request, "urlopen") as urlopen,
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    failure = first_kill.preflight_failure(
+                        diagnostic_key, f"refusal {diagnostic_key}: {canary}"
+                    )
+                    if diagnostic_key == "unexpected":
+                        failure = RuntimeError(f"unexpected refusal: {canary}")
+                    if stage == "operator":
+                        operator.side_effect = failure
+                    elif stage == "compatibility":
+                        compatibility.side_effect = failure
+                    elif stage == "repository":
+                        root.side_effect = failure
+                    else:
+                        identity.side_effect = failure
+                    result = first_kill.main(
+                        [
+                            "--operator",
+                            "tester",
+                            "--tag",
+                            non_default_tag,
+                            "--preflight-only",
+                        ]
+                    )
+
+                self.assertEqual(2, result)
+                summary = json.loads(output.getvalue())
+                self.assertEqual(blocked_fields, set(summary))
+                self.assertEqual(first_kill.PREFLIGHT_SCHEMA, summary["schema"])
+                self.assertEqual("preflight-only", summary["mode"])
+                self.assertEqual("PREFLIGHT_BLOCKED", summary["result"])
+                self.assertFalse(summary["changes_made"])
+                self.assertFalse(summary["supported"])
+                self.assertEqual("<redacted>", summary["tag"])
+                diagnostic = first_kill.PREFLIGHT_DIAGNOSTICS[diagnostic_key]
+                self.assertEqual(diagnostic.failed_check, summary["failed_check"])
+                self.assertEqual(diagnostic.reason_code, summary["reason_code"])
+                self.assertEqual(diagnostic.next_action, summary["next_action"])
+                self.assertNotIn(canary, output.getvalue())
+                self.assertNotIn("private", output.getvalue().lower())
+                self.assertEqual("", errors.getvalue())
+                for forbidden in (
+                    prepare_workspace,
+                    release_files,
+                    verify_tag,
+                    signature,
+                    checksum,
+                    install,
+                    smoke,
+                    make_temporary,
+                    download,
+                    urlopen,
+                ):
+                    forbidden.assert_not_called()
+                if stage == "operator":
+                    operator.assert_called_once_with("tester")
+                    compatibility.assert_not_called()
+                    root.assert_not_called()
+                    identity.assert_not_called()
+                elif stage == "compatibility":
+                    operator.assert_called_once_with("tester")
+                    compatibility.assert_called_once_with("tester")
+                    root.assert_not_called()
+                    identity.assert_not_called()
+                elif stage == "repository":
+                    operator.assert_called_once_with("tester")
+                    compatibility.assert_called_once_with("tester")
+                    root.assert_called_once_with()
+                    identity.assert_not_called()
+                else:
+                    operator.assert_called_once_with("tester")
+                    compatibility.assert_called_once_with("tester")
+                    root.assert_called_once_with()
+                    identity.assert_called_once_with(Path("/private/repo"), non_default_tag)
 
     def test_normal_run_still_requires_download_acceptance(self) -> None:
         with (
@@ -163,18 +301,25 @@ class FirstKillTests(unittest.TestCase):
 
     def test_preflight_error_redacts_sudo_user_identity(self) -> None:
         canary = "operator-identity-must-not-appear"
+        output = io.StringIO()
         errors = io.StringIO()
         passwd = mock.Mock()
         passwd.getpwnam.side_effect = KeyError(canary)
         with (
             mock.patch.object(first_kill, "pwd", passwd),
             mock.patch.dict(os.environ, {"SUDO_USER": canary}),
+            contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
             result = first_kill.main(["--preflight-only"])
         self.assertEqual(2, result)
+        summary = json.loads(output.getvalue())
+        self.assertEqual("PREFLIGHT_BLOCKED", summary["result"])
+        self.assertEqual("OPERATOR_ACCOUNT_MISSING", summary["reason_code"])
         self.assertNotIn(canary, errors.getvalue())
-        self.assertIn("operator account does not exist", errors.getvalue())
+        self.assertNotIn(canary, output.getvalue())
+        self.assertNotIn("operator account does not exist", output.getvalue())
+        self.assertEqual("", errors.getvalue())
 
     def test_local_release_identity_requires_annotated_tag(self) -> None:
         annotated = mock.Mock(returncode=0, stdout="tag\n")
