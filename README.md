@@ -158,13 +158,13 @@ qualified digest is checked before it can be executed.
 Fetch an immutable source snapshot and run the read-only preflight:
 
 ```sh
+cd "${TMPDIR:-/tmp}"
+git clone https://github.com/noqt/Lumi-Eggcracker.git
+cd Lumi-Eggcracker
 SOURCE_COMMIT="7b190897bf246cb93f03d647510b641ce42ec0a3"
-CHECKOUT="${TMPDIR:-/tmp}/Lumi-Eggcracker-preflight"
-git clone --no-checkout https://github.com/noqt/Lumi-Eggcracker.git "$CHECKOUT"
-git -C "$CHECKOUT" fetch --tags origin "$SOURCE_COMMIT"
-git -C "$CHECKOUT" checkout --detach "$SOURCE_COMMIT"
-test "$(git -C "$CHECKOUT" rev-parse HEAD)" = "$SOURCE_COMMIT"
-cd "$CHECKOUT"
+git fetch --tags https://github.com/noqt/Lumi-Eggcracker.git "$SOURCE_COMMIT"
+git checkout --detach "$SOURCE_COMMIT"
+test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 sudo /usr/bin/python3 -I -S scripts/first_kill.py \
   --operator "$USER" \
   --preflight-only
