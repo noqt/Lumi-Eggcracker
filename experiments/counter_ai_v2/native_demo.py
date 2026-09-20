@@ -1405,6 +1405,67 @@ def _failure_result(*, run_id: str, run_nonce: str, acceptance: dict[str, Any], 
     }
 
 
+def _has_complete_reporting_evidence(result: dict[str, Any]) -> bool:
+    canary = result.get("canary")
+    resource_accounting = result.get("resource_accounting")
+    cleanup = result.get("cleanup")
+    if not isinstance(canary, dict) or not isinstance(resource_accounting, dict) or not isinstance(cleanup, dict):
+        return False
+
+    reports = (
+        canary.get("self_report_before"),
+        canary.get("self_report_after_target_stop"),
+        canary.get("self_report_after"),
+    )
+    if any(
+        not isinstance(report, dict)
+        or report.get("role") != "canary"
+        or report.get("state") != "RUNNING"
+        or type(report.get("generation")) is not int
+        or report["generation"] < 1
+        for report in reports
+    ):
+        return False
+    if len({report["generation"] for report in reports}) != 1:
+        return False
+
+    heartbeat_fields = (
+        canary.get("heartbeat_bytes_before"),
+        canary.get("heartbeat_bytes_during_target_stop"),
+        canary.get("heartbeat_bytes_after"),
+    )
+    if any(type(value) is not int or value < 0 for value in heartbeat_fields):
+        return False
+    before, during, after = heartbeat_fields
+    continued = canary.get("continued_during_stop")
+    if type(continued) is not bool or not continued or continued != (during > before):
+        return False
+    if not before < during <= after:
+        return False
+    if canary.get("separate_uid") is not True:
+        return False
+    if resource_accounting.get("canary_stopped_after_observation") is not True:
+        return False
+    return (
+        cleanup.get("complete") is True
+        and isinstance(cleanup.get("errors"), list)
+        and not cleanup["errors"]
+    )
+
+
+def _aggregate_reporting_result(result: object) -> dict[str, Any]:
+    """Downgrade apparent success when its continuation or cleanup evidence is incomplete."""
+    if not isinstance(result, dict):
+        return {"schema": SCHEMA, "status": "UNKNOWN"}
+    aggregated = dict(result)
+    if not isinstance(aggregated.get("status"), str) or (
+        aggregated["status"] == "PASS"
+        and (aggregated.get("schema") != SCHEMA or not _has_complete_reporting_evidence(aggregated))
+    ):
+        aggregated["status"] = "UNKNOWN"
+    return aggregated
+
+
 def run_demo(
     run_dir: Path,
     *,
@@ -1782,6 +1843,7 @@ def run_demo(
     if cleanup_errors:
         success_result["status"] = "UNKNOWN"
         success_result["cleanup"] = {"complete": False, "errors": cleanup_errors}
+    success_result = _aggregate_reporting_result(success_result)
     _write_result(final_result_path, success_result)
     if serial_result is not None:
         _emit_serial_result(Path(serial_result), run_nonce, success_result)
@@ -1893,8 +1955,9 @@ def main(argv: list[str] | None = None) -> int:
     except (NativeDemoError, OSError, ValueError) as error:
         print(f"NATIVE_DEMO_REFUSED: {type(error).__name__}", file=sys.stderr)
         return 2
+    result = _aggregate_reporting_result(result)
     print(json.dumps(result, sort_keys=True))
-    return 0
+    return 0 if result.get("status") == "PASS" else 2
 
 
 if __name__ == "__main__":

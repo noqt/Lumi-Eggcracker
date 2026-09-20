@@ -13,9 +13,9 @@ ROOT = Path(__file__).parents[1].resolve()
 PORTABLE = ROOT / "experiments" / "counter_ai_v2_portable"
 CORE_PINS = {
     "experiments/counter_ai_v2/__init__.py": "f575ebebdd9d763e40f78c4036ab68e73cc13814277db6d95dc8c85037933769",
-    "experiments/counter_ai_v2/native_demo.py": "cb836ab6fcc4c0f0bd9108725810d1f3e89c9f9b84e4f15d526d2836e36d84a2",
     "experiments/counter_ai_v2/workload.py": "fbbf8739ef69890c3c7ab49696768d4d2ea643ce4dd364952909589bf5765ad1",
 }
+HISTORICAL_NATIVE_DEMO_SHA256 = "cb836ab6fcc4c0f0bd9108725810d1f3e89c9f9b84e4f15d526d2836e36d84a2"
 
 
 def _sha256(path: Path) -> str:
@@ -23,10 +23,27 @@ def _sha256(path: Path) -> str:
 
 
 class PortableReproductionTests(unittest.TestCase):
-    def test_frozen_core_is_exact_and_portable_does_not_copy_runner(self) -> None:
+    def test_unchanged_core_files_are_exact_and_portable_does_not_copy_runner(self) -> None:
         for relative, expected in CORE_PINS.items():
             self.assertEqual(_sha256(ROOT / relative), expected, relative)
         self.assertFalse((PORTABLE / "vm_runner.py").exists())
+
+    def test_historical_native_pin_is_preserved_as_non_authorizing_evidence(self) -> None:
+        artifact = json.loads((PORTABLE / "portable-artifact-manifest.example.json").read_text(encoding="utf-8"))
+        source = json.loads((PORTABLE / "portable-source-manifest.example.json").read_text(encoding="utf-8"))
+        protocol = json.loads((PORTABLE / "portable-protocol.v1.json").read_text(encoding="utf-8"))
+        readme = (PORTABLE / "README.md").read_text(encoding="utf-8")
+
+        self.assertNotEqual(
+            _sha256(ROOT / "experiments" / "counter_ai_v2" / "native_demo.py"),
+            HISTORICAL_NATIVE_DEMO_SHA256,
+        )
+        self.assertEqual(artifact["status"], "EXAMPLE_NOT_AUTHORIZATION")
+        self.assertEqual(artifact["source"]["experiments/counter_ai_v2/native_demo.py"], HISTORICAL_NATIVE_DEMO_SHA256)
+        self.assertEqual(source["native_demo_sha256"], HISTORICAL_NATIVE_DEMO_SHA256)
+        self.assertEqual(protocol["frozen_core"]["experiments/counter_ai_v2/native_demo.py"], HISTORICAL_NATIVE_DEMO_SHA256)
+        self.assertIn(HISTORICAL_NATIVE_DEMO_SHA256, readme)
+        self.assertIn("historical", readme.lower())
 
     def test_protocol_is_source_only_with_exact_boundary_and_limits(self) -> None:
         protocol = json.loads((PORTABLE / "portable-protocol.v1.json").read_text(encoding="utf-8"))
@@ -45,7 +62,7 @@ class PortableReproductionTests(unittest.TestCase):
         artifact = json.loads((PORTABLE / "portable-artifact-manifest.example.json").read_text(encoding="utf-8"))
         source = json.loads((PORTABLE / "portable-source-manifest.example.json").read_text(encoding="utf-8"))
         self.assertEqual(artifact["status"], "EXAMPLE_NOT_AUTHORIZATION")
-        self.assertEqual(artifact["source"]["experiments/counter_ai_v2/native_demo.py"], CORE_PINS["experiments/counter_ai_v2/native_demo.py"])
+        self.assertEqual(artifact["source"]["experiments/counter_ai_v2/native_demo.py"], HISTORICAL_NATIVE_DEMO_SHA256)
         self.assertEqual(artifact["source"]["experiments/counter_ai_v2/workload.py"], CORE_PINS["experiments/counter_ai_v2/workload.py"])
         self.assertNotIn("artifact_manifest_sha256", artifact["materialization"])
         self.assertIn("bind that digest only", artifact["materialization"]["rule"])
@@ -54,7 +71,7 @@ class PortableReproductionTests(unittest.TestCase):
         self.assertIn("REPLACE_WITH_", source["run_nonce"])
         self.assertNotEqual(artifact.get("status"), "ACCEPTED")
 
-    def test_default_frozen_native_entry_point_is_inert(self) -> None:
+    def test_default_current_native_entry_point_is_inert(self) -> None:
         from experiments.counter_ai_v2 import native_demo
 
         output = io.StringIO()

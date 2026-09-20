@@ -1,13 +1,24 @@
 # Counter-AI v2 direct-Linux reproduction
 
-This is a small, versioned, off-by-default source slice for the frozen v2
-native demonstration. The authoritative controller, harmless selected
-workload, and package initializer are the exact byte-identical files under
-`experiments/counter_ai_v2/`. This directory adds only a portable protocol and
-non-authorizing manifest examples; it does not copy or edit the controller,
-workload, detector, evaluator, or private QEMU runner.
+This is a small, versioned, off-by-default source slice for the v2 native
+demonstration. The harmless selected workload and package initializer remain
+byte-identical to their pinned files under `experiments/counter_ai_v2/`. The
+current `native_demo.py` keeps the same path and native gates, with a reporting
+correction that requires consistent canary-continuation evidence and complete
+cleanup before returning `PASS`.
 
-The default native entry point is inert and prints a plan:
+## Historical source pin
+
+The portable protocol and example manifests intentionally retain the historical
+`native_demo.py` SHA256
+`cb836ab6fcc4c0f0bd9108725810d1f3e89c9f9b84e4f15d526d2836e36d84a2`. The
+retained native07 result and that pin describe the original source bytes; they
+do not validate the current reporting repair. The manifests remain marked
+`EXAMPLE_NOT_AUTHORIZATION`, are unchanged, and cannot authorize execution of
+the current source. This reporting-only repair did not rerun or requalify the
+native demonstration.
+
+The current default native entry point is inert and prints a plan:
 
 ```text
 python3 -I -B experiments/counter_ai_v2/native_demo.py
@@ -50,7 +61,7 @@ python3 -I -B experiments/counter_ai_v2/native_demo.py --execute \
 ```
 
 The accepted record, source manifest, artifact manifest, run directory, and
-result path are separate explicit inputs. The frozen core itself enforces the
+result path are separate explicit inputs. The native entry point enforces the
 root-owned durable latch, selected cgroup-v2 allocation, trusted external
 observer, forced stop, separate canary identity, relaunch refusal, reset
 without auto-start, and cleanup accounting. Missing or contradictory evidence
@@ -64,7 +75,7 @@ the observer stop proof timeout is 2 seconds. The retained QEMU limits (1 GiB,
 2 vCPU, q35/TCG with 128 MiB translation cache, 600 seconds) remain part of
 the frozen envelope, but this direct slice does not start QEMU.
 
-The retained native07 result is evidence for the unchanged original core only.
-It does not validate this documentation slice as a new qualification, does
-not promote a detector, and does not authorize production enforcement,
-holdout access, or publication.
+The retained native07 result is evidence for the original pinned source only.
+It does not validate this reporting repair as a new qualification, does not
+promote a detector, and does not authorize production enforcement, holdout
+access, or publication.
