@@ -155,27 +155,55 @@ shared host, production server, or machine carrying private data.
 The campaign checkout's co-located preparer governs that build; the runner's
 qualified digest is checked before it can be executed.
 
-Clone public `main` and run the read-only preflight:
+Fetch an immutable source snapshot and run the read-only preflight:
 
 ```sh
+cd "${TMPDIR:-/tmp}"
 git clone https://github.com/noqt/Lumi-Eggcracker.git
 cd Lumi-Eggcracker
+SOURCE_COMMIT="7b190897bf246cb93f03d647510b641ce42ec0a3"
+git fetch --tags https://github.com/noqt/Lumi-Eggcracker.git "$SOURCE_COMMIT"
+git checkout --detach "$SOURCE_COMMIT"
+test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 sudo /usr/bin/python3 -I -S scripts/first_kill.py \
   --operator "$USER" \
   --preflight-only
 ```
 
-The preflight is read-only: it checks the operator, supported host features,
-empty installation targets, required tool availability, and that the local
-published-release reference is an annotated tag resolving to a commit. It makes
-no network request and creates no workspace, GPG home, build, installation or
-service. It does not verify the tag signature, downloaded assets, functional
-build, installation or containment. The full run verifies both the annotated
-tag signature and the detached `SHA256SUMS.asc` signature with the pinned
-release-key fingerprint, requires the downloaded bundle to match that signed
-checksum list, and requires the signed tag commit to match the release
-manifest. It rejects duplicate, link, special and unsafe archive members before
-extraction.
+This workflow checks out the exact accepted immutable source snapshot above,
+fetches the existing annotated release tags for the local identity check, and
+then runs a read-only compatibility preflight. Do not replace the commit with a
+branch name or a moving tag. It does not install Eggcracker, start a service,
+download release assets, verify a release signature, qualify containment, or
+make a claim that the Hugging Face mirror is current. It is not a tagged
+release or installation path.
+
+The preflight checks the operator, supported host features, empty installation
+targets, required tool availability, and that the local published-release
+reference is an annotated tag resolving to a commit. It makes no request beyond
+the explicit Git clone/fetch above and creates no GPG home, build, installation
+or service. A supported check exits `0`; a blocked check exits `2` and emits
+one bounded JSON object instead of raw exception text. For example:
+
+```json
+{
+  "changes_made": false,
+  "failed_check": "host",
+  "mode": "preflight-only",
+  "next_action": "run on a supported native Linux host",
+  "reason_code": "NATIVE_LINUX_REQUIRED",
+  "result": "PREFLIGHT_BLOCKED",
+  "schema": "lumi-eggcracker.first-kill-preflight.v1",
+  "supported": false,
+  "tag": "v1.0.10"
+}
+```
+
+The structured refusal contains no filesystem paths, process IDs, command
+arguments, account or environment values, secrets, or raw exception text. A
+passing preflight is only a compatibility result (`PREFLIGHT_PASSED` with
+`changes_made: false`); it is not a release signature, installation, or
+containment result.
 
 ### Probe the containment primitive
 
