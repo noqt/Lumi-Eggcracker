@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml/badge.svg)](https://github.com/noqt/Lumi-Eggcracker/actions/workflows/ci.yml)
 
-1.0.10 release candidate (local qualification)
+1.0.11 maintenance release
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
 · [Run the first kill](#run-the-first-kill)
@@ -21,10 +21,12 @@ that AI agents in a cybersecurity test broke out of their intended environment
 and breached Hugging Face. That incident made the point: the kill switch can't
 live inside the thing it's meant to stop.
 
-Eggcracker works on native Linux today and supports four qualified AI workload
-profiles plus an offline boundary for every explicitly selected workload. It's
-an internal 1.0.10 release candidate, intentionally limited; the exact boundary is in
-[Current boundary](#current-boundary).
+Eggcracker works on native Linux today and supports four AI workload profiles
+qualified for v1.0.10 plus an offline boundary for every explicitly selected
+workload. This 1.0.11 maintenance release updates packaging and the
+read-only first-use preflight diagnostics only; it retains the v1.0.10
+qualified containment boundary and makes no new native-efficacy, qualification
+or adoption claim. The exact boundary is in [Current boundary](#current-boundary).
 
 **Want to see the core idea work?** [Try the hosted proof](TRY_IT.md). You don't
 need to install Eggcracker, own a GPU or download a model. The test kills a
@@ -63,7 +65,7 @@ The release demonstration prints a bounded result like this after native
 qualification:
 
 ```text
-[eggcracker] candidate artifact and release identity verified: 1.0.10 -> <qualified-commit>
+[eggcracker] candidate artifact and release identity verified: 1.0.11 -> <release-commit>
 {
   "primitive": "pidfd-stop+cgroup.kill",
   "profile": "content.gguf-llama",
@@ -91,11 +93,12 @@ llama.cpp runner, downloads signed release assets, and—only after the explicit
 flag—downloads the third-party Qwen model. Do not begin on a workstation,
 shared host, production server, or machine carrying private data.
 
-Clone public `main` and run the read-only preflight:
+Check out the v1.0.11 release tag and run the read-only preflight:
 
 ```sh
 git clone https://github.com/noqt/Lumi-Eggcracker.git
 cd Lumi-Eggcracker
+git checkout v1.0.11
 sudo /usr/bin/python3 -I -S scripts/first_kill.py \
   --operator "$USER" \
   --preflight-only
@@ -103,11 +106,13 @@ sudo /usr/bin/python3 -I -S scripts/first_kill.py \
 
 The preflight is read-only: it checks the operator, supported host features,
 empty installation targets, required tool availability, and that the local
-published-release reference is an annotated tag resolving to a commit. It makes
-no network request and creates no workspace, GPG home, build, installation or
-service. It does not verify the tag signature, downloaded assets, functional
-build, installation or containment. The full run verifies both the annotated
-tag signature and the detached `SHA256SUMS.asc` signature with the pinned
+v1.0.11 reference is an annotated tag resolving to a commit. A refusal prints a
+fixed-schema JSON summary with a stable reason code and next action; it does not
+print raw exception details or unapproved tag text. It makes no network request
+and creates no workspace, GPG home, build, installation or service. Preflight
+does not verify the tag signature, downloaded assets, functional build,
+installation or containment. The full run
+verifies both the annotated tag signature and the detached `SHA256SUMS.asc` signature with the pinned
 release-key fingerprint, requires the downloaded bundle to match that signed
 checksum list, and requires the signed tag commit to match the release
 manifest. It rejects duplicate, link, special and unsafe archive members before

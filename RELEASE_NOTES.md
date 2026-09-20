@@ -1,6 +1,29 @@
+# Lumi Eggcracker 1.0.11 — maintenance packaging and preflight
+
+This maintenance release is based on the signed `v1.0.10` tag at
+`27cb6dfa0884896025976f8583398c9db7ac9a30`. It adds stable JSON summaries for
+the existing read-only first-use preflight. Refusals expose only fixed reason
+codes, affected check names and next actions; raw exception details and
+unapproved tag values are not printed. The preflight remains local-only and
+does not download assets, verify signatures, create a workspace, or change host
+state. This ports the accepted diagnostic contract from
+`28f0bd401be471e9267598548a9bbb07c4dcb155` only to preflight checks already
+present at the v1.0.10 baseline.
+
+This is a maintenance packaging/preflight release. It keeps the v1.0.10
+qualified containment boundary unchanged and makes no new native efficacy,
+qualification, independent-use or adoption claim. The package and installer
+version metadata and the first-kill tag default identify this 1.0.11
+maintenance release.
+
+This release also includes the narrowly scoped test-isolation repair from
+`bb4c4e0`: two recovery tests now keep their name-index writes inside temporary
+directories so a test-then-build run can leave the source checkout clean. This
+changes no shipped runtime behavior.
+
 # Lumi Eggcracker 1.0.10 — qualification reliability repair
 
-This local 1.0.10 candidate binds adversarial descendant liveness checks to an
+The v1.0.10 release binds adversarial descendant liveness checks to an
 exact PID and kernel start time, accepts a killed zombie as non-executing, and
 continues to fail on any runnable original identity after a bounded wait. This
 repairs a nondeterministic verifier failure without weakening the cgroup-empty
@@ -64,7 +87,7 @@ the cache directly. This removes repeated parsing and hashing of 256 incident
 records from the discovery hot path without relaxing the one-second watchdog
 health bound or malformed-store fail-closed behavior.
 
-The public first-kill helper defaults to `v1.0.10`. The packaged support helper
+In v1.0.10, the public first-kill helper defaulted to `v1.0.10`. The packaged support helper
 delegates to the installed root-owned zipapp, so the documented command works
 from the verified Linux release bundle without importing a mutable checkout.
 The bootstrap now also requires a detached `SHA256SUMS.asc` signature from the
@@ -72,9 +95,9 @@ pinned release key and rejects duplicate, link, special, oversized and unsafe
 ZIP members. A replaced release bundle plus self-recomputed unsigned checksums
 can therefore no longer reach root execution.
 
-The candidate is not tagged, signed or published. Its release decision is
-bound to the exact commit, artifact hashes, disposable Ubuntu qualification
-evidence and the internal black-box/source-informed campaign. Unsupported
+The signed public `v1.0.10` tag points to commit
+`27cb6dfa0884896025976f8583398c9db7ac9a30`; its qualification remains bound to
+the exact commit, artifacts and disposable Ubuntu evidence. Unsupported
 formats, runtimes, containers, remote workloads, behavioural recognition,
 host-wide isolation and remote retaliation remain outside the claim.
 

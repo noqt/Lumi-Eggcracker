@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.11 (maintenance release)
+
+- Add stable, structured JSON results for the read-only first-use preflight,
+  with fixed reason codes and next actions and no raw exception or unapproved
+  tag text in refusal output, porting the accepted diagnostic contract from
+  `28f0bd401be471e9267598548a9bbb07c4dcb155` to checks in the v1.0.10 baseline.
+- Point the first-kill helper and first-use guide at the `v1.0.11`
+  tag, and bump package and installer version metadata to 1.0.11.
+- Keep the v1.0.10 qualified containment boundary unchanged; this packaging and
+  preflight release adds no native efficacy, qualification or adoption claim.
+- Isolate recovery tests' name-index writes under their temporary directories
+  so the standard test-then-build path leaves a clean release checkout. This is
+  test-only and does not change product behavior.
+
 ## 1.0.10 (release candidate)
 
 - Bind every adversarial descendant check to its PID and kernel start time.
