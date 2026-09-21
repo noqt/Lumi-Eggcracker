@@ -234,6 +234,30 @@ This is a proof of the deterministic containment primitive, not a test of AI
 workload recognition, the four supported profiles, installation, or universal
 product effectiveness. A pass does not replace the full first-kill path.
 
+#### Reproduce a child appearing during cancellation
+
+On the same disposable native Ubuntu 24.04, systemd, unified-cgroup-v2 path,
+with no active Eggcracker service, run this separate opt-in example:
+
+```sh
+sudo /usr/bin/python3 -I -S scripts/cancellation_race_example.py \
+  --i-understand-this-kills-a-test-tree
+```
+
+The example records the target cgroup process list, requests cancellation, and
+uses a deterministic barrier to let the harmless target create exactly one
+child after that snapshot. It then applies `cgroup.kill` only to the exact
+private target cgroup. Success requires the late child to be present before the
+kill, recursive `cgroup.events` `populated=0`, an empty exact target subtree,
+the unrelated identity-bound canary still alive, and complete cleanup. The
+owner is capped at three tasks and the controller has a 20-second ceiling;
+workers also self-end within 30 seconds.
+
+This demonstrates one constructed native Ubuntu example in which a single
+pre-cancellation snapshot misses a child. It is not a GitHub Actions runner or
+WSL compatibility claim, proof of universal race freedom, production efficacy,
+AI detection, adoption, or evidence about arbitrary cgroup layouts.
+
 #### Save an opt-in local operator receipt
 
 After running that exact command on the supported disposable Ubuntu 24.04 path,
