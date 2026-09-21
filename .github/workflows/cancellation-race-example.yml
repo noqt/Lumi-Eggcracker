@@ -1,0 +1,227 @@
+name: Cancellation race example (single reviewed run)
+run-name: Cancellation race example (single reviewed run)
+
+on:
+  workflow_dispatch:
+    inputs:
+      i_understand_this_kills_a_test_tree:
+        description: I understand this kills one bounded synthetic test tree on a disposable runner
+        required: true
+        type: boolean
+        default: false
+      reviewed_launcher_commit:
+        description: Exact Risk-accepted launcher commit
+        required: true
+        type: string
+      reviewed_launcher_sha256:
+        description: SHA-256 of this exact workflow file at the accepted launcher commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  cancellation-race-example:
+    if: ${{ github.run_attempt == 1 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      ACCEPTED_SOURCE_COMMIT: fc0e678494a5c08d5c3f7e37a02a6ef3bfa8f0a2
+      ACCEPTED_SOURCE_TREE: 67fe255fbd9841bf29f3a5d52a6e71719f033473
+      ACCEPTED_EXAMPLE_SHA256: 3a0e75c7e0f945c44f812af2e4bc6a5828a52e4729fb85fada3f3bfe00842288
+      ACCEPTED_TEST_SHA256: b6df92f3662733aa688a5104285cb36d95cedfa92872be142fdafdc88cdd131b
+      ACCEPTED_README_SHA256: b4ae6ccfcafffddb48eeea7023176966738e312bf94e31882764d5d5e51263ab
+      ACCEPTED_PROBE_SOURCE_SHA256: 78fcc0aeb8c3e5f6713b4db57c70f72a288115cd2d34c38b28f6267a6e12e163
+      ACKNOWLEDGED: ${{ inputs.i_understand_this_kills_a_test_tree }}
+      REVIEWED_LAUNCHER_COMMIT: ${{ inputs.reviewed_launcher_commit }}
+      REVIEWED_LAUNCHER_SHA256: ${{ inputs.reviewed_launcher_sha256 }}
+      REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+
+    steps:
+      - name: Check out the reviewed launcher revision without credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          path: launcher
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind launcher, source, and disposable native substrate
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          refuse() {
+            printf 'CANCELLATION_RACE_PREFLIGHT=%s\n' "$1"
+            exit 1
+          }
+
+          test "$ACKNOWLEDGED" = "true" || refuse ACKNOWLEDGEMENT_REQUIRED
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch" || refuse WORKFLOW_DISPATCH_REQUIRED
+          test "$GITHUB_RUN_ATTEMPT" = "1" || refuse FIRST_ATTEMPT_REQUIRED
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted" || refuse GITHUB_HOSTED_REQUIRED
+          test "$REPOSITORY_VISIBILITY" = "public" || refuse PUBLIC_REPOSITORY_REQUIRED
+          test "$GITHUB_SHA" = "$REVIEWED_LAUNCHER_COMMIT" || refuse LAUNCHER_COMMIT_MISMATCH
+          [[ "$REVIEWED_LAUNCHER_COMMIT" =~ ^[0-9a-f]{40}$ ]] || refuse LAUNCHER_COMMIT_INVALID
+          [[ "$REVIEWED_LAUNCHER_SHA256" =~ ^[0-9a-f]{64}$ ]] || refuse LAUNCHER_HASH_INVALID
+
+          launcher_file="launcher/.github/workflows/cancellation-race-example.yml"
+          test -f "$launcher_file" && test ! -L "$launcher_file" || refuse LAUNCHER_FILE_INVALID
+          measured_launcher_sha256="$(sha256sum "$launcher_file" | cut -d' ' -f1)"
+          test "$measured_launcher_sha256" = "$REVIEWED_LAUNCHER_SHA256" \
+            || refuse LAUNCHER_HASH_MISMATCH
+          test "$(git -C launcher rev-parse HEAD)" = "$REVIEWED_LAUNCHER_COMMIT" \
+            || refuse LAUNCHER_CHECKOUT_DRIFT
+
+          . /etc/os-release || refuse HOST_IDENTITY_UNAVAILABLE
+          test "${ID:-}" = "ubuntu" && test "${VERSION_ID:-}" = "24.04" \
+            || refuse UBUNTU_2404_REQUIRED
+          test "$(cat /proc/1/comm)" = "systemd" || refuse SYSTEMD_PID1_REQUIRED
+          test ! -e /run/systemd/container || refuse CONTAINER_UNSUPPORTED
+          test "$(stat -fc %T /sys/fs/cgroup)" = "cgroup2fs" || refuse CGROUP_V2_REQUIRED
+          read -r controllers < /sys/fs/cgroup/cgroup.controllers
+          case " $controllers " in
+            *" pids "*) ;;
+            *) refuse PIDS_CONTROLLER_REQUIRED ;;
+          esac
+
+          for target in \
+            /usr/local/lib/lumi-eggcracker \
+            /usr/local/bin/eggcracker \
+            /etc/lumi-eggcracker \
+            /var/lib/lumi-eggcracker \
+            /run/lumi-eggcracker \
+            /run/lumi-eggcracker-watchdog \
+            /etc/systemd/system/lumi-eggcracker.service \
+            /etc/systemd/system/lumi-eggcracker-watchdog.service
+          do
+            test ! -e "$target" && test ! -L "$target" || refuse ACTIVE_INSTALLATION_REFUSED
+          done
+
+          printf 'CANCELLATION_RACE_LAUNCHER_SHA256=%s\n' "$measured_launcher_sha256"
+          printf 'CANCELLATION_RACE_PREFLIGHT=LAUNCHER_AND_HOST_PASS\n'
+
+      - name: Check out the exact accepted executable source without credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: fc0e678494a5c08d5c3f7e37a02a6ef3bfa8f0a2
+          path: accepted-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact accepted source identity
+        shell: bash
+        working-directory: accepted-source
+        run: |
+          set -euo pipefail
+          umask 077
+
+          refuse() {
+            printf 'CANCELLATION_RACE_SOURCE_PREFLIGHT=%s\n' "$1"
+            exit 1
+          }
+
+          test "$(git rev-parse HEAD)" = "$ACCEPTED_SOURCE_COMMIT" || refuse SOURCE_COMMIT_MISMATCH
+          test "$(git rev-parse 'HEAD^{tree}')" = "$ACCEPTED_SOURCE_TREE" || refuse SOURCE_TREE_MISMATCH
+          test "$(sha256sum scripts/cancellation_race_example.py | cut -d' ' -f1)" = "$ACCEPTED_EXAMPLE_SHA256" \
+            || refuse EXAMPLE_HASH_MISMATCH
+          test "$(sha256sum tests/test_cancellation_race_example.py | cut -d' ' -f1)" = "$ACCEPTED_TEST_SHA256" \
+            || refuse TEST_HASH_MISMATCH
+          test "$(sha256sum README.md | cut -d' ' -f1)" = "$ACCEPTED_README_SHA256" \
+            || refuse README_HASH_MISMATCH
+          test -z "$(git status --porcelain=v1 --untracked-files=all -- src scripts tests README.md)" \
+            || refuse EXECUTABLE_SOURCE_DIRTY
+          printf 'CANCELLATION_RACE_SOURCE_PREFLIGHT=PASS\n'
+
+      - name: Run the exact accepted command once and validate the bounded receipt
+        shell: bash
+        working-directory: accepted-source
+        run: |
+          set -euo pipefail
+          umask 077
+          stdout_path="$RUNNER_TEMP/cancellation-race.stdout"
+          stderr_path="$RUNNER_TEMP/cancellation-race.stderr"
+          : > "$stdout_path"
+          : > "$stderr_path"
+          chmod 0600 "$stdout_path" "$stderr_path"
+
+          set +e
+          sudo -n /usr/bin/python3 -I -S scripts/cancellation_race_example.py \
+            --i-understand-this-kills-a-test-tree \
+            > "$stdout_path" 2> "$stderr_path"
+          example_status=$?
+          set -e
+
+          /usr/bin/python3 -I -S - \
+            "$example_status" "$stdout_path" "$stderr_path" \
+            "$ACCEPTED_SOURCE_COMMIT" "$ACCEPTED_SOURCE_TREE" \
+            "$ACCEPTED_EXAMPLE_SHA256" "$ACCEPTED_PROBE_SOURCE_SHA256" <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          status = int(sys.argv[1])
+          stdout_path = Path(sys.argv[2])
+          stderr_path = Path(sys.argv[3])
+          source_commit, source_tree, example_hash, probe_hash = sys.argv[4:8]
+
+          def bounded(path: Path, maximum: int) -> str:
+              raw = path.read_bytes()
+              if len(raw) > maximum:
+                  raise ValueError("output bound exceeded")
+              return raw.decode("utf-8")
+
+          def fail(code: str) -> None:
+              print(f"CANCELLATION_RACE_RESULT={code}")
+              raise SystemExit(1)
+
+          try:
+              stdout = bounded(stdout_path, 8192)
+              stderr = bounded(stderr_path, 2048)
+              if status != 0 or stderr:
+                  if status == 2 and not stdout:
+                      receipt = json.loads(stderr)
+                      reason = receipt.get("reason_code") if isinstance(receipt, dict) else None
+                      if isinstance(reason, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason):
+                          fail("BOUNDED_FAILURE_" + reason)
+                  fail("UNEXPECTED_FAILURE")
+
+              receipt = json.loads(stdout)
+              expected = {
+                  "mode": "fork-during-cancellation-example",
+                  "result": "TERMINATED",
+                  "primitive": "cgroup.kill",
+                  "source_commit": source_commit,
+                  "git_tree": source_tree,
+                  "source_tree_sha256": probe_hash,
+                  "example_source_sha256": example_hash,
+                  "child_absent_from_pre_cancel_snapshot": True,
+                  "children_created_during_cancellation": 1,
+                  "pre_cancel_snapshot_processes": 1,
+                  "target_processes_at_kill": 2,
+                  "target_populated": 0,
+                  "target_survivors": 0,
+                  "canary_identity_bound": True,
+                  "canary_survived": True,
+                  "target_migration_denied": True,
+                  "target_unprivileged": True,
+                  "cleanup_complete": True,
+                  "installation_performed": False,
+                  "network_requests_made": False,
+                  "workload_detection_performed": False,
+              }
+              if not isinstance(receipt, dict) or any(receipt.get(k) != v for k, v in expected.items()):
+                  fail("RECEIPT_MISMATCH")
+              if set(receipt) != set(expected) | {"descendant_cgroups_checked", "journal_history_may_persist"}:
+                  fail("RECEIPT_SCHEMA_MISMATCH")
+              descendants = receipt.get("descendant_cgroups_checked")
+              if type(descendants) is not int or descendants < 1:
+                  fail("DESCENDANT_COUNT_INVALID")
+              print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))
+              print("CANCELLATION_RACE_RESULT=PASS")
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+              fail("VALIDATION_ERROR")
+          PY
