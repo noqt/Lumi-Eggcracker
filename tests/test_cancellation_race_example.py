@@ -74,6 +74,45 @@ class CancellationRaceExampleTests(unittest.TestCase):
                     example.run_example(acknowledged=True)
                 cleanup.assert_called_once()
 
+    def test_signal_during_handler_installation_blocks_first_host_mutation(self) -> None:
+        with ExitStack() as stack:
+            self._early_stack(stack)
+            fired = False
+
+            def interrupt_during_install(signum: int, handler: object) -> object:
+                nonlocal fired
+                if not fired:
+                    fired = True
+                    assert callable(handler)
+                    handler(signum, None)
+                return object()
+
+            stack.enter_context(
+                patch.object(example.signal, "signal", side_effect=interrupt_during_install)
+            )
+            start_owner = stack.enter_context(patch.object(example, "_start_owner"))
+            cleanup = stack.enter_context(patch.object(example.probe, "_cleanup", return_value=True))
+            with self.assertRaisesRegex(example.probe.ProbeError, "INTERRUPTED"):
+                example.run_example(acknowledged=True)
+        start_owner.assert_not_called()
+        cleanup.assert_called_once()
+
+    def test_migration_check_is_bound_to_owner_membership_path(self) -> None:
+        unit = f"lumi-eggcracker-probe-{'a' * 32}.service"
+        owner = example.probe.ProbeCgroupIdentity(
+            unit=unit,
+            invocation_id="b" * 32,
+            control_group=f"/system.slice/{unit}",
+            parent_device=1,
+            parent_inode=2,
+            target_device=1,
+            target_inode=3,
+            boot="c" * 36,
+        )
+        self.assertEqual(owner.parent_path / "cgroup.procs", example._parent_membership_path(owner))
+        self.assertNotEqual(owner.target_path / "cgroup.procs", example._parent_membership_path(owner))
+        self.assertIn("parent_procs = sys.argv[5]", example.CANCELLATION_TARGET_CODE)
+
     def test_action_timeout_reserves_cleanup_time(self) -> None:
         with ExitStack() as stack:
             self._early_stack(stack)

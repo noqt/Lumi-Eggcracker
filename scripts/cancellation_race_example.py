@@ -80,7 +80,7 @@ CANCELLATION_TARGET_CODE = (
     "import os, signal, sys, time\n"
     f"deadline = time.monotonic() + {WORKER_LIFETIME_SECONDS}\n"
     "cgroup_fd, attach_gate, report_fd, fork_gate = map(int, sys.argv[1:5])\n"
-    "target_procs = sys.argv[5]\n"
+    "parent_procs = sys.argv[5]\n"
     "def emit(value):\n"
     "    os.write(report_fd, value.encode('ascii') + b'\\n')\n"
     "os.write(cgroup_fd, b'0\\n')\n"
@@ -92,7 +92,7 @@ CANCELLATION_TARGET_CODE = (
     f"os.setgid({CANCELLATION_GID})\n"
     f"os.setuid({CANCELLATION_UID})\n"
     "try:\n"
-    "    migration_fd = os.open(target_procs, os.O_WRONLY | os.O_CLOEXEC)\n"
+    "    migration_fd = os.open(parent_procs, os.O_WRONLY | os.O_CLOEXEC)\n"
     "except PermissionError:\n"
     "    migration_fd = -1\n"
     "if migration_fd >= 0:\n"
@@ -294,7 +294,7 @@ def _spawn_target(owner: probe.ProbeCgroupIdentity, resources: RaceResources) ->
                 str(attach_read),
                 str(report_write),
                 str(fork_read),
-                str(path / "cgroup.procs"),
+                str(_parent_membership_path(owner)),
             ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -316,6 +316,11 @@ def _spawn_target(owner: probe.ProbeCgroupIdentity, resources: RaceResources) ->
                 os.close(descriptor)
             except OSError:
                 pass
+
+
+def _parent_membership_path(owner: probe.ProbeCgroupIdentity) -> Path:
+    """Return the owner membership file that would let the target escape its child cgroup."""
+    return owner.parent_path / "cgroup.procs"
 
 
 def _read_event(descriptor: int, *, deadline: float) -> str:
@@ -429,8 +434,11 @@ def run_example(*, acknowledged: bool) -> dict[str, object]:
     deadline = started + RUN_TIMEOUT_SECONDS
     previous_handlers: dict[int, object] = {}
     resources: RaceResources | None = None
+    interrupted = False
 
     def request_cleanup(_signum: int, _frame: object) -> None:
+        nonlocal interrupted
+        interrupted = True
         if resources is not None:
             resources.interrupted = True
 
@@ -441,12 +449,14 @@ def run_example(*, acknowledged: bool) -> dict[str, object]:
         previous_handlers[signum] = signal.signal(signum, request_cleanup)
 
     resources = RaceResources(probe.ProbeResources(target_pidfds={}))
+    resources.interrupted = interrupted
 
     success: dict[str, object] | None = None
     failure: probe.ProbeError | None = None
     held_fds_closed = True
     cleanup_complete = False
     try:
+        _assert_uninterrupted(resources)
         token = probe.secrets.token_hex(16)
         base = resources.probe_resources
         base.unit = f"lumi-eggcracker-probe-{token}.service"
