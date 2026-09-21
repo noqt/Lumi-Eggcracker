@@ -23,6 +23,7 @@ permissions:
 
 jobs:
   cancellation-race-example:
+    if: ${{ github.run_attempt == 1 }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -59,6 +60,7 @@ jobs:
 
           test "$ACKNOWLEDGED" = "true" || refuse ACKNOWLEDGEMENT_REQUIRED
           test "$GITHUB_EVENT_NAME" = "workflow_dispatch" || refuse WORKFLOW_DISPATCH_REQUIRED
+          test "$GITHUB_RUN_ATTEMPT" = "1" || refuse FIRST_ATTEMPT_REQUIRED
           test "${RUNNER_ENVIRONMENT:-}" = "github-hosted" || refuse GITHUB_HOSTED_REQUIRED
           test "$REPOSITORY_VISIBILITY" = "public" || refuse PUBLIC_REPOSITORY_REQUIRED
           test "$GITHUB_SHA" = "$REVIEWED_LAUNCHER_COMMIT" || refuse LAUNCHER_COMMIT_MISMATCH
