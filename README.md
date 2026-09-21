@@ -234,6 +234,35 @@ This is a proof of the deterministic containment primitive, not a test of AI
 workload recognition, the four supported profiles, installation, or universal
 product effectiveness. A pass does not replace the full first-kill path.
 
+#### Reproduce one child appearing during cancellation
+
+On the same disposable native Ubuntu 24.04 substrate and with the same
+preflight requirements, run this opt-in variant:
+
+```sh
+sudo /usr/bin/python3 -I -S scripts/containment_probe.py \
+  --fork-during-cancellation \
+  --i-understand-this-kills-a-test-tree
+```
+
+It starts one harmless target process and an unrelated sleeping canary. The
+target installs a `SIGTERM` handler that forks at most one sleeping child. The
+probe takes one target `cgroup.procs` snapshot before requesting cancellation,
+then checks that the new child was absent from that snapshot and present in the
+target cgroup before applying direct `cgroup.kill`. Success requires the target
+`cgroup.events` `populated` value to be `0`, an empty recursive target process
+list, the canary still alive, and clean removal of the transient cgroup and
+systemd unit. The transient owner is capped at three tasks; workers have a
+30-second lifetime ceiling. No installation, model, network request, or
+workload recognition is involved.
+
+This demonstrates one constructed timing in which a pre-cancellation process
+snapshot misses a child created after cancellation begins. It is not a replay
+of GitHub Actions runner internals, a runner compatibility claim, or proof of
+universal race freedom. The receipt reports counts and booleans only; it omits
+process IDs and host paths. Systemd journal metadata may persist until normal
+log rotation.
+
 #### Save an opt-in local operator receipt
 
 After running that exact command on the supported disposable Ubuntu 24.04 path,

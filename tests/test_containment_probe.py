@@ -209,6 +209,116 @@ class ContainmentProbeTests(unittest.TestCase):
         self.assertEqual("e" * 64, receipt["source_tree_sha256"])
         direct.assert_called_once_with(Path("/target"))
 
+    def test_cancellation_target_worker_is_syntactically_valid_and_forks_at_most_once(self) -> None:
+        code = probe.CANCELLATION_RACE_TARGET_CODE
+        compile(code, "<cancellation-race-worker>", "exec")
+        self.assertEqual(1, code.count("os.fork()"))
+        self.assertIn("if forked:", code)
+        self.assertIn("forked = True", code)
+        self.assertIn("signal.signal(signal.SIGTERM, on_cancel)", code)
+
+    def test_cancellation_race_requires_late_child_empty_target_and_live_canary(self) -> None:
+        cgroup = probe_identity()
+        canary = ProcessIdentity(20, 200)
+        target_identity = ProcessIdentity(30, 300)
+        child_identity = ProcessIdentity(31, 301)
+        target = MagicMock(pid=target_identity.pid)
+        canary_process = MagicMock()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(probe, "_host_preflight"))
+            stack.enter_context(patch.object(probe, "_source_identity", return_value=("d" * 40, "e" * 64)))
+            stack.enter_context(patch.object(probe.secrets, "token_hex", return_value="a" * 32))
+            stack.enter_context(patch.object(probe, "_assert_owner_available"))
+            stack.enter_context(patch.object(probe, "_start_owner"))
+            stack.enter_context(patch.object(probe, "_capture_owner", return_value=cgroup))
+            stack.enter_context(patch.object(probe, "_spawn_canary", return_value=(canary_process, canary, 40)))
+            stack.enter_context(patch.object(probe, "_process_cgroup", side_effect=[
+                "/user.slice/session.scope",
+                cgroup.control_group + "/target",
+                cgroup.control_group + "/target",
+                cgroup.control_group + "/target",
+                cgroup.control_group + "/target",
+                cgroup.control_group + "/target",
+            ]))
+            stack.enter_context(patch.object(probe, "_spawn_cancellation_target", return_value=(target, 99, 100)))
+            stack.enter_context(patch.object(probe, "_attach_target"))
+            stack.enter_context(patch.object(probe, "_write_barrier"))
+            stack.enter_context(patch.object(probe, "_release_cancellation_fork"))
+            stack.enter_context(patch.object(probe, "_read_worker_event", side_effect=[
+                "READY:30", "CANCEL_STARTED", "CHILD:31"
+            ]))
+            stack.enter_context(patch.object(probe, "identity", side_effect=[
+                target_identity, target_identity, child_identity, target_identity, child_identity
+            ]))
+            stack.enter_context(patch.object(
+                probe, "_process_credentials", return_value=((65534,) * 4, (65534,) * 4)
+            ))
+            stack.enter_context(patch.object(probe, "open_pidfd", return_value=50))
+            stack.enter_context(patch.object(probe, "_wait_process_set", side_effect=[{30}, {30, 31}]))
+            send_signal = stack.enter_context(patch.object(probe.signal, "pidfd_send_signal", create=True))
+            stack.enter_context(patch.object(probe, "_validate_owner", return_value=Path("/target")))
+            direct = stack.enter_context(patch.object(
+                probe, "kill_path", return_value=(1_100_000, 1_100_100)
+            ))
+            stack.enter_context(patch.object(probe, "_strict_empty", return_value=(2_000_000, 0, 1)))
+            stack.enter_context(patch.object(probe, "_pidfd_alive", return_value=True))
+            stack.enter_context(patch.object(probe, "_cleanup", return_value=True))
+            stack.enter_context(patch.object(probe.signal, "signal", return_value=object()))
+            receipt = probe.run_cancellation_race_example(acknowledged=True)
+
+        self.assertEqual(probe.CANCELLATION_RACE_SUCCESS_KEYS, set(receipt))
+        self.assertEqual("fork-during-cancellation-example", receipt["mode"])
+        self.assertEqual("cgroup.kill", receipt["primitive"])
+        self.assertEqual(1, receipt["children_created_during_cancellation"])
+        self.assertTrue(receipt["child_absent_from_pre_cancel_snapshot"])
+        self.assertEqual(1, receipt["pre_cancel_snapshot_processes"])
+        self.assertEqual(2, receipt["target_processes_at_kill"])
+        self.assertEqual(0, receipt["root_populated"])
+        self.assertEqual(0, receipt["target_survivors"])
+        self.assertTrue(receipt["canary_survived"])
+        self.assertTrue(receipt["cleanup_complete"])
+        send_signal.assert_called_once_with(50, probe.signal.SIGTERM)
+        direct.assert_called_once_with(Path("/target"))
+
+    def test_cancellation_race_rejects_child_already_in_the_old_snapshot(self) -> None:
+        cgroup = probe_identity()
+        canary = ProcessIdentity(20, 200)
+        target = MagicMock(pid=30)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(probe, "_host_preflight"))
+            stack.enter_context(patch.object(probe, "_source_identity", return_value=("d" * 40, "e" * 64)))
+            stack.enter_context(patch.object(probe.secrets, "token_hex", return_value="a" * 32))
+            stack.enter_context(patch.object(probe, "_assert_owner_available"))
+            stack.enter_context(patch.object(probe, "_start_owner"))
+            stack.enter_context(patch.object(probe, "_capture_owner", return_value=cgroup))
+            stack.enter_context(patch.object(probe, "_spawn_canary", return_value=(MagicMock(), canary, 40)))
+            stack.enter_context(patch.object(probe, "_process_cgroup", side_effect=[
+                "/user.slice/session.scope",
+                cgroup.control_group + "/target",
+                cgroup.control_group + "/target",
+            ]))
+            stack.enter_context(patch.object(probe, "_spawn_cancellation_target", return_value=(target, 99, 100)))
+            stack.enter_context(patch.object(probe, "_attach_target"))
+            stack.enter_context(patch.object(probe, "_write_barrier"))
+            stack.enter_context(patch.object(probe, "_release_cancellation_fork"))
+            stack.enter_context(patch.object(probe, "_read_worker_event", side_effect=[
+                "READY:30", "CANCEL_STARTED", "CHILD:30"
+            ]))
+            stack.enter_context(patch.object(probe, "identity", return_value=ProcessIdentity(30, 300)))
+            stack.enter_context(patch.object(
+                probe, "_process_credentials", return_value=((65534,) * 4, (65534,) * 4)
+            ))
+            stack.enter_context(patch.object(probe, "open_pidfd", return_value=50))
+            stack.enter_context(patch.object(probe, "_wait_process_set", return_value={30}))
+            stack.enter_context(patch.object(probe, "_validate_owner", return_value=Path("/target")))
+            stack.enter_context(patch.object(probe.signal, "pidfd_send_signal", create=True))
+            stack.enter_context(patch.object(probe, "_cleanup", return_value=True))
+            stack.enter_context(patch.object(probe.signal, "signal", return_value=object()))
+            direct = stack.enter_context(patch.object(probe, "kill_path"))
+            with self.assertRaisesRegex(probe.ProbeError, "CANCELLATION_CHILD_NOT_NEW"):
+                probe.run_cancellation_race_example(acknowledged=True)
+        direct.assert_not_called()
+
     def test_cleanup_failure_overrides_a_stage_failure(self) -> None:
         with (
             patch.object(probe, "_host_preflight"),

@@ -311,8 +311,6 @@ def _host_preflight(acknowledged: bool) -> None:
         raise ProbeError("PIDS_CONTROLLER_UNAVAILABLE")
     if any(path.exists() or path.is_symlink() for path in INSTALL_TARGETS):
         raise ProbeError("ACTIVE_INSTALLATION_REFUSED")
-
-
 def _start_owner(unit: str) -> None:
     if not PROBE_RE.fullmatch(unit):
         raise ProbeError("UNIT_NAME_INVALID")
@@ -697,9 +695,198 @@ def run_probe(*, acknowledged: bool) -> dict[str, object]:
     return success
 
 
-def failure_receipt(code: str) -> dict[str, object]:
+def run_cancellation_race_example(*, acknowledged: bool) -> dict[str, object]:
+    """Show one child appearing after cancellation starts and then kill its cgroup."""
+    _host_preflight(acknowledged)
+    source_commit, source_tree_sha256 = _source_identity()
+    started = time.monotonic()
+    deadline = started + TOTAL_TIMEOUT_SECONDS
+    resources = ProbeResources(target_pidfds={})
+    previous_handlers: dict[int, object] = {}
+
+    def request_cleanup(_signum: int, _frame: object) -> None:
+        resources.interrupted = True
+
+    handled_signals = {signal.SIGINT, signal.SIGTERM}
+    if hasattr(signal, "SIGHUP"):
+        handled_signals.add(signal.SIGHUP)
+    for signum in handled_signals:
+        previous_handlers[signum] = signal.signal(signum, request_cleanup)
+
+    success: dict[str, object] | None = None
+    failure: ProbeError | None = None
+    cleanup_complete = False
+    try:
+        token = secrets.token_hex(16)
+        resources.unit = f"lumi-eggcracker-probe-{token}.service"
+        _assert_owner_available(resources.unit)
+        resources.owner_started = True
+        _start_owner(
+            resources.unit, lifetime_seconds=CANCELLATION_RACE_WORKER_LIFETIME_SECONDS
+        )
+        resources.identity = _capture_owner(resources.unit)
+        resources.canary, resources.canary_identity, resources.canary_pidfd = _spawn_canary()
+        canary_cgroup = _process_cgroup(resources.canary_identity)
+        if canary_cgroup == resources.identity.control_group or canary_cgroup.startswith(
+            resources.identity.control_group + "/"
+        ):
+            raise ProbeError("CANARY_INSIDE_TARGET_OWNER")
+
+        resources.target, resources.target_report_fd, resources.target_barrier_fd = (
+            _spawn_cancellation_target(resources.identity)
+        )
+        target_identity = identity(resources.target.pid)
+        if target_identity is None:
+            raise ProbeError("TARGET_IDENTITY_UNAVAILABLE")
+        _attach_target(resources.identity, resources.target.pid)
+        expected_cgroup = resources.identity.control_group + "/target"
+        if _process_cgroup(target_identity) != expected_cgroup:
+            raise ProbeError("TARGET_OUTSIDE_CAPTURED_CGROUP")
+        if resources.target_barrier_fd is None:
+            raise ProbeError("TARGET_BARRIER_UNAVAILABLE")
+        _write_barrier(resources.target_barrier_fd, b"A", "TARGET_ATTACH_RELEASE_FAILED")
+        ready = _read_worker_event(
+            resources.target_report_fd,
+            deadline=min(deadline, time.monotonic() + STAGE_TIMEOUT_SECONDS),
+        )
+        if ready == "MIGRATION_ALLOWED":
+            raise ProbeError("TARGET_MIGRATION_ALLOWED")
+        ready_match = re.fullmatch(r"READY:([0-9]+)", ready)
+        if ready_match is None or int(ready_match.group(1)) != resources.target.pid:
+            raise ProbeError("TARGET_READINESS_INVALID")
+        expected_credentials = (
+            (CANCELLATION_RACE_UID,) * 4,
+            (CANCELLATION_RACE_GID,) * 4,
+        )
+        if _process_credentials(resources.target.pid) != expected_credentials:
+            raise ProbeError("TARGET_PRIVILEGE_DROP_FAILED")
+        if identity(resources.target.pid) != target_identity:
+            raise ProbeError("TARGET_IDENTITY_DRIFT")
+        resources.target_cancel_pidfd = open_pidfd(target_identity)
+        before_cancel = _wait_process_set(
+            resources.identity,
+            {resources.target.pid},
+            deadline=min(deadline, time.monotonic() + STAGE_TIMEOUT_SECONDS),
+        )
+        if resources.interrupted:
+            raise ProbeError("INTERRUPTED")
+
+        _validate_owner(resources.identity)
+        if _process_cgroup(target_identity) != expected_cgroup:
+            raise ProbeError("TARGET_CGROUP_IDENTITY_DRIFT")
+        signal.pidfd_send_signal(resources.target_cancel_pidfd, signal.SIGTERM)
+        cancellation_event = _read_worker_event(
+            resources.target_report_fd,
+            deadline=min(deadline, time.monotonic() + STAGE_TIMEOUT_SECONDS),
+        )
+        if cancellation_event != "CANCEL_STARTED":
+            raise ProbeError("CANCELLATION_BARRIER_NOT_REACHED")
+        if resources.interrupted:
+            raise ProbeError("INTERRUPTED")
+        if resources.target_barrier_fd is None:
+            raise ProbeError("TARGET_BARRIER_UNAVAILABLE")
+        _release_cancellation_fork(resources.target_barrier_fd)
+        child_event = _read_worker_event(
+            resources.target_report_fd,
+            deadline=min(deadline, time.monotonic() + STAGE_TIMEOUT_SECONDS),
+        )
+        child_match = re.fullmatch(r"CHILD:([0-9]+)", child_event)
+        if child_match is None:
+            raise ProbeError("CANCELLATION_CHILD_INVALID")
+        child_pid = int(child_match.group(1))
+        if child_pid in before_cancel or child_pid == resources.target.pid:
+            raise ProbeError("CANCELLATION_CHILD_NOT_NEW")
+        child_identity = identity(child_pid)
+        if child_identity is None or _process_cgroup(child_identity) != expected_cgroup:
+            raise ProbeError("CANCELLATION_CHILD_OUTSIDE_TARGET")
+        at_kill = _wait_process_set(
+            resources.identity,
+            {resources.target.pid, child_pid},
+            deadline=min(deadline, time.monotonic() + STAGE_TIMEOUT_SECONDS),
+        )
+        if resources.interrupted:
+            raise ProbeError("INTERRUPTED")
+
+        if identity(resources.target.pid) != target_identity:
+            raise ProbeError("TARGET_IDENTITY_DRIFT")
+        if identity(child_pid) != child_identity:
+            raise ProbeError("CANCELLATION_CHILD_IDENTITY_DRIFT")
+        if any(_process_cgroup(item) != expected_cgroup for item in (target_identity, child_identity)):
+            raise ProbeError("TARGET_CGROUP_IDENTITY_DRIFT")
+        path = _validate_owner(resources.identity)
+        kill_path(path)
+        empty_ns, populated, descendants = _strict_empty(
+            resources.identity, min(deadline, time.monotonic() + STAGE_TIMEOUT_SECONDS)
+        )
+        del empty_ns
+        if resources.canary_pidfd is None or not _pidfd_alive(resources.canary_pidfd):
+            raise ProbeError("CANARY_DIED")
+        success = {
+            "canary_survived": True,
+            "changes_made": True,
+            "child_absent_from_pre_cancel_snapshot": child_pid not in before_cancel,
+            "children_created_during_cancellation": 1,
+            "cleanup_complete": False,
+            "descendant_cgroups_checked": descendants,
+            "installation_performed": False,
+            "journal_history_may_persist": True,
+            "mode": "fork-during-cancellation-example",
+            "network_requests_made": False,
+            "pre_cancel_snapshot_processes": len(before_cancel),
+            "primitive": "cgroup.kill",
+            "result": "TERMINATED",
+            "root_populated": populated,
+            "snapshot_release_barrier_passed": True,
+            "source_commit": source_commit,
+            "source_tree_sha256": source_tree_sha256,
+            "target_migration_denied": True,
+            "target_processes_at_kill": len(at_kill),
+            "target_survivors": 0,
+            "target_unprivileged": True,
+            "workload_detection_performed": False,
+        }
+    except (ProbeError, JsonInputError, OSError, ProcessLookupError, subprocess.SubprocessError) as error:
+        failure = error if isinstance(error, ProbeError) else ProbeError("PROBE_STAGE_FAILED")
+    finally:
+        try:
+            cleanup_complete = _cleanup(
+                resources, deadline=min(deadline, time.monotonic() + 4.0)
+            )
+        except (OSError, ProbeError, JsonInputError, subprocess.SubprocessError, RuntimeError):
+            cleanup_complete = False
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+    if resources.interrupted and failure is None:
+        failure = ProbeError("INTERRUPTED")
+    if not cleanup_complete:
+        raise ProbeError("CLEANUP_INCOMPLETE") from failure
+    if failure is not None:
+        raise failure
+    if success is None:
+        raise ProbeError("PROBE_INCOMPLETE")
+    success["cleanup_complete"] = True
+    if set(success) != CANCELLATION_RACE_SUCCESS_KEYS:
+        raise ProbeError("RECEIPT_SCHEMA_INVALID")
+    if (
+        success["root_populated"] != 0
+        or success["target_survivors"] != 0
+        or success["canary_survived"] is not True
+        or success["child_absent_from_pre_cancel_snapshot"] is not True
+        or success["children_created_during_cancellation"] != 1
+        or success["snapshot_release_barrier_passed"] is not True
+        or success["target_migration_denied"] is not True
+        or success["target_unprivileged"] is not True
+    ):
+        raise ProbeError("RACE_ACCEPTANCE_FAILED")
+    return success
+
+
+def failure_receipt(
+    code: str, *, mode: str = "containment-primitive-probe"
+) -> dict[str, object]:
     return {
-        "mode": "containment-primitive-probe",
+        "mode": mode,
         "reason_code": code,
         "result": "FAILED",
     }
@@ -708,11 +895,18 @@ def failure_receipt(code: str) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Probe Lumi Eggcracker's bounded Linux containment primitive")
     parser.add_argument("--i-understand-this-kills-a-test-tree", action="store_true")
+    parser.add_argument(
+        "--fork-during-cancellation",
+        action="store_true",
+        help="run one bounded child-fork cancellation example instead of the two-process probe",
+    )
     args = parser.parse_args(argv)
+    mode = "fork-during-cancellation-example" if args.fork_during_cancellation else "containment-primitive-probe"
     try:
-        receipt = run_probe(acknowledged=args.i_understand_this_kills_a_test_tree)
+        runner = run_cancellation_race_example if args.fork_during_cancellation else run_probe
+        receipt = runner(acknowledged=args.i_understand_this_kills_a_test_tree)
     except ProbeError as error:
-        print(json.dumps(failure_receipt(error.code), sort_keys=True), file=sys.stderr)
+        print(json.dumps(failure_receipt(error.code, mode=mode), sort_keys=True), file=sys.stderr)
         return 2
     print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0
