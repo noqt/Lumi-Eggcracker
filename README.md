@@ -260,9 +260,11 @@ AI detection, adoption, or evidence about arbitrary cgroup layouts.
 
 #### Save an opt-in local operator receipt
 
-After running that exact command on the supported disposable Ubuntu 24.04 path,
-a non-founder operator can record either the supported success or a reproducible
-redacted blocker locally. Copy this closed input shape to `operator-result.json`;
+After running the supported `scripts/containment_probe.py` command shown
+above—not the separate `scripts/cancellation_race_example.py` example—on the
+disposable Ubuntu 24.04 path, a non-founder operator can record either the
+supported success or a reproducible redacted blocker locally. Copy this closed
+input shape to `operator-result.json`;
 set `permission_to_quote` explicitly to `true` or `false`:
 
 ```json
