@@ -41,7 +41,7 @@ MAX_REPLAY_KEYS = MAX_RUNS * MAX_ACTIONS_PER_RUN
 MAX_PENDING_BYTES = 64 * 1024
 MAX_LIFETIME_MS = 60_000
 MAX_RECEIPT_BYTES = 512
-MAX_JOURNAL_EVENTS = 1 + MAX_RUNS * (1 + (2 * MAX_ACTIONS_PER_RUN) + 1)
+MAX_JOURNAL_EVENTS = 2 + MAX_RUNS * (1 + (2 * MAX_ACTIONS_PER_RUN) + 1)
 ACTION = "increment"
 TARGET = "synthetic.protected-counter"
 UNRELATED_CANARY_ALLOCATION = 73
@@ -164,6 +164,8 @@ class _State:
     applied_operation_ids: set[str] = field(default_factory=set)
     pending_bytes: int = 0
     effect_count: int = 0
+    service_dataset: tuple[dict[str, Any], ...] | None = None
+    results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -213,6 +215,70 @@ def _parse_canonical_json(raw: bytes, *, maximum: int) -> dict[str, Any]:
 
 def _is_int(value: object, *, minimum: int = 0) -> bool:
     return type(value) is int and value >= minimum
+
+
+def _service_dataset_valid(value: object) -> bool:
+    if not isinstance(value, list) or len(value) != 4:
+        return False
+    sample_ids: set[str] = set()
+    accepted = 0
+    review = 0
+    for row in value:
+        if not isinstance(row, dict) or set(row) != {"sample_id", "status", "units"}:
+            return False
+        sample_id = row["sample_id"]
+        status = row["status"]
+        units = row["units"]
+        if (
+            not isinstance(sample_id, str)
+            or not _HEX32.fullmatch(sample_id)
+            or sample_id in sample_ids
+            or status not in ("accepted", "review")
+            or not _is_int(units, minimum=1)
+            or units > 1000
+        ):
+            return False
+        sample_ids.add(sample_id)
+        accepted += status == "accepted"
+        review += status == "review"
+    return accepted > 0 and review > 0 and accepted + review == 4
+
+
+def _private_state_metadata_valid(
+    metadata: os.stat_result,
+    service_uid: int,
+    *,
+    directory: bool,
+) -> bool:
+    expected_mode = 0o700 if directory else 0o600
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    return (
+        metadata.st_uid == service_uid
+        and expected_type(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and stat.S_IMODE(metadata.st_mode) == expected_mode
+        and (directory or metadata.st_nlink == 1)
+    )
+
+
+def _service_result(dataset: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    rows = [dict(row) for row in dataset]
+    return {
+        "accepted": sum(row["status"] == "accepted" for row in rows),
+        "dataset_id": "synthetic.research-batch.v1",
+        "dataset_sha256": hashlib.sha256(_canonical_json(rows)).hexdigest(),
+        "records_checked": len(rows),
+        "review": sum(row["status"] == "review" for row in rows),
+        "units_total": sum(row["units"] for row in rows),
+    }
+
+
+def _new_service_dataset() -> list[dict[str, Any]]:
+    statuses = ("accepted", "accepted", "review", "accepted")
+    return [
+        {"sample_id": secrets.token_hex(16), "status": status, "units": secrets.randbelow(1000) + 1}
+        for status in statuses
+    ]
 
 
 def _file_identity(path: Path) -> tuple[int, int]:
@@ -475,6 +541,19 @@ class BrokeredOperator:
         with instance._locked():
             instance._read_state()
         return TrustedRegistrar(instance, _seal=_REGISTRAR_SEAL), instance
+
+    @classmethod
+    def _open_or_bootstrap_service(
+        cls, state_directory: Path | str
+    ) -> tuple[BrokeredOperator, CapabilityGrant]:
+        """Open the dedicated one-run service store without rotating its identity."""
+        requested = Path(state_directory).absolute()
+        if requested.exists() or requested.is_symlink():
+            _, operator = cls.open(requested)
+        else:
+            _, operator = cls.bootstrap(requested)
+        grant = operator._service_run_grant()
+        return operator, grant
 
     @staticmethod
     def _read_regular(path: Path, maximum: int) -> tuple[bytes, tuple[int, int]]:
@@ -806,6 +885,18 @@ class BrokeredOperator:
     def _replay_event(self, state: _State, record: dict[str, Any]) -> None:
         kind = record["kind"]
         payload = record["payload"]
+        if kind == "SERVICE_DATASET_REGISTERED":
+            records = payload.get("records")
+            if (
+                set(payload) != {"records"}
+                or state.service_dataset is not None
+                or state.runs
+                or state.queues
+                or not _service_dataset_valid(records)
+            ):
+                raise BrokeredStoreError("durable service dataset is invalid")
+            state.service_dataset = tuple(dict(row) for row in records)
+            return
         if kind == "RUN_REGISTERED":
             if set(payload) != {"claims"} or not isinstance(payload["claims"], dict):
                 raise BrokeredStoreError("durable run record is invalid")
@@ -877,7 +968,10 @@ class BrokeredOperator:
                 raise BrokeredStoreError("durable pending budget is invalid")
             return
         if kind in {"DISPATCHED", "DISPATCH_REJECTED"}:
-            expected_fields = {"queue_id"} if kind == "DISPATCHED" else {"queue_id", "reason"}
+            if kind == "DISPATCHED" and state.service_dataset is not None:
+                expected_fields = {"queue_id", "result"}
+            else:
+                expected_fields = {"queue_id"} if kind == "DISPATCHED" else {"queue_id", "reason"}
             if set(payload) != expected_fields:
                 raise BrokeredStoreError("durable dispatch record is invalid")
             queued = state.queues.get(payload["queue_id"])
@@ -891,6 +985,11 @@ class BrokeredOperator:
                 request, denial = _validate_request(queued.request_bytes)
                 if denial is not None or request["operation_id"] != queued.operation_id:
                     raise BrokeredStoreError("durable dispatch request is invalid")
+                if state.service_dataset is not None:
+                    result = _service_result(state.service_dataset)
+                    if payload["result"] != result or queued.queue_id in state.results:
+                        raise BrokeredStoreError("durable service result is invalid")
+                    state.results[queued.queue_id] = result
                 run.applied += 1
                 state.effect_count += 1
                 state.applied_operation_ids.add(queued.operation_id)
@@ -938,32 +1037,77 @@ class BrokeredOperator:
     def _register_run(self) -> CapabilityGrant:
         with self._locked():
             state = self._read_state()
-            if len(state.runs) >= MAX_RUNS:
-                raise BrokeredStoreError("run capacity is exhausted")
-            now_ms = time.time_ns() // 1_000_000
-            if not _is_int(now_ms, minimum=1):
-                raise BrokeredStoreError("trusted clock is unavailable")
-            run_id = secrets.token_hex(16)
-            claims = {
-                "action": ACTION,
-                "expires_at_ms": now_ms + MAX_LIFETIME_MS,
-                "generation": 0,
-                "max_actions": MAX_ACTIONS_PER_RUN,
-                "run_id": run_id,
-                "schema_version": CAPABILITY_SCHEMA,
-                "store_id": state.store_id,
-                "target": TARGET,
-            }
-            state = self._append(state, "RUN_REGISTERED", {"claims": claims})
-            del state
-            return CapabilityGrant(
-                run_id=run_id,
-                generation=0,
-                expires_at_ms=claims["expires_at_ms"],
-                target=TARGET,
-                action=ACTION,
-                capability=_capability_token(claims, self._key),
-            )
+            return self._register_run_locked(state)
+
+    def _register_run_locked(self, state: _State) -> CapabilityGrant:
+        if len(state.runs) >= MAX_RUNS:
+            raise BrokeredStoreError("run capacity is exhausted")
+        now_ms = time.time_ns() // 1_000_000
+        if not _is_int(now_ms, minimum=1):
+            raise BrokeredStoreError("trusted clock is unavailable")
+        run_id = secrets.token_hex(16)
+        claims = {
+            "action": ACTION,
+            "expires_at_ms": now_ms + MAX_LIFETIME_MS,
+            "generation": 0,
+            "max_actions": MAX_ACTIONS_PER_RUN,
+            "run_id": run_id,
+            "schema_version": CAPABILITY_SCHEMA,
+            "store_id": state.store_id,
+            "target": TARGET,
+        }
+        self._append(state, "RUN_REGISTERED", {"claims": claims})
+        return self._grant_for_claims(claims)
+
+    def _service_run_grant(self) -> CapabilityGrant:
+        """Return the immutable service run, creating it only for an empty store."""
+        with self._locked():
+            state = self._read_state()
+            if state.service_dataset is None:
+                if state.runs:
+                    raise BrokeredStoreError("service state is missing its private dataset")
+                self._append(state, "SERVICE_DATASET_REGISTERED", {"records": _new_service_dataset()})
+                state = self._read_state()
+            if len(state.runs) > 1:
+                raise BrokeredStoreError("service state contains multiple run identities")
+            if not state.runs:
+                return self._register_run_locked(state)
+            run = next(iter(state.runs.values()))
+            return self._grant_for_claims(run.claims)
+
+    def _existing_service_run_grant(self) -> CapabilityGrant:
+        """Recover the existing singleton grant without creating new authority."""
+        with self._locked():
+            state = self._read_state()
+            if state.service_dataset is None or len(state.runs) != 1:
+                raise BrokeredStoreError("service state does not contain one run identity")
+            run = next(iter(state.runs.values()))
+            return self._grant_for_claims(run.claims)
+
+    def _grant_for_claims(self, claims: dict[str, Any]) -> CapabilityGrant:
+        return CapabilityGrant(
+            run_id=claims["run_id"],
+            generation=claims["generation"],
+            expires_at_ms=claims["expires_at_ms"],
+            target=claims["target"],
+            action=claims["action"],
+            capability=_capability_token(claims, self._key),
+        )
+
+    def _assert_service_state_owner(self, service_uid: int) -> None:
+        """Require a private, service-owned Linux state directory and files."""
+        if type(service_uid) is not int or service_uid <= 0:
+            raise BrokeredStoreError("service identity is invalid")
+        try:
+            directory = self._directory.lstat()
+            if not _private_state_metadata_valid(directory, service_uid, directory=True):
+                raise BrokeredStoreError("service state directory is not private")
+            for name in (ANCHOR_NAME, JOURNAL_NAME, LOCK_NAME, WITNESS_NAME):
+                metadata = (self._directory / name).lstat()
+                if not _private_state_metadata_valid(metadata, service_uid, directory=False):
+                    raise BrokeredStoreError("service state file is not private")
+        except OSError as error:
+            raise BrokeredStoreError("service state identity is unavailable") from error
 
     def client(self, grant: CapabilityGrant) -> OperatorClient:
         """Bind a client to an issued immutable grant; no caller-selected authority."""
@@ -1020,12 +1164,23 @@ class BrokeredOperator:
             return _receipt("admission", "QUEUED", "ADMITTED", run_id=claims["run_id"], queue_id=queue_id, generation=claims["generation"])
 
     def dispatch(self, queue_id: str) -> Receipt:
+        return self._dispatch(queue_id, expected_run_id=None)
+
+    def dispatch_for_run(self, queue_id: str, run_id: str) -> Receipt:
+        """Dispatch only a queue item owned by the specified durable run."""
+        if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
+            return _receipt("dispatch", "DENIED", "NOT_FOUND")
+        return self._dispatch(queue_id, expected_run_id=run_id)
+
+    def _dispatch(self, queue_id: str, *, expected_run_id: str | None) -> Receipt:
         if not isinstance(queue_id, str) or not _HEX32.fullmatch(queue_id):
             return _receipt("dispatch", "DENIED", "INVALID_QUEUE_ID")
         with self._locked():
             state = self._read_state()
             queued = state.queues.get(queue_id)
-            if queued is None:
+            if queued is None or (
+                expected_run_id is not None and queued.run_id != expected_run_id
+            ):
                 return _receipt("dispatch", "DENIED", "NOT_FOUND", queue_id=queue_id)
             if queued.status != "QUEUED":
                 return _receipt("dispatch", "DENIED", "REPLAY" if queued.status == "APPLIED" else "ALREADY_FINAL", run_id=queued.run_id, queue_id=queue_id)
@@ -1054,8 +1209,37 @@ class BrokeredOperator:
             if reason is not None:
                 self._append(state, "DISPATCH_REJECTED", {"queue_id": queue_id, "reason": reason})
                 return _receipt("dispatch", "DENIED", reason, run_id=queued.run_id, queue_id=queue_id, generation=run.generation)
-            self._append(state, "DISPATCHED", {"queue_id": queue_id})
+            dispatched = {"queue_id": queue_id}
+            if state.service_dataset is not None:
+                dispatched["result"] = _service_result(state.service_dataset)
+            self._append(state, "DISPATCHED", dispatched)
             return _receipt("dispatch", "APPLIED", "EFFECT_APPLIED", run_id=queued.run_id, queue_id=queue_id, generation=run.generation, effect_applied=True)
+
+    def _result_available_for_run(self, queue_id: str, run_id: str) -> bool:
+        """Check a result handle without disclosing another run's queue state."""
+        return self._result_for_run(queue_id, run_id) is not None
+
+    def _result_for_run(self, queue_id: str, run_id: str) -> dict[str, Any] | None:
+        """Return only the durably applied result owned by this service run."""
+        if (
+            not isinstance(queue_id, str)
+            or not _HEX32.fullmatch(queue_id)
+            or not isinstance(run_id, str)
+            or not _HEX32.fullmatch(run_id)
+        ):
+            return None
+        with self._locked():
+            state = self._read_state()
+            queued = state.queues.get(queue_id)
+            result = state.results.get(queue_id)
+            if (
+                queued is None
+                or queued.run_id != run_id
+                or queued.status != "APPLIED"
+                or result is None
+            ):
+                return None
+            return dict(result)
 
     def _revoke(self, run_id: str, reason: str) -> Receipt:
         if not isinstance(run_id, str) or not _HEX32.fullmatch(run_id):
