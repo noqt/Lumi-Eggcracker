@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "brokered-capability-v1.schema.json",
+  "title": "Lumi Eggcracker synthetic brokered capability v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "expires_at_ms",
+    "generation",
+    "max_actions",
+    "run_id",
+    "schema_version",
+    "store_id",
+    "target"
+  ],
+  "properties": {
+    "action": { "const": "increment" },
+    "expires_at_ms": { "type": "integer", "minimum": 1 },
+    "generation": { "type": "integer", "minimum": 0 },
+    "max_actions": { "const": 4 },
+    "run_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "schema_version": { "const": "lumi-eggcracker.brokered-capability.v1" },
+    "store_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "target": { "const": "synthetic.protected-counter" }
+  }
+}

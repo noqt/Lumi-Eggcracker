@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "brokered-request-v1.schema.json",
+  "title": "Lumi Eggcracker synthetic brokered request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "capability",
+    "generation",
+    "operation_id",
+    "payload",
+    "run_id",
+    "schema_version",
+    "target"
+  ],
+  "properties": {
+    "action": { "const": "increment" },
+    "capability": {
+      "type": "string",
+      "maxLength": 1024,
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+    },
+    "generation": { "type": "integer", "minimum": 0 },
+    "operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["delta"],
+      "properties": {
+        "delta": { "const": 1 }
+      }
+    },
+    "run_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "schema_version": { "const": "lumi-eggcracker.brokered-request.v1" },
+    "target": { "const": "synthetic.protected-counter" }
+  }
+}
