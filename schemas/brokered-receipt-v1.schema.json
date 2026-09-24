@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "brokered-receipt-v1.schema.json",
+  "title": "Lumi Eggcracker synthetic brokered receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "effect_applied", "outcome", "phase"],
+  "properties": {
+    "code": {
+      "enum": [
+        "ADMITTED",
+        "ALREADY_FINAL",
+        "ALREADY_REVOKED",
+        "BUDGET_EXHAUSTED",
+        "CAPABILITY_INVALID",
+        "CAPABILITY_REVOKED",
+        "EFFECT_APPLIED",
+        "EXPIRED",
+        "GLOBAL_BUDGET_EXHAUSTED",
+        "INVALID_QUEUE_ID",
+        "MALFORMED_INPUT",
+        "NON_CANONICAL_INPUT",
+        "NOT_FOUND",
+        "PROCESS_TERMINATION_UNSUPPORTED",
+        "REPLAY",
+        "REPLAY_CAPACITY_EXHAUSTED",
+        "STALE_GENERATION",
+        "STOP_REQUESTED",
+        "UNKNOWN_FIELDS"
+      ]
+    },
+    "effect_applied": { "type": "boolean" },
+    "generation": { "type": "integer", "minimum": 0 },
+    "outcome": {
+      "enum": [
+        "ALREADY_REVOKED",
+        "APPLIED",
+        "DENIED",
+        "QUEUED",
+        "REVOKED",
+        "UNSUPPORTED"
+      ]
+    },
+    "phase": { "enum": ["admission", "dispatch", "process_stop", "revocation"] },
+    "process_stop": { "const": "UNSUPPORTED" },
+    "queue_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "run_id": { "type": "string", "pattern": "^[0-9a-f]{32}$" }
+  }
+}
