@@ -9,6 +9,7 @@ with an existing Prometheus/node_exporter workflow.
 · [Hugging Face distribution](https://huggingface.co/spaces/noqt/eggcracker)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
+· [Run the portable synthetic broker example](docs/BROKERED_OPERATOR.md#portable-in-process-reference)
 · [Inert developer contract example](docs/security-control-handoff.md)
 · [Run the first kill](#run-the-first-kill)
 · [Current-run Q&A](https://github.com/noqt/Lumi-Eggcracker/discussions/categories/q-a)

@@ -5,46 +5,93 @@ labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: Thanks for helping improve Lumi Eggcracker. Use this form only for a non-security defect reproduced on a disposable supported Linux host. Do not include credentials, private model files, raw process arguments or sensitive exploit details. Use private vulnerability reporting for security issues.
-  - type: input
-    id: version
+      value: >-
+        Use this form for non-security defects only. Choose the mode and report
+        the actual environment and source revision you tested. A
+        portable/synthetic-only report covers an example, fixture, or other
+        non-daemon behavior; it does not claim that the native daemon is
+        supported on that operating system. Any report that includes native
+        daemon or containment behavior must reproduce it on a disposable,
+        supported Linux host or VM whose loss is acceptable and that you own
+        or are authorised to administer. Do not include credentials, private
+        model files, private paths, raw process arguments or environments, or
+        sensitive exploit details. Report security issues through
+        [GitHub private vulnerability reporting](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new).
+  - type: dropdown
+    id: tested_mode
     attributes:
-      label: Version
-      placeholder: 0.5.0 or exact source commit
+      label: What did you actually exercise?
+      options:
+        - Portable/synthetic-only example, fixture, documentation, or test utility; no native daemon or containment behavior
+        - Native daemon or containment behavior on Linux
+        - Both portable/synthetic behavior and native daemon or containment behavior on Linux
     validations:
       required: true
   - type: input
-    id: platform
+    id: revision
     attributes:
-      label: Linux platform
-      placeholder: Ubuntu 24.04, kernel version, systemd version
+      label: Source revision actually tested
+      description: Give the full Git commit SHA when available. Otherwise give the exact release/version and state that the commit is unavailable in that build. Do not guess.
+      placeholder: Full commit SHA, or exact release/version (commit unavailable in this build)
+    validations:
+      required: true
+  - type: input
+    id: operating_system
+    attributes:
+      label: Operating system actually used
+      description: For portable/synthetic-only reports, give the actual OS and version where the example ran. For a documentation-only issue, write "not used". For native daemon/containment reports, give the supported Linux distribution/version and kernel; include systemd and cgroup-v2 details when relevant. If using a VM, identify the execution OS as the guest.
+      placeholder: Windows 11 24H2, macOS 15, or Ubuntu 24.04 with kernel version
+    validations:
+      required: true
+  - type: input
+    id: python_version
+    attributes:
+      label: Python version actually used
+      description: Give the exact interpreter version used for the reproduction, or write "not used" for a documentation-only issue.
+      placeholder: Python 3.12.5, or not used
     validations:
       required: true
   - type: textarea
     id: description
     attributes:
       label: What happened?
-      description: Include a redacted command or action, expected result and actual result. Remove private paths, arguments and environments.
+      description: Briefly describe one defect and the safe action or synthetic input that exposed it. Do not paste command lines, logs, arguments, environment values, private paths, or private data.
+    validations:
+      required: true
+  - type: input
+    id: expected_result
+    attributes:
+      label: Expected result
+      description: State the one expected observable result in a short sentence.
+      placeholder: One concise, bounded result
+    validations:
+      required: true
+  - type: input
+    id: actual_result
+    attributes:
+      label: Actual result
+      description: State the one observed result in a short sentence. Include only a brief, redacted status or error if needed; do not paste logs.
+      placeholder: One concise, redacted result
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
       label: Minimal reproduction
-      description: Use synthetic or public inputs and include the smallest sequence that reproduces the result.
+      description: Give the smallest safe sequence using synthetic or public inputs. Describe actions without raw command lines, arguments, environment values, private paths, or private data.
     validations:
       required: true
   - type: textarea
     id: support_bundle
     attributes:
-      label: Redacted support-bundle details
-      description: Paste only the relevant, reviewed fields from scripts/support_bundle.py. Never attach private model data, credentials, raw arguments or environments.
+      label: Relevant redacted support details (optional)
+      description: Include only the minimum reviewed fields that are safe for public release. Do not attach a full bundle or include private model data, credentials, raw arguments, environments, or paths.
   - type: checkboxes
     id: safety
     attributes:
       label: Safety checks
       options:
-        - label: I reproduced this on a disposable machine I own or am authorised to administer.
+        - label: If this report includes native daemon or containment behavior, I reproduced that behavior on a disposable supported Linux host/VM whose loss is acceptable and that I own or am authorised to administer; portable/synthetic-only reports make no native-host claim.
           required: true
-        - label: This report does not contain security-sensitive exploit details; I will use private vulnerability reporting if it does.
+        - label: This non-security report contains no credentials, private model data, raw process arguments or environments, private paths, or exploit details. I will use GitHub private vulnerability reporting for security issues.
           required: true
