@@ -96,6 +96,37 @@ python scripts/brokered_operator_demo.py --linux-ipc run \
   --socket /run/eggcracker-brokered/operator.sock --service-uid 1200 --operation-id demo-1
 ```
 
+On failure, `run` writes one bounded `run_failure` JSON diagnostic to stderr.
+After a validated admission it includes that queue ID, the last validated
+stage, and `effect_status`: `UNKNOWN` until an exact applied dispatch receipt
+has been validated, then `CONFIRMED_APPLIED`. `UNKNOWN` does not establish
+that no effect occurred; `CONFIRMED_APPLIED` describes only the synthetic
+broker receipt.
+
+For manual recovery, begin with the side-effect-free result lookup for the
+validated queue ID:
+
+```sh
+python scripts/brokered_operator_demo.py --linux-ipc result \
+  --socket /run/eggcracker-brokered/operator.sock --service-uid 1200 --queue-id QUEUE_ID
+```
+
+If it returns `AVAILABLE`, use that report and do not dispatch again. If it
+returns `NOT_FOUND`, that lookup alone does not establish that no effect
+occurred. If the operator decides to continue, the existing dispatch command
+can be used manually with that validated queue ID, followed by inspection of
+its receipt:
+
+```sh
+python scripts/brokered_operator_demo.py --linux-ipc dispatch \
+  --socket /run/eggcracker-brokered/operator.sock --service-uid 1200 --queue-id QUEUE_ID
+```
+
+`run` never retries, resubmits, or redispatches automatically. Re-running it
+with the same operation ID can return `REPLAY` without recovering the earlier
+queue ID, so re-running is not a recovery path. This guidance does not
+establish general retry safety.
+
 Use the separate `submit` command when you need a queued operation to remain
 pending; submitting it before the trusted service-side `stop` command lets you
 observe stale queued denial. Subsequent submissions remain denied. Restarting
