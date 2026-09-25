@@ -8,6 +8,49 @@ production control plane or a general-purpose executor.
 
 ## Portable in-process reference
 
+From a reviewed checkout of current source with Python 3.11 or newer, run the
+default portable demonstration with no flags:
+
+```sh
+python scripts/brokered_operator_demo.py
+```
+
+It uses synthetic data in a temporary state directory and prints 11
+newline-delimited JSON objects. Run and queue identifiers vary, but the stages
+and direct receipt fields should appear in this order:
+
+| Stage | Expected result |
+| --- | --- |
+| `admission` | `outcome=QUEUED`, `code=ADMITTED` |
+| `dispatch` | `outcome=APPLIED`, `code=EFFECT_APPLIED`, `effect_applied=true` |
+| `replayed_dispatch` | `outcome=DENIED`, `code=REPLAY` |
+| `queued_before_stop_request` | `outcome=QUEUED`, `code=ADMITTED` |
+| `stop_request_revocation` | `outcome=REVOKED`, `code=STOP_REQUESTED` |
+| `stale_queued_dispatch` | `outcome=DENIED`, `code=STALE_GENERATION` |
+| `post_stop_admission` | `outcome=DENIED`, `code=CAPABILITY_REVOKED` |
+| `verified_process_stop` | `outcome=UNSUPPORTED`, `code=PROCESS_TERMINATION_UNSUPPORTED` |
+| `before_reopen` | `protected_effects=1`, `unrelated_canary_allocation=73` |
+| `after_reopen` | `protected_effects=1`, `unrelated_canary_allocation=73` |
+| `reopened_stale_dispatch` | `outcome=DENIED`, `code=ALREADY_FINAL` |
+
+A nonzero exit, missing stage, changed order, or mismatched fixed field is a
+failed walkthrough. `STOP_REQUESTED` revokes authority and advances the stored
+generation; it does not terminate a process. The portable demonstration is
+therefore expected to report `PROCESS_TERMINATION_UNSUPPORTED`.
+
+For a reproducible non-security failure in this portable walkthrough, use the
+[bug report form](../.github/ISSUE_TEMPLATE/bug_report.yml) with the
+`Portable/synthetic-only` mode selected and provide the tested revision, actual
+OS and Python version, and bounded expected and actual results for the failing
+stage; route security-sensitive findings through [GitHub private vulnerability
+reporting](https://github.com/noqt/Lumi-Eggcracker/security/advisories/new).
+
+This is an in-process synthetic source example, not a tagged-release result,
+customer qualification, production assurance, or Linux identity boundary.
+The Linux IPC example below has separate UID, GID, socket, state-path, and mode
+provisioning requirements. Source and internal native results do not make that
+path a self-service customer workflow.
+
 The trusted registrar creates a random immutable run identity and signs one
 fixed capability: action `increment`, target
 `synthetic.protected-counter`, generation zero, a 60-second wall-clock expiry,
