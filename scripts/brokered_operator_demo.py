@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -18,6 +19,108 @@ def _show(name: str, value: object) -> None:
     if hasattr(value, "as_dict"):
         value = value.as_dict()
     print(json.dumps({name: value}, sort_keys=True, separators=(",", ":")))
+
+
+def _valid_queue_id(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 32
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _run_one_shot(client: Any, operation_id: str, ipc: Any) -> int:
+    try:
+        admission = client.submit(operation_id)
+        admission_receipt = _validated_receipt(
+            admission,
+            ipc,
+            phase="admission",
+            outcome="QUEUED",
+            code="ADMITTED",
+            effect_applied=False,
+        )
+        queue_id = admission_receipt["queue_id"]
+
+        dispatch = client.dispatch(queue_id)
+        dispatch_receipt = _validated_receipt(
+            dispatch,
+            ipc,
+            phase="dispatch",
+            outcome="APPLIED",
+            code="EFFECT_APPLIED",
+            effect_applied=True,
+            queue_id=queue_id,
+        )
+        if not _valid_queue_id(dispatch_receipt.get("queue_id")):
+            raise ValueError("dispatch receipt queue identifier is invalid")
+
+        result = client.get_result(queue_id)
+        _validated_result(result, queue_id, ipc)
+        outcome = {"run": {"admission": admission, "dispatch": dispatch, "result": result}}
+        encoded = json.dumps(
+            outcome,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        if len(encoded) > (3 * ipc.MAX_IPC_RESPONSE_BYTES) + 128:
+            raise ValueError("combined response exceeds its output bound")
+        print(encoded.decode("utf-8"))
+        return 0
+    except Exception:  # noqa: BLE001 - any client error must fail closed
+        print("--linux-ipc run failed closed", file=sys.stderr)
+        return 1
+
+
+def _validated_receipt(
+    response: object,
+    ipc: Any,
+    *,
+    phase: str,
+    outcome: str,
+    code: str,
+    effect_applied: bool,
+    queue_id: str | None = None,
+) -> dict[str, Any]:
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"receipt", "schema_version"}
+        or type(response["schema_version"]) is not str
+        or response["schema_version"] != ipc.IPC_SCHEMA
+    ):
+        raise ValueError("receipt response is malformed")
+    receipt = response["receipt"]
+    if (
+        not ipc._valid_receipt(receipt)
+        or receipt.get("phase") != phase
+        or receipt.get("outcome") != outcome
+        or receipt.get("code") != code
+        or receipt.get("effect_applied") is not effect_applied
+        or not _valid_queue_id(receipt.get("queue_id"))
+        or (queue_id is not None and receipt.get("queue_id") != queue_id)
+    ):
+        raise ValueError("receipt did not match the required stage")
+    return receipt
+
+
+def _validated_result(response: object, queue_id: str, ipc: Any) -> None:
+    if not isinstance(response, dict):
+        raise TypeError("result response is malformed")
+    required = {"outcome", "phase", "queue_id", "report", "schema_version"}
+    if (
+        not required <= set(response)
+        or set(response) - required
+        or type(response["schema_version"]) is not str
+        or response["schema_version"] != ipc.IPC_SCHEMA
+        or response["phase"] != "result"
+        or response["outcome"] != "AVAILABLE"
+        or not _valid_queue_id(response["queue_id"])
+        or response["queue_id"] != queue_id
+        or not ipc._valid_report(response["report"])
+        or len(ipc._canonical_json(response["report"])) > ipc.MAX_RESULT_BYTES
+    ):
+        raise ValueError("result did not match the required stage")
 
 
 def portable_demo() -> int:
@@ -51,6 +154,7 @@ def portable_demo() -> int:
 def linux_ipc_demo(arguments: argparse.Namespace) -> int:
     if sys.platform != "linux" or not hasattr(os, "geteuid"):
         raise SystemExit("--linux-ipc modes require Linux")
+    from lumi_eggcracker.brokered import linux_ipc
     from lumi_eggcracker.brokered.linux_ipc import BrokeredLinuxClient, BrokeredLinuxService
 
     if arguments.linux_ipc == "serve":
@@ -78,9 +182,18 @@ def linux_ipc_demo(arguments: argparse.Namespace) -> int:
             _show("trusted_stop_request", service.request_stop())
         return 0
 
-    if arguments.linux_ipc in {"submit", "dispatch", "result"}:
+    if arguments.linux_ipc in {"submit", "dispatch", "result", "run"}:
         if arguments.socket is None or arguments.service_uid is None:
             raise SystemExit(f"{arguments.linux_ipc} requires --socket and --service-uid")
+        if arguments.linux_ipc == "run" and arguments.operation_id is None:
+            raise SystemExit("run requires --operation-id")
+        if arguments.linux_ipc == "run":
+            try:
+                client = BrokeredLinuxClient(arguments.socket, service_uid=arguments.service_uid)
+            except Exception:  # noqa: BLE001 - any client setup error must fail closed
+                print("--linux-ipc run failed closed", file=sys.stderr)
+                return 1
+            return _run_one_shot(client, arguments.operation_id, linux_ipc)
         client = BrokeredLinuxClient(arguments.socket, service_uid=arguments.service_uid)
         if arguments.linux_ipc == "submit":
             if arguments.operation_id is None:
@@ -124,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--linux-ipc",
-        choices=("serve", "submit", "dispatch", "result", "stop", "snapshot"),
+        choices=("serve", "submit", "dispatch", "result", "run", "stop", "snapshot"),
         help="run one side of the Linux authenticated local-IPC demonstration",
     )
     parser.add_argument("--state-dir")
