@@ -14,6 +14,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from lumi_eggcracker.brokered import BrokeredOperator
 
+_RUN_FAILURE_STAGES = frozenset(
+    {
+        "client_setup",
+        "submit",
+        "admission_validation",
+        "dispatch",
+        "dispatch_validation",
+        "result",
+        "result_validation",
+        "outcome_serialization",
+        "outcome_output",
+    }
+)
+_RUN_VALIDATED_STAGES = frozenset({"admission", "dispatch"})
+_MAX_RUN_FAILURE_BYTES = 256
+
 
 def _show(name: str, value: object) -> None:
     if hasattr(value, "as_dict"):
@@ -29,9 +45,50 @@ def _valid_queue_id(value: object) -> bool:
     )
 
 
+def _report_run_failure(
+    failed_stage: str,
+    queue_id: object = None,
+    last_validated_stage: str | None = None,
+    effect_status: str = "UNKNOWN",
+) -> None:
+    if failed_stage not in _RUN_FAILURE_STAGES:
+        failed_stage = "outcome_output"
+    validated_queue_id = queue_id if _valid_queue_id(queue_id) else None
+    if validated_queue_id is None:
+        last_validated_stage = None
+        effect_status = "UNKNOWN"
+    else:
+        if last_validated_stage not in _RUN_VALIDATED_STAGES:
+            last_validated_stage = "admission"
+        if effect_status != "CONFIRMED_APPLIED" or last_validated_stage != "dispatch":
+            effect_status = "UNKNOWN"
+
+    details: dict[str, str] = {
+        "effect_status": effect_status,
+        "error": "failed closed",
+        "failed_stage": failed_stage,
+    }
+    if validated_queue_id is not None:
+        details["last_validated_stage"] = last_validated_stage
+        details["queue_id"] = validated_queue_id
+    encoded = json.dumps(
+        {"run_failure": details},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > _MAX_RUN_FAILURE_BYTES:
+        raise RuntimeError("bounded run diagnostic exceeded its fixed limit")
+    print(encoded.decode("utf-8"), file=sys.stderr)
+
+
 def _run_one_shot(client: Any, operation_id: str, ipc: Any) -> int:
+    failed_stage = "submit"
+    queue_id: str | None = None
+    last_validated_stage: str | None = None
+    effect_status = "UNKNOWN"
     try:
         admission = client.submit(operation_id)
+        failed_stage = "admission_validation"
         admission_receipt = _validated_receipt(
             admission,
             ipc,
@@ -41,8 +98,11 @@ def _run_one_shot(client: Any, operation_id: str, ipc: Any) -> int:
             effect_applied=False,
         )
         queue_id = admission_receipt["queue_id"]
+        last_validated_stage = "admission"
 
+        failed_stage = "dispatch"
         dispatch = client.dispatch(queue_id)
+        failed_stage = "dispatch_validation"
         dispatch_receipt = _validated_receipt(
             dispatch,
             ipc,
@@ -54,10 +114,15 @@ def _run_one_shot(client: Any, operation_id: str, ipc: Any) -> int:
         )
         if not _valid_queue_id(dispatch_receipt.get("queue_id")):
             raise ValueError("dispatch receipt queue identifier is invalid")
+        last_validated_stage = "dispatch"
+        effect_status = "CONFIRMED_APPLIED"
 
+        failed_stage = "result"
         result = client.get_result(queue_id)
+        failed_stage = "result_validation"
         _validated_result(result, queue_id, ipc)
         outcome = {"run": {"admission": admission, "dispatch": dispatch, "result": result}}
+        failed_stage = "outcome_serialization"
         encoded = json.dumps(
             outcome,
             sort_keys=True,
@@ -66,10 +131,11 @@ def _run_one_shot(client: Any, operation_id: str, ipc: Any) -> int:
         ).encode("utf-8")
         if len(encoded) > (3 * ipc.MAX_IPC_RESPONSE_BYTES) + 128:
             raise ValueError("combined response exceeds its output bound")
+        failed_stage = "outcome_output"
         print(encoded.decode("utf-8"))
         return 0
     except Exception:  # noqa: BLE001 - any client error must fail closed
-        print("--linux-ipc run failed closed", file=sys.stderr)
+        _report_run_failure(failed_stage, queue_id, last_validated_stage, effect_status)
         return 1
 
 
@@ -191,7 +257,7 @@ def linux_ipc_demo(arguments: argparse.Namespace) -> int:
             try:
                 client = BrokeredLinuxClient(arguments.socket, service_uid=arguments.service_uid)
             except Exception:  # noqa: BLE001 - any client setup error must fail closed
-                print("--linux-ipc run failed closed", file=sys.stderr)
+                _report_run_failure("client_setup")
                 return 1
             return _run_one_shot(client, arguments.operation_id, linux_ipc)
         client = BrokeredLinuxClient(arguments.socket, service_uid=arguments.service_uid)

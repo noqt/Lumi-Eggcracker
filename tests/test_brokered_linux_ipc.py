@@ -538,6 +538,139 @@ class BrokeredLinuxOneShotCLITests(unittest.TestCase):
         self.assertEqual("", standard_output.getvalue())
         self.assertIn("failed closed", standard_error.getvalue())
 
+    def test_run_failure_before_valid_admission_never_exposes_a_queue_id(self) -> None:
+        denied_admission = self.receipt(
+            phase="admission",
+            outcome="DENIED",
+            code="CAPABILITY_REVOKED",
+            effect_applied=False,
+            queue_id=self.other_queue_id,
+        )
+        malformed_admission = self.receipt(
+            phase="admission",
+            outcome="QUEUED",
+            code="ADMITTED",
+            effect_applied=False,
+            queue_id="untrusted-queue-value",
+        )
+        for stage, response, untrusted_id in (
+            ("submit", RuntimeError("untrusted submit detail"), None),
+            ("admission_validation", denied_admission, self.other_queue_id),
+            ("admission_validation", malformed_admission, "untrusted-queue-value"),
+        ):
+            with self.subTest(stage=stage):
+                responses = self.successful_responses()
+                responses["submit"] = response
+                status, calls, standard_output, standard_error, _ = self.invoke(responses)
+                failure = json.loads(standard_error)["run_failure"]
+                self.assertEqual(1, status)
+                self.assertEqual([("submit", "cli-run-1")], calls)
+                self.assertEqual("", standard_output)
+                self.assertEqual(stage, failure["failed_stage"])
+                self.assertEqual("UNKNOWN", failure["effect_status"])
+                self.assertNotIn("queue_id", failure)
+                if untrusted_id is not None:
+                    self.assertNotIn(untrusted_id, standard_error)
+                self.assertNotIn("untrusted submit detail", standard_error)
+                self.assertLessEqual(len(standard_error.encode("utf-8")), 256)
+
+        arguments = [
+            "--linux-ipc",
+            "run",
+            "--socket",
+            "/tmp/fake-broker.sock",
+            "--service-uid",
+            "1200",
+            "--operation-id",
+            "cli-run-1",
+        ]
+        standard_output = io.StringIO()
+        standard_error = io.StringIO()
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(brokered_operator_demo.os, "geteuid", return_value=1201, create=True),
+            mock.patch.object(
+                linux_ipc,
+                "BrokeredLinuxClient",
+                side_effect=RuntimeError("untrusted setup detail"),
+            ),
+            contextlib.redirect_stdout(standard_output),
+            contextlib.redirect_stderr(standard_error),
+        ):
+            status = brokered_operator_demo.main(arguments)
+        failure = json.loads(standard_error.getvalue())["run_failure"]
+        self.assertEqual(1, status)
+        self.assertEqual("client_setup", failure["failed_stage"])
+        self.assertEqual("UNKNOWN", failure["effect_status"])
+        self.assertNotIn("queue_id", failure)
+        self.assertNotIn("untrusted setup detail", standard_error.getvalue())
+        self.assertLessEqual(len(standard_error.getvalue().encode("utf-8")), 256)
+        self.assertEqual("", standard_output.getvalue())
+
+    def test_run_failure_before_valid_dispatch_reports_validated_id_and_unknown_effect(self) -> None:
+        mismatched_dispatch = self.receipt(
+            phase="dispatch",
+            outcome="APPLIED",
+            code="EFFECT_APPLIED",
+            effect_applied=True,
+            queue_id=self.other_queue_id,
+        )
+        denied_dispatch = self.receipt(
+            phase="dispatch",
+            outcome="DENIED",
+            code="STALE_GENERATION",
+            effect_applied=False,
+            queue_id=self.queue_id,
+        )
+        cases = (
+            ("dispatch", RuntimeError("untrusted dispatch detail")),
+            ("dispatch_validation", mismatched_dispatch),
+            ("dispatch_validation", denied_dispatch),
+        )
+        for expected_stage, dispatch_response in cases:
+            with self.subTest(expected_stage=expected_stage):
+                responses = self.successful_responses()
+                responses["dispatch"] = dispatch_response
+                status, calls, standard_output, standard_error, _ = self.invoke(responses)
+                failure = json.loads(standard_error)["run_failure"]
+                self.assertEqual(1, status)
+                self.assertEqual(
+                    [("submit", "cli-run-1"), ("dispatch", self.queue_id)],
+                    calls,
+                )
+                self.assertEqual("", standard_output)
+                self.assertEqual(expected_stage, failure["failed_stage"])
+                self.assertEqual("admission", failure["last_validated_stage"])
+                self.assertEqual(self.queue_id, failure["queue_id"])
+                self.assertEqual("UNKNOWN", failure["effect_status"])
+                self.assertNotIn(self.other_queue_id, standard_error)
+                self.assertNotIn("untrusted dispatch detail", standard_error)
+                self.assertLessEqual(len(standard_error.encode("utf-8")), 256)
+
+    def test_run_failure_after_validated_applied_dispatch_confirms_effect(self) -> None:
+        responses = self.successful_responses()
+        responses["get_result"] = RuntimeError("untrusted result detail")
+
+        status, calls, standard_output, standard_error, _ = self.invoke(responses)
+        failure = json.loads(standard_error)["run_failure"]
+
+        self.assertEqual(1, status)
+        self.assertEqual(
+            [
+                ("submit", "cli-run-1"),
+                ("dispatch", self.queue_id),
+                ("get_result", self.queue_id),
+            ],
+            calls,
+        )
+        self.assertEqual("", standard_output)
+        self.assertEqual("result", failure["failed_stage"])
+        self.assertEqual("dispatch", failure["last_validated_stage"])
+        self.assertEqual(self.queue_id, failure["queue_id"])
+        self.assertEqual("CONFIRMED_APPLIED", failure["effect_status"])
+        self.assertNotIn("untrusted result detail", standard_error)
+        self.assertLessEqual(len(standard_error.encode("utf-8")), 256)
+
 
 class LinuxIdentityAndPathGuardTests(unittest.TestCase):
     def test_service_and_workload_root_identity_configurations_are_refused(self) -> None:
