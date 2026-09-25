@@ -80,26 +80,25 @@ report to 1024 bytes. A rejected peer is denied before parsing or effect. There
 is no generic callback, URL, arbitrary file target, shell, network action,
 secret access, process kill, reset, or resume operation. The default
 `scripts/brokered_operator_demo.py` remains the portable demo. Its `--linux-ipc`
-modes expose service, submit, dispatch, result, trusted stop, and snapshot
+modes expose service, submit, dispatch, result, run, trusted stop, and snapshot
 commands for use under the separately provisioned service and workload
-identities. For example, run `serve` as the service UID and the client commands
-as the workload UID; retain the queue ID printed by `submit`:
+identities. For example, run `serve` as the service UID and client commands as
+the workload UID. The one-shot `run` mode performs admission, dispatch, and
+bounded result retrieval in order, then prints one JSON outcome containing all
+three protocol responses:
 
 ```sh
 python scripts/brokered_operator_demo.py --linux-ipc serve \
   --state-dir /var/lib/eggcracker-brokered/state \
   --socket /run/eggcracker-brokered/operator.sock \
   --workload-uid 1201 --workload-gid 1301
-python scripts/brokered_operator_demo.py --linux-ipc submit \
+python scripts/brokered_operator_demo.py --linux-ipc run \
   --socket /run/eggcracker-brokered/operator.sock --service-uid 1200 --operation-id demo-1
-python scripts/brokered_operator_demo.py --linux-ipc dispatch \
-  --socket /run/eggcracker-brokered/operator.sock --service-uid 1200 --queue-id QUEUE_ID
-python scripts/brokered_operator_demo.py --linux-ipc result \
-  --socket /run/eggcracker-brokered/operator.sock --service-uid 1200 --queue-id QUEUE_ID
 ```
 
-Submit a second operation before the trusted service-side `stop` command to
-observe stale queued denial; subsequent submissions remain denied. Restarting
+Use the separate `submit` command when you need a queued operation to remain
+pending; submitting it before the trusted service-side `stop` command lets you
+observe stale queued denial. Subsequent submissions remain denied. Restarting
 `serve` on the same state and socket paths recovers the stopped run rather than
 minting a new one. `snapshot` reports the protected synthetic effect count and
 the unchanged unrelated canary allocation.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import socket
@@ -14,6 +16,7 @@ from unittest import mock
 
 from lumi_eggcracker.brokered import BrokeredOperator, linux_ipc
 from lumi_eggcracker.brokered import operator as brokered_operator
+from scripts import brokered_operator_demo
 
 
 def canonical(value: object) -> bytes:
@@ -233,6 +236,307 @@ class BrokeredLinuxProtocolTests(unittest.TestCase):
                 self.assertEqual("DENIED", response["outcome"])
                 self.assertIn(response["code"], {"MALFORMED_INPUT", "UNKNOWN_FIELDS"})
         self.assertEqual(0, self.operator.world_snapshot().protected_effects)
+
+
+class BrokeredLinuxOneShotCLITests(unittest.TestCase):
+    queue_id = "a" * 32
+    other_queue_id = "b" * 32
+
+    @staticmethod
+    def receipt(
+        *,
+        phase: str,
+        outcome: str,
+        code: str,
+        effect_applied: bool,
+        queue_id: str | None = None,
+    ) -> dict[str, object]:
+        value: dict[str, object] = {
+            "code": code,
+            "effect_applied": effect_applied,
+            "outcome": outcome,
+            "phase": phase,
+        }
+        if queue_id is not None:
+            value["queue_id"] = queue_id
+        return {"receipt": value, "schema_version": linux_ipc.IPC_SCHEMA}
+
+    @staticmethod
+    def result(*, queue_id: str | None = None) -> dict[str, object]:
+        value: dict[str, object] = {
+            "outcome": "AVAILABLE",
+            "phase": "result",
+            "report": {
+                "accepted": 2,
+                "dataset_id": "synthetic.research-batch.v1",
+                "dataset_sha256": "c" * 64,
+                "records_checked": 4,
+                "review": 2,
+                "units_total": 32,
+            },
+            "schema_version": linux_ipc.IPC_SCHEMA,
+        }
+        if queue_id is not None:
+            value["queue_id"] = queue_id
+        return value
+
+    def invoke(
+        self,
+        responses: dict[str, object],
+    ) -> tuple[int, list[tuple[object, ...]], str, str, mock.Mock]:
+        calls: list[tuple[object, ...]] = []
+
+        class FakeClient:
+            def _call(self, stage: str, *arguments: object) -> object:
+                calls.append((stage, *arguments))
+                response = responses[stage]
+                if isinstance(response, Exception):
+                    raise response
+                return response
+
+            def submit(self, operation_id: str) -> object:
+                return self._call("submit", operation_id)
+
+            def dispatch(self, queue_id: str) -> object:
+                return self._call("dispatch", queue_id)
+
+            def get_result(self, queue_id: str) -> object:
+                return self._call("get_result", queue_id)
+
+        fake_client = FakeClient()
+        standard_output = io.StringIO()
+        standard_error = io.StringIO()
+        arguments = [
+            "--linux-ipc",
+            "run",
+            "--socket",
+            "/tmp/fake-broker.sock",
+            "--service-uid",
+            "1200",
+            "--operation-id",
+            "cli-run-1",
+        ]
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(brokered_operator_demo.os, "geteuid", return_value=1201, create=True),
+            mock.patch.object(linux_ipc, "BrokeredLinuxClient", return_value=fake_client) as constructor,
+            contextlib.redirect_stdout(standard_output),
+            contextlib.redirect_stderr(standard_error),
+        ):
+            status = brokered_operator_demo.main(arguments)
+        return status, calls, standard_output.getvalue(), standard_error.getvalue(), constructor
+
+    def successful_responses(self) -> dict[str, object]:
+        return {
+            "submit": self.receipt(
+                phase="admission",
+                outcome="QUEUED",
+                code="ADMITTED",
+                effect_applied=False,
+                queue_id=self.queue_id,
+            ),
+            "dispatch": self.receipt(
+                phase="dispatch",
+                outcome="APPLIED",
+                code="EFFECT_APPLIED",
+                effect_applied=True,
+                queue_id=self.queue_id,
+            ),
+            "get_result": self.result(queue_id=self.queue_id),
+        }
+
+    def test_run_calls_each_primitive_once_and_emits_one_combined_outcome(self) -> None:
+        responses = self.successful_responses()
+        status, calls, standard_output, standard_error, constructor = self.invoke(responses)
+
+        self.assertEqual(0, status)
+        self.assertEqual(
+            [
+                ("submit", "cli-run-1"),
+                ("dispatch", self.queue_id),
+                ("get_result", self.queue_id),
+            ],
+            calls,
+        )
+        constructor.assert_called_once_with("/tmp/fake-broker.sock", service_uid=1200)
+        self.assertEqual("", standard_error)
+        self.assertEqual(1, len(standard_output.splitlines()))
+        self.assertEqual(
+            {"run": {
+                "admission": responses["submit"],
+                "dispatch": responses["dispatch"],
+                "result": responses["get_result"],
+            }},
+            json.loads(standard_output),
+        )
+
+    def test_run_stops_after_invalid_admission_or_dispatch(self) -> None:
+        denied_admission = self.receipt(
+            phase="admission",
+            outcome="DENIED",
+            code="CAPABILITY_REVOKED",
+            effect_applied=False,
+            queue_id=self.queue_id,
+        )
+        malformed_admission = {"schema_version": linux_ipc.IPC_SCHEMA}
+        missing_admission_id = self.receipt(
+            phase="admission",
+            outcome="QUEUED",
+            code="ADMITTED",
+            effect_applied=False,
+        )
+        mismatched_dispatch = self.receipt(
+            phase="dispatch",
+            outcome="APPLIED",
+            code="EFFECT_APPLIED",
+            effect_applied=True,
+            queue_id=self.other_queue_id,
+        )
+        missing_dispatch_id = self.receipt(
+            phase="dispatch",
+            outcome="APPLIED",
+            code="EFFECT_APPLIED",
+            effect_applied=True,
+        )
+        denied_dispatch = self.receipt(
+            phase="dispatch",
+            outcome="DENIED",
+            code="STALE_GENERATION",
+            effect_applied=False,
+            queue_id=self.queue_id,
+        )
+        for admission, dispatch, expected_calls in (
+            (denied_admission, self.successful_responses()["dispatch"], [("submit", "cli-run-1")]),
+            (malformed_admission, self.successful_responses()["dispatch"], [("submit", "cli-run-1")]),
+            (missing_admission_id, self.successful_responses()["dispatch"], [("submit", "cli-run-1")]),
+            (
+                self.successful_responses()["submit"],
+                mismatched_dispatch,
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id)],
+            ),
+            (
+                self.successful_responses()["submit"],
+                missing_dispatch_id,
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id)],
+            ),
+            (
+                self.successful_responses()["submit"],
+                denied_dispatch,
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id)],
+            ),
+        ):
+            with self.subTest(admission=admission, dispatch=dispatch):
+                status, calls, standard_output, standard_error, _ = self.invoke(
+                    {
+                        "submit": admission,
+                        "dispatch": dispatch,
+                        "get_result": self.result(queue_id=self.queue_id),
+                    }
+                )
+                self.assertEqual(1, status)
+                self.assertEqual(expected_calls, calls)
+                self.assertEqual("", standard_output)
+                self.assertIn("failed closed", standard_error)
+
+    def test_run_rejects_bad_result_and_stops_on_exceptions(self) -> None:
+        mismatched_result = self.result(queue_id=self.other_queue_id)
+        missing_result_id = self.result()
+        bad_result = self.result(queue_id=self.queue_id)
+        bad_result["report"] = {"unbounded": "x" * (linux_ipc.MAX_RESULT_BYTES + 1)}
+        denied_result = {
+            "code": "NOT_FOUND",
+            "outcome": "DENIED",
+            "phase": "result",
+            "queue_id": self.queue_id,
+            "schema_version": linux_ipc.IPC_SCHEMA,
+        }
+        cases = (
+            (
+                {**self.successful_responses(), "get_result": mismatched_result},
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id), ("get_result", self.queue_id)],
+            ),
+            (
+                {**self.successful_responses(), "get_result": missing_result_id},
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id), ("get_result", self.queue_id)],
+            ),
+            (
+                {**self.successful_responses(), "get_result": denied_result},
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id), ("get_result", self.queue_id)],
+            ),
+            (
+                {**self.successful_responses(), "get_result": bad_result},
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id), ("get_result", self.queue_id)],
+            ),
+            (
+                {**self.successful_responses(), "submit": RuntimeError("submit failed")},
+                [("submit", "cli-run-1")],
+            ),
+            (
+                {**self.successful_responses(), "dispatch": RuntimeError("dispatch failed")},
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id)],
+            ),
+            (
+                {**self.successful_responses(), "get_result": RuntimeError("result failed")},
+                [("submit", "cli-run-1"), ("dispatch", self.queue_id), ("get_result", self.queue_id)],
+            ),
+        )
+        for responses, expected_calls in cases:
+            with self.subTest(expected_calls=expected_calls, responses=responses):
+                status, calls, standard_output, standard_error, _ = self.invoke(responses)
+                self.assertEqual(1, status)
+                self.assertEqual(expected_calls, calls)
+                self.assertEqual("", standard_output)
+                self.assertIn("failed closed", standard_error)
+
+    def test_run_missing_arguments_fail_before_client_construction(self) -> None:
+        cases = (
+            ["--linux-ipc", "run", "--socket", "/tmp/fake.sock", "--service-uid", "1200"],
+            ["--linux-ipc", "run", "--service-uid", "1200", "--operation-id", "cli-run-1"],
+            ["--linux-ipc", "run", "--socket", "/tmp/fake.sock", "--operation-id", "cli-run-1"],
+        )
+        with mock.patch.object(sys, "platform", "linux"), mock.patch.object(
+            brokered_operator_demo.os, "geteuid", return_value=1201, create=True
+        ):
+            for arguments in cases:
+                with self.subTest(arguments=arguments), mock.patch.object(
+                    linux_ipc,
+                    "BrokeredLinuxClient",
+                    side_effect=AssertionError("client must not be constructed"),
+                ) as constructor:
+                    with self.assertRaises(SystemExit):
+                        brokered_operator_demo.main(arguments)
+                    constructor.assert_not_called()
+
+    def test_run_client_construction_exception_returns_nonzero(self) -> None:
+        arguments = [
+            "--linux-ipc",
+            "run",
+            "--socket",
+            "/tmp/fake-broker.sock",
+            "--service-uid",
+            "1200",
+            "--operation-id",
+            "cli-run-1",
+        ]
+        standard_output = io.StringIO()
+        standard_error = io.StringIO()
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(brokered_operator_demo.os, "geteuid", return_value=1201, create=True),
+            mock.patch.object(
+                linux_ipc,
+                "BrokeredLinuxClient",
+                side_effect=RuntimeError("client setup failed"),
+            ) as constructor,
+            contextlib.redirect_stdout(standard_output),
+            contextlib.redirect_stderr(standard_error),
+        ):
+            status = brokered_operator_demo.main(arguments)
+
+        self.assertEqual(1, status)
+        constructor.assert_called_once_with("/tmp/fake-broker.sock", service_uid=1200)
+        self.assertEqual("", standard_output.getvalue())
+        self.assertIn("failed closed", standard_error.getvalue())
 
 
 class LinuxIdentityAndPathGuardTests(unittest.TestCase):
