@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Write a bounded, redacted export of one local detection receipt."""
 
 from __future__ import annotations
