@@ -1,0 +1,57 @@
+{
+  "_synthetic_only": true,
+  "_synthetic_banner": "SYNTHETIC ONLY - NOT AN ACTUAL DETECTION RECEIPT",
+  "_synthetic_metadata": {
+    "fixture_filename": "examples/detection-receipt.synthetic.json",
+    "purpose": "Documentation-only redaction example with fabricated identities and canaries.",
+    "recorded_result": "CONTAINMENT_FAILED is fabricated; no workload or source event occurred.",
+    "actual_workload_executed": false,
+    "actual_source_event_observed": false,
+    "native_execution_or_containment_performed": false
+  },
+  "schema_version": "lumi-eggcracker.detection-receipt.v2",
+  "event_id": "0123456789abcdef01234567",
+  "source_commit": "cccccccccccccccccccccccccccccccccccccccc",
+  "version": "1.0.10",
+  "catalogue_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "receipt_written_utc": "2026-10-02T07:30:00Z",
+  "detector": {
+    "profile": "content.gguf-llama",
+    "detection_path": "CONTENT",
+    "catalogue_schema": "lumi-eggcracker.detectors.v3",
+    "model": {
+      "path": "SYNTHETIC_CANARY_MODEL_PATH"
+    }
+  },
+  "trigger": {
+    "kind": "UNAPPROVED_AI_MATCH"
+  },
+  "result": "CONTAINMENT_FAILED",
+  "observed": {
+    "pid": 414141,
+    "uid": 31337,
+    "argv": [
+      "SYNTHETIC_CANARY_ARGUMENT"
+    ]
+  },
+  "executable": {
+    "basename": "SYNTHETIC_CANARY_EXECUTABLE_PATH"
+  },
+  "workload": {
+    "cgroup": "SYNTHETIC_CANARY_CGROUP_PATH"
+  },
+  "runtime": {
+    "environment": "SYNTHETIC_CANARY_ENVIRONMENT_VALUE"
+  },
+  "correlation": {
+    "evidence_bearing": [
+      {
+        "pid": 515151
+      }
+    ]
+  },
+  "capture": {
+    "quarantine_cgroup": "SYNTHETIC_CANARY_CAPTURE_PATH"
+  },
+  "error": "SYNTHETIC_CANARY_RAW_ERROR"
+}
