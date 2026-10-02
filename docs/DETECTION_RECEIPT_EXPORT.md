@@ -11,6 +11,33 @@ python scripts/export_detection_receipt.py \
   --output ./detection-receipt-export.json
 ```
 
+## Copyable synthetic redaction example
+
+From the repository root, the following command exports the committed
+documentation fixture [examples/detection-receipt.synthetic.json](../examples/detection-receipt.synthetic.json)
+without running a workload or contacting a service:
+
+```sh
+python scripts/export_detection_receipt.py \
+  --input ./examples/detection-receipt.synthetic.json \
+  --expected-event-id 0123456789abcdef01234567 \
+  --output ./detection-receipt.synthetic-export.json
+```
+
+The fixture filename and its top-level banner identify it as synthetic-only.
+Its `CONTAINMENT_FAILED` recorded result, timestamp, event/source identities,
+and sensitive-field values are fabricated; no workload or source event was
+executed or observed, and no execution or containment occurred. The output
+path must be new: `./detection-receipt.synthetic-export.json` is an example
+output only and is not committed. This offline command needs no `sudo`, native
+workload, credentials, or service. The exporter output is at most 8 KiB,
+includes `source_sha256` (the exact input-byte SHA-256) and the event ID, and reports
+`NOT_AUTHENTICATED` and `NOT_PERFORMED`. Its redaction path omits the fixture's
+observed PID/UID/argv, model, executable, workload/cgroup, runtime,
+correlation, capture, and raw-error canaries. The synthetic identities and
+recorded result are not evidence of actual execution, containment, native
+safety, independent use, or adoption.
+
 The expected event ID must be 24 lowercase hexadecimal characters and match the
 receipt. The output path must be new, and its existing parent directories must
 be ordinary directories without symbolic links or Windows reparse points. The
