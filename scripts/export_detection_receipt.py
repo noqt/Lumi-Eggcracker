@@ -48,6 +48,13 @@ class ExportError(Exception):
     """A deliberately non-specific input, validation, or filesystem failure."""
 
 
+class OutputAlreadyExistsError(ExportError):
+    """A validated export destination is already an ordinary regular file."""
+
+    def __init__(self) -> None:
+        super().__init__("OUTPUT_ALREADY_EXISTS")
+
+
 def _fail() -> None:
     raise ExportError("receipt export could not be completed")
 
@@ -382,12 +389,14 @@ def _write_new_output(path_value: str | os.PathLike[str], payload: bytes) -> Non
     output = _path_without_parent_links(path_value)
     _check_directory_chain(output.parent)
     try:
-        os.lstat(output)
+        existing = os.lstat(output)
     except FileNotFoundError:
         pass
     except (OSError, ValueError):
         _fail()
     else:
+        if not _link_like(existing) and stat.S_ISREG(existing.st_mode):
+            raise OutputAlreadyExistsError()
         _fail()
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
@@ -499,6 +508,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         export_receipt(args.input, args.expected_event_id, args.output)
+    except OutputAlreadyExistsError:
+        print(
+            "export failed: OUTPUT_ALREADY_EXISTS; choose a new output filename",
+            file=sys.stderr,
+        )
+        return 1
     except Exception:  # noqa: BLE001 - never echo untrusted input or OS error text.
         print("export failed: invalid receipt or filesystem path", file=sys.stderr)
         return 1
