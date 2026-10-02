@@ -18,6 +18,7 @@ from scripts.export_detection_receipt import (
     MAX_JSON_DEPTH,
     MAX_OUTPUT_BYTES,
     ExportError,
+    OutputAlreadyExistsError,
     export_receipt,
 )
 
@@ -268,9 +269,40 @@ class DetectionReceiptExportTests(unittest.TestCase):
             output.rmdir()
 
             output.write_text("preserve me", encoding="utf-8")
-            with self.assertRaises(ExportError):
+            with self.assertRaises(OutputAlreadyExistsError):
                 export_receipt(source, EVENT_ID, output)
             self.assertEqual("preserve me", output.read_text(encoding="utf-8"))
+
+    def test_existing_regular_output_collision_preserves_bytes_and_temp_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "receipt.json"
+            output = root / "export.json"
+            write_json(source, receipt())
+            output.write_bytes(b"preserve me")
+            before_inventory = sorted(path.name for path in root.iterdir())
+
+            with self.assertRaises(OutputAlreadyExistsError):
+                export_receipt(source, EVENT_ID, output)
+
+            self.assertEqual(b"preserve me", output.read_bytes())
+            self.assertEqual(before_inventory, sorted(path.name for path in root.iterdir()))
+
+    def test_invalid_receipt_with_existing_output_keeps_generic_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "receipt.json"
+            output = root / "export.json"
+            invalid = receipt()
+            invalid["schema_version"] = "invalid"
+            write_json(source, invalid)
+            output.write_bytes(b"preserve me")
+
+            with self.assertRaises(ExportError) as raised:
+                export_receipt(source, EVENT_ID, output)
+
+            self.assertNotIsInstance(raised.exception, OutputAlreadyExistsError)
+            self.assertEqual(b"preserve me", output.read_bytes())
 
     def test_rejects_symlinks_and_reparse_point_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -392,6 +424,79 @@ class DetectionReceiptExportTests(unittest.TestCase):
             self.assertNotIn(str(output), result.stderr)
             self.assertNotIn(canary_id, result.stderr)
             self.assertFalse(output.exists())
+
+    def test_cli_existing_regular_output_reports_fixed_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "CANARY_INPUT_PATH.json"
+            output = root / "CANARY_OUTPUT_PATH.json"
+            write_json(source, receipt())
+            output.write_bytes(b"preserve me")
+            environment = os.environ.copy()
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            environment["PYTHONPATH"] = str(ROOT / "src")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--input",
+                    str(source),
+                    "--expected-event-id",
+                    EVENT_ID,
+                    "--output",
+                    str(output),
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(1, result.returncode)
+            self.assertEqual(
+                "export failed: OUTPUT_ALREADY_EXISTS; choose a new output filename\n",
+                result.stderr,
+            )
+            self.assertNotIn(str(source), result.stderr)
+            self.assertNotIn(str(output), result.stderr)
+            self.assertEqual(b"preserve me", output.read_bytes())
+
+    def test_cli_invalid_receipt_with_existing_output_keeps_generic_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "CANARY_INPUT_PATH.json"
+            output = root / "CANARY_OUTPUT_PATH.json"
+            invalid = receipt()
+            invalid["schema_version"] = "invalid"
+            write_json(source, invalid)
+            output.write_bytes(b"preserve me")
+            environment = os.environ.copy()
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            environment["PYTHONPATH"] = str(ROOT / "src")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--input",
+                    str(source),
+                    "--expected-event-id",
+                    EVENT_ID,
+                    "--output",
+                    str(output),
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(1, result.returncode)
+            self.assertEqual("export failed: invalid receipt or filesystem path\n", result.stderr)
+            self.assertNotIn(str(source), result.stderr)
+            self.assertNotIn(str(output), result.stderr)
+            self.assertEqual(b"preserve me", output.read_bytes())
 
 
 if __name__ == "__main__":

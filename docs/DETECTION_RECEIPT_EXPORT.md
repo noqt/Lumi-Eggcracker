@@ -40,8 +40,14 @@ safety, independent use, or adoption.
 
 The expected event ID must be 24 lowercase hexadecimal characters and match the
 receipt. The output path must be new, and its existing parent directories must
-be ordinary directories without symbolic links or Windows reparse points. The
-input must be a regular file without linked parent components. The exporter
+be ordinary directories without symbolic links or Windows reparse points. After
+receipt validation and output-size checks succeed, an existing ordinary regular
+output is reported on stderr as `OUTPUT_ALREADY_EXISTS`; choose a new output
+filename. This is a failure exit, and the existing bytes and temporary-file
+inventory are left unchanged. Invalid receipts, directories, links, reparse
+points, unsafe parents, and raced or other filesystem errors retain the generic
+failure diagnostic. The input must be a regular file without linked parent
+components. The exporter
 rejects input larger than 1 MiB, output larger than 8 KiB, versions longer than
 64 characters, duplicate JSON keys at any depth, nesting deeper than 64 levels,
 nonfinite numbers, unsupported receipt kinds, and inconsistent termination
