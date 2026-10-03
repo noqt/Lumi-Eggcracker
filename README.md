@@ -7,6 +7,7 @@ with an existing Prometheus/node_exporter workflow.
 
 [v1.0.10 Release](https://github.com/noqt/Lumi-Eggcracker/releases/tag/v1.0.10)
 · [Hugging Face distribution](https://huggingface.co/spaces/noqt/eggcracker)
+· [Watch a recorded workflow—nothing runs on your device](https://noqt.no-qt.chatgpt.site/products/eggcracker/demo)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
 · [Run the portable synthetic broker example](docs/BROKERED_OPERATOR.md#portable-in-process-reference)
@@ -33,6 +34,11 @@ Eggcracker works on native Linux today and supports four qualified AI workload
 profiles plus an offline boundary for every explicitly selected workload. The
 1.0.10 release is intentionally limited; the exact boundary is in [Current
 boundary](#current-boundary).
+
+Prefer to look first? Watch the recorded synthetic workflow in your browser. It
+shows one protected effect and a durable authority fence after restart—not
+process termination, current-release qualification or production containment.
+Nothing runs on your device.
 
 **Want to see the core idea work?** [Try the hosted proof](TRY_IT.md). You don't
 need to install Eggcracker, own a GPU or download a model. The test kills a
