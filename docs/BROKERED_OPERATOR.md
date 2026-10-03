@@ -201,3 +201,41 @@ filesystem access outside the private state directory. Verified process
 termination is unsupported. The wall-clock expiry depends on the trusted
 service's local clock. Do not use a synthetic receipt as evidence that a real
 process was admitted, dispatched, stopped, contained, or verified empty.
+
+## Offline comparison of redacted detection exports
+
+For a before/after review, the standard-library comparator accepts exactly two
+explicit redacted exports and writes one bounded JSON object to stdout:
+
+```sh
+python -B src/lumi_eggcracker/brokered/compare_detection_receipts.py \
+  --before ./detection-receipt-export-before.json \
+  --after ./detection-receipt-export-after.json
+```
+
+Each input must be a normal, regular file no larger than the export ceiling of
+8 KiB. Parent directories must not contain symbolic links or Windows reparse
+points. The comparator does not discover files, read raw receipts, import a
+detector or containment runtime, create an output file, modify either input,
+upload data, or contact a service. It rejects malformed, duplicate-key,
+nonfinite, oversized, too-deep, and extra-field JSON with a fixed diagnostic
+that does not echo a supplied path, field, value, or operating-system error.
+
+The stdout allowlist reports the recorded source commit, version, catalogue
+hash, detector profile, and result for each side, plus fixed change labels. A
+`TERMINATED` to `CONTAINMENT_FAILED` transition is reported explicitly; an
+unchanged result is reported as `UNCHANGED`. Both the input exports and the
+comparison are labelled `NOT_AUTHENTICATED`, and live verification,
+independent observation, native qualification, and performance evidence are
+`NOT_PERFORMED`. The output describes recorded redacted data only; it is not a
+live-safety, native-qualification, independent-use, or performance claim.
+
+Timing is `UNAVAILABLE` when either export has no recorded timing, including a
+failure export, and is never represented as zero. It is `INCOMPARABLE` when
+the recorded source, version, catalogue, profile, trigger, or containment
+primitive context differs. Only when that recorded context matches does the
+tool show the two recorded durations and their arithmetic delta, labelled
+`MATCHING_RECORDED_CONTEXT_ONLY`. It uses the exported duration fields after
+validating their internal consistency; it never subtracts absolute monotonic
+clock values and the exports provide no host or workload identity with which
+to infer workload or performance comparability.
