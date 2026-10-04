@@ -11,6 +11,12 @@ python scripts/export_detection_receipt.py \
   --output ./detection-receipt-export.json
 ```
 
+PowerShell (single line):
+
+```powershell
+python scripts/export_detection_receipt.py --input .\detection-receipt.json --expected-event-id 0123456789abcdef01234567 --output .\detection-receipt-export.json
+```
+
 ## Copyable synthetic redaction example
 
 From the repository root, the following command exports the committed
@@ -22,6 +28,12 @@ python scripts/export_detection_receipt.py \
   --input ./examples/detection-receipt.synthetic.json \
   --expected-event-id 0123456789abcdef01234567 \
   --output ./detection-receipt.synthetic-export.json
+```
+
+PowerShell (single line):
+
+```powershell
+python scripts/export_detection_receipt.py --input .\examples\detection-receipt.synthetic.json --expected-event-id 0123456789abcdef01234567 --output .\detection-receipt.synthetic-export.json
 ```
 
 The fixture filename and its top-level banner identify it as synthetic-only.
