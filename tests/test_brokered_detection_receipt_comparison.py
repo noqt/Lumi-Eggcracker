@@ -30,6 +30,8 @@ def _document(
     *,
     result: str = "TERMINATED",
     profile: str = "content.gguf-llama",
+    export_schema: str = comparison.EXPORT_SCHEMA,
+    classification_basis: object = comparison.CLASSIFICATION_BASIS,
     source_commit: str = "a" * 40,
     version: str = "1.0.10",
     catalogue_sha256: str = "b" * 64,
@@ -54,6 +56,8 @@ def _document(
         "trigger": {"kind": comparison._PROFILE_TRIGGER[profile]},
         "recorded_result": result,
     }
+    if export_schema == comparison.EXPORT_SCHEMA_V2:
+        receipt["classification_basis"] = classification_basis
     if result == "TERMINATED":
         receipt["recorded_empty_evidence"] = {
             "empty_verified_monotonic_ns": empty_ns,
@@ -67,7 +71,7 @@ def _document(
             "trigger_to_empty_ms": trigger_to_empty_ms,
         }
     return {
-        "export_schema": comparison.EXPORT_SCHEMA,
+        "export_schema": export_schema,
         "source_sha256": "f" * 64,
         "authentication": "NOT_AUTHENTICATED",
         "live_verification": "NOT_PERFORMED",
@@ -102,6 +106,70 @@ class DetectionReceiptComparisonTests(unittest.TestCase):
                 ["--before", str(before), "--after", str(after)]
             )
         return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_v2_accepts_all_profiles_and_result_branches(self) -> None:
+        for profile in comparison._PROFILE_TRIGGER:
+            for result in ("TERMINATED", "CONTAINMENT_FAILED"):
+                with self.subTest(profile=profile, result=result):
+                    path = self._write_document(
+                        f"{profile}-{result}.json",
+                        export_schema=comparison.EXPORT_SCHEMA_V2,
+                        profile=profile,
+                        result=result,
+                    )
+                    validated = comparison._validate_export(path.read_bytes())
+                    self.assertEqual(profile, validated["profile"])
+                    self.assertEqual(
+                        comparison._PROFILE_TRIGGER[profile],
+                        validated["trigger"],
+                    )
+                    self.assertEqual(result, validated["recorded_result"])
+
+    def test_versions_require_known_exact_fields_and_v2_basis(self) -> None:
+        invalid_documents: list[tuple[str, dict[str, object]]] = []
+
+        missing_basis = _document(export_schema=comparison.EXPORT_SCHEMA_V2)
+        missing_basis["receipt"].pop("classification_basis")
+        invalid_documents.append(("missing basis", missing_basis))
+
+        wrong_basis = _document(
+            export_schema=comparison.EXPORT_SCHEMA_V2,
+            classification_basis="NOT_THE_RECORDED_BASIS",
+        )
+        invalid_documents.append(("wrong basis", wrong_basis))
+
+        extra_field = _document(export_schema=comparison.EXPORT_SCHEMA_V2)
+        extra_field["receipt"]["unexpected"] = "reject"
+        invalid_documents.append(("extra v2 field", extra_field))
+
+        v1_with_basis = _document()
+        v1_with_basis["receipt"]["classification_basis"] = comparison.CLASSIFICATION_BASIS
+        invalid_documents.append(("v1 basis", v1_with_basis))
+
+        unknown_version = _document()
+        unknown_version["export_schema"] = "lumi-eggcracker.redacted-detection-receipt-export.v3"
+        invalid_documents.append(("unknown version", unknown_version))
+
+        for label, document in invalid_documents:
+            with self.subTest(label=label):
+                path = self.root / f"invalid-{label.replace(' ', '-')}.json"
+                _write(path, document)
+                with self.assertRaises(comparison.ComparisonError):
+                    comparison._validate_export(path.read_bytes())
+
+    def test_mixed_v1_v2_comparison_uses_common_semantics(self) -> None:
+        before = self._write_document("mixed-before-v1.json")
+        after = self._write_document(
+            "mixed-after-v2.json",
+            export_schema=comparison.EXPORT_SCHEMA_V2,
+        )
+
+        output = comparison.compare_receipts(before, after)
+
+        self.assertEqual("RECORDED", output["comparison_status"])
+        self.assertEqual("UNCHANGED", output["changes"]["recorded_result"])
+        self.assertEqual("COMPARABLE", output["timing_comparison"]["status"])
+        self.assertNotIn("classification_basis", json.dumps(output))
 
     def test_matching_recorded_context_compares_durations_without_absolute_clock_subtraction(self) -> None:
         before = self._write_document(

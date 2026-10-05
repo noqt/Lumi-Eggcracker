@@ -213,6 +213,15 @@ python -B src/lumi_eggcracker/brokered/compare_detection_receipts.py \
   --after ./detection-receipt-export-after.json
 ```
 
+V1 is the established `lumi-eggcracker.redacted-detection-receipt-export.v1`
+contract. The comparator also recognizes opt-in
+`lumi-eggcracker.redacted-detection-receipt-export.v2`. V2 requires exactly
+`receipt.classification_basis` with the value
+`COMPLETE_QUALIFIED_LOCAL_PROFILE_MATCH_NOT_AI_IDENTITY`; unknown versions,
+missing or wrong values, and extra fields are rejected. The older v1
+comparator intentionally rejects opted-in v2 exports, so use this versioned
+comparator before comparing v2.
+
 Each input must be a normal, regular file no larger than the export ceiling of
 8 KiB. Parent directories must not contain symbolic links or Windows reparse
 points. The comparator does not discover files, read raw receipts, import a
@@ -227,8 +236,13 @@ hash, detector profile, and result for each side, plus fixed change labels. A
 unchanged result is reported as `UNCHANGED`. Both the input exports and the
 comparison are labelled `NOT_AUTHENTICATED`, and live verification,
 independent observation, native qualification, and performance evidence are
-`NOT_PERFORMED`. The output describes recorded redacted data only; it is not a
-live-safety, native-qualification, independent-use, or performance claim.
+`NOT_PERFORMED`. V1 and v2 are compared using their validated common fields;
+a mixed-version comparison does not imply that the v1 side has a basis
+annotation. The classification basis is a recorded interpretation, not
+independent proof of profile completeness, AI identity, inference,
+authentication, safety, or permission to act. The output describes recorded
+redacted data only; it is not a live-safety, native-qualification,
+independent-use, or performance claim.
 
 Timing is `UNAVAILABLE` when either export has no recorded timing, including a
 failure export, and is never represented as zero. It is `INCOMPARABLE` when

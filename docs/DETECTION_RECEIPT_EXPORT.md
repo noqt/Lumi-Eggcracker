@@ -17,6 +17,29 @@ PowerShell (single line):
 python scripts/export_detection_receipt.py --input .\detection-receipt.json --expected-event-id 0123456789abcdef01234567 --output .\detection-receipt-export.json
 ```
 
+The command and three-argument Python API emit the established
+`lumi-eggcracker.redacted-detection-receipt-export.v1` contract by default,
+byte-for-byte. To opt into the annotated v2 contract, pass the CLI switch or
+the keyword-only Python option:
+
+```sh
+python scripts/export_detection_receipt.py \
+  --input ./detection-receipt.json \
+  --expected-event-id 0123456789abcdef01234567 \
+  --output ./detection-receipt-export-v2.json \
+  --export-version 2
+```
+
+V2 adds `receipt.classification_basis` with the fixed value
+`COMPLETE_QUALIFIED_LOCAL_PROFILE_MATCH_NOT_AI_IDENTITY`. This is a recorded
+interpretation of the accepted local-profile classification path, not
+independent proof of profile completeness, AI identity, inference,
+authentication, safety, or permission to act. A no-match is absence of this
+classification, not a safe result. The raw receipt, trigger enum, source schema
+identifiers, validation, redaction, and no-overwrite behavior are unchanged.
+Existing v1 consumers intentionally reject the opted-in v2 contract; use a
+consumer that recognizes both versions when comparing exports.
+
 ## Copyable synthetic redaction example
 
 From the repository root, the following command exports the committed
@@ -35,6 +58,10 @@ PowerShell (single line):
 ```powershell
 python scripts/export_detection_receipt.py --input .\examples\detection-receipt.synthetic.json --expected-event-id 0123456789abcdef01234567 --output .\detection-receipt.synthetic-export.json
 ```
+
+The same synthetic fixture can be exported with the opt-in v2 annotation by
+adding `--export-version 2` and using a new output filename. It remains
+synthetic-only and does not become evidence of a real profile match.
 
 The fixture filename and its top-level banner identify it as synthetic-only.
 Its `CONTAINMENT_FAILED` recorded result, timestamp, event/source identities,
