@@ -13,7 +13,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts.export_detection_receipt import (
+    CLASSIFICATION_BASIS,
     EXPORT_SCHEMA,
+    EXPORT_SCHEMA_V2,
     MAX_INPUT_BYTES,
     MAX_JSON_DEPTH,
     MAX_OUTPUT_BYTES,
@@ -25,9 +27,20 @@ from scripts.export_detection_receipt import (
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "export_detection_receipt.py"
 EVENT_ID = "a" * 24
+PROFILE_TRIGGERS = {
+    "content.gguf-llama": "UNAPPROVED_AI_MATCH",
+    "content.gguf-ollama": "UNAPPROVED_OLLAMA_GGUF",
+    "content.safetensors-pytorch": "UNAPPROVED_SAFETENSORS_PYTORCH",
+    "content.safetensors-vllm": "UNAPPROVED_VLLM_SAFETENSORS",
+}
 
 
-def receipt(*, result: str = "TERMINATED") -> dict[str, object]:
+def receipt(
+    *,
+    result: str = "TERMINATED",
+    profile: str = "content.gguf-llama",
+) -> dict[str, object]:
+    trigger_kind = PROFILE_TRIGGERS[profile]
     value: dict[str, object] = {
         "schema_version": "lumi-eggcracker.detection-receipt.v2",
         "event_id": EVENT_ID,
@@ -36,12 +49,12 @@ def receipt(*, result: str = "TERMINATED") -> dict[str, object]:
         "catalogue_sha256": "d" * 64,
         "receipt_written_utc": "2026-10-01T10:30:00.123456Z",
         "detector": {
-            "profile": "content.gguf-llama",
+            "profile": profile,
             "detection_path": "CONTENT",
             "catalogue_schema": "lumi-eggcracker.detectors.v3",
             "model": {"path": "CANARY_MODEL_PATH"},
         },
-        "trigger": {"kind": "UNAPPROVED_AI_MATCH", "observed_monotonic_ns": 100},
+        "trigger": {"kind": trigger_kind, "observed_monotonic_ns": 100},
         "result": result,
         "observed": {"pid": 414141, "uid": 31337, "argv": ["CANARY_ARGUMENT"]},
         "executable": {"basename": "CANARY_EXECUTABLE_PATH"},
@@ -62,10 +75,10 @@ def receipt(*, result: str = "TERMINATED") -> dict[str, object]:
             "surviving_pids": [],
             "trigger_to_empty_ms": 0.00003,
         }
-        value["trigger"] = {"kind": "UNAPPROVED_AI_MATCH", "observed_monotonic_ns": 100}
+        value["trigger"] = {"kind": trigger_kind, "observed_monotonic_ns": 100}
     else:
         value["error"] = "CANARY_RAW_ERROR"
-        value["trigger"] = {"kind": "UNAPPROVED_AI_MATCH"}
+        value["trigger"] = {"kind": trigger_kind}
     return value
 
 
@@ -144,6 +157,43 @@ class DetectionReceiptExportTests(unittest.TestCase):
             self.assertNotIn("recorded_empty_evidence", projected)
             self.assertNotIn("error", projected)
             self.assertNotIn("CANARY_RAW_ERROR", output.read_text(encoding="utf-8"))
+
+    def test_default_api_and_explicit_v1_bytes_are_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "receipt.json"
+            default_output = root / "default.json"
+            explicit_output = root / "explicit-v1.json"
+            write_json(source, receipt())
+
+            export_receipt(source, EVENT_ID, default_output)
+            export_receipt(source, EVENT_ID, explicit_output, export_version=1)
+
+            self.assertEqual(default_output.read_bytes(), explicit_output.read_bytes())
+            self.assertEqual(EXPORT_SCHEMA, json.loads(default_output.read_text())["export_schema"])
+
+    def test_v2_basis_covers_all_profiles_and_result_branches(self) -> None:
+        for profile, trigger_kind in PROFILE_TRIGGERS.items():
+            for result in ("TERMINATED", "CONTAINMENT_FAILED"):
+                with self.subTest(profile=profile, result=result), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    source = root / "receipt.json"
+                    output = root / "export-v2.json"
+                    write_json(source, receipt(result=result, profile=profile))
+
+                    export_receipt(source, EVENT_ID, output, export_version=2)
+
+                    document = json.loads(output.read_text(encoding="utf-8"))
+                    projected = document["receipt"]
+                    self.assertEqual(EXPORT_SCHEMA_V2, document["export_schema"])
+                    self.assertEqual(CLASSIFICATION_BASIS, projected["classification_basis"])
+                    self.assertEqual(profile, projected["detector"]["profile"])
+                    self.assertEqual(trigger_kind, projected["trigger"]["kind"])
+                    self.assertEqual(result, projected["recorded_result"])
+                    if result == "TERMINATED":
+                        self.assertIn("recorded_empty_evidence", projected)
+                    else:
+                        self.assertNotIn("recorded_empty_evidence", projected)
 
     def test_rejects_unsupported_or_mismatched_receipt_identities(self) -> None:
         invalid_cases = (
@@ -391,6 +441,40 @@ class DetectionReceiptExportTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("detection receipt export complete\n", result.stdout)
             self.assertEqual("TERMINATED", json.loads(output.read_text())["receipt"]["recorded_result"])
+
+    def test_cli_subprocess_exports_opt_in_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "receipt.json"
+            output = root / "export-v2.json"
+            write_json(source, receipt(result="CONTAINMENT_FAILED", profile="content.gguf-ollama"))
+            environment = os.environ.copy()
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            environment["PYTHONPATH"] = str(ROOT / "src")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--input",
+                    str(source),
+                    "--expected-event-id",
+                    EVENT_ID,
+                    "--output",
+                    str(output),
+                    "--export-version",
+                    "2",
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            exported = json.loads(output.read_text())
+            self.assertEqual(EXPORT_SCHEMA_V2, exported["export_schema"])
+            self.assertEqual(CLASSIFICATION_BASIS, exported["receipt"]["classification_basis"])
+            self.assertEqual("CONTAINMENT_FAILED", exported["receipt"]["recorded_result"])
 
     def test_cli_diagnostics_do_not_echo_ids_or_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any
 
 EXPORT_SCHEMA = "lumi-eggcracker.redacted-detection-receipt-export.v1"
+EXPORT_SCHEMA_V2 = "lumi-eggcracker.redacted-detection-receipt-export.v2"
+CLASSIFICATION_BASIS = "COMPLETE_QUALIFIED_LOCAL_PROFILE_MATCH_NOT_AI_IDENTITY"
 COMPARISON_SCHEMA = "lumi-eggcracker.redacted-detection-receipt-comparison.v1"
 RECEIPT_SCHEMA = "lumi-eggcracker.detection-receipt.v2"
 DETECTOR_SCHEMA = "lumi-eggcracker.detectors.v3"
@@ -65,6 +67,7 @@ _RECEIPT_FIELDS = {
     "trigger",
     "version",
 }
+_RECEIPT_FIELDS_V2 = _RECEIPT_FIELDS | {"classification_basis"}
 _DETECTOR_FIELDS = {"catalogue_schema", "detection_path", "profile"}
 _TRIGGER_FIELDS = {"kind"}
 _EVIDENCE_FIELDS = {
@@ -321,7 +324,8 @@ def _validate_timestamp(value: Any) -> str:
 
 def _validate_export(raw: bytes) -> dict[str, Any]:
     document = _expect_keys(_decode_export(raw), _TOP_LEVEL_FIELDS)
-    if document["export_schema"] != EXPORT_SCHEMA:
+    export_schema = document["export_schema"]
+    if export_schema not in (EXPORT_SCHEMA, EXPORT_SCHEMA_V2):
         _fail()
     if document["authentication"] != "NOT_AUTHENTICATED":
         _fail()
@@ -330,12 +334,20 @@ def _validate_export(raw: bytes) -> dict[str, Any]:
     _required_text(document, "source_sha256", _SHA256, maximum=64)
 
     receipt_value = document["receipt"]
+    receipt_fields = (
+        _RECEIPT_FIELDS_V2 if export_schema == EXPORT_SCHEMA_V2 else _RECEIPT_FIELDS
+    )
     if not isinstance(receipt_value, dict) or not (
-        set(receipt_value) == _RECEIPT_FIELDS
-        or set(receipt_value) == _RECEIPT_FIELDS | {"recorded_empty_evidence"}
+        set(receipt_value) == receipt_fields
+        or set(receipt_value) == receipt_fields | {"recorded_empty_evidence"}
     ):
         _fail()
     receipt = receipt_value
+    if (
+        export_schema == EXPORT_SCHEMA_V2
+        and receipt["classification_basis"] != CLASSIFICATION_BASIS
+    ):
+        _fail()
     if receipt["schema_version"] != RECEIPT_SCHEMA:
         _fail()
     _required_text(receipt, "event_id", _EVENT_ID, maximum=24)
@@ -363,7 +375,7 @@ def _validate_export(raw: bytes) -> dict[str, Any]:
     if result == "TERMINATED":
         # The exporter always emits all timing/empty-state fields for a
         # terminated result.  Missing fields are invalid input, not zeroes.
-        if set(receipt) != _RECEIPT_FIELDS | {"recorded_empty_evidence"}:
+        if set(receipt) != receipt_fields | {"recorded_empty_evidence"}:
             _fail()
         evidence = _expect_keys(receipt["recorded_empty_evidence"], _EVIDENCE_FIELDS)
         if evidence["primitive"] != _CONTAINMENT_PRIMITIVE:
@@ -396,7 +408,7 @@ def _validate_export(raw: bytes) -> dict[str, Any]:
         }
     else:
         # Failure exports intentionally contain neither timing nor raw error.
-        if set(receipt) != _RECEIPT_FIELDS:
+        if set(receipt) != receipt_fields:
             _fail()
         timing = None
 

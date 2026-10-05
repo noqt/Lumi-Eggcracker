@@ -17,6 +17,8 @@ from typing import Any
 
 RECEIPT_SCHEMA = "lumi-eggcracker.detection-receipt.v2"
 EXPORT_SCHEMA = "lumi-eggcracker.redacted-detection-receipt-export.v1"
+EXPORT_SCHEMA_V2 = "lumi-eggcracker.redacted-detection-receipt-export.v2"
+CLASSIFICATION_BASIS = "COMPLETE_QUALIFIED_LOCAL_PROFILE_MATCH_NOT_AI_IDENTITY"
 DETECTOR_SCHEMA = "lumi-eggcracker.detectors.v3"
 MAX_INPUT_BYTES = 1_048_576
 MAX_OUTPUT_BYTES = 8_192
@@ -469,15 +471,21 @@ def export_receipt(
     input_path: str | os.PathLike[str],
     expected_event_id: str,
     output_path: str | os.PathLike[str],
+    *,
+    export_version: int = 1,
 ) -> None:
     """Export one validated event; the output contains no unallowlisted fields."""
+    if type(export_version) is not int or export_version not in (1, 2):
+        _fail()
     if not isinstance(expected_event_id, str) or not _EVENT_ID.fullmatch(expected_event_id):
         _fail()
     raw = _read_source(input_path)
     receipt = _decode_receipt(raw)
     projected = _project_receipt(receipt, expected_event_id)
+    if export_version == 2:
+        projected["classification_basis"] = CLASSIFICATION_BASIS
     document = {
-        "export_schema": EXPORT_SCHEMA,
+        "export_schema": EXPORT_SCHEMA_V2 if export_version == 2 else EXPORT_SCHEMA,
         "source_sha256": hashlib.sha256(raw).hexdigest(),
         "authentication": "NOT_AUTHENTICATED",
         "live_verification": "NOT_PERFORMED",
@@ -505,9 +513,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", required=True, help="path to a detection receipt JSON file")
     parser.add_argument("--expected-event-id", required=True, help="24 lowercase hex characters")
     parser.add_argument("--output", required=True, help="new output JSON path")
+    parser.add_argument(
+        "--export-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        metavar="VERSION",
+        help="redacted export contract version (default: 1)",
+    )
     args = parser.parse_args(argv)
     try:
-        export_receipt(args.input, args.expected_event_id, args.output)
+        export_receipt(
+            args.input,
+            args.expected_event_id,
+            args.output,
+            export_version=args.export_version,
+        )
     except OutputAlreadyExistsError:
         print(
             "export failed: OUTPUT_ALREADY_EXISTS; choose a new output filename",
