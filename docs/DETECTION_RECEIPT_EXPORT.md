@@ -121,3 +121,55 @@ The tool does not establish live safety, native qualification, or independent
 use. Filesystem checks reduce accidental link and overwrite hazards; an actor
 with the same permissions may still race parent path components between checks
 and filesystem operations.
+
+## Comparing two redacted exports
+
+The offline comparator validates two existing exports and reports only the
+same bounded recorded-context comparison to stdout:
+
+```sh
+python src/lumi_eggcracker/brokered/compare_detection_receipts.py \
+  --before ./before-export.json \
+  --after ./after-export.json
+```
+
+The optional `--output FILE` writes those exact UTF-8 JSON bytes, including the
+final newline, to a new comparison file instead of writing JSON to stdout:
+
+```sh
+python src/lumi_eggcracker/brokered/compare_detection_receipts.py \
+  --before ./before-export.json \
+  --after ./after-export.json \
+  --output ./comparison.json
+```
+
+On successful file output, stdout remains empty and the comparator prints only
+`comparison written` to stderr. With no `--output`, stdout behavior remains the
+original comparison JSON. Both exports are fully validated and the existing
+comparison schema and recorded-only claims are unchanged before any output
+file is created. Invalid input therefore leaves no report or comparator temp
+file.
+
+The destination must be new and distinct from both inputs. Existing files,
+same-path spellings, platform case aliases, and file-identity aliases are
+refused without replacing either input or an existing report. Its parent must
+already exist, and every parent component and the destination must be an
+ordinary filesystem object rather than a symbolic link or Windows reparse
+point. The comparator creates a random exclusive temporary file beside the
+destination, writes and syncs the bounded payload, and publishes with a
+no-clobber hard link before removing its own temporary name. The destination
+filesystem must support hard links. New-file permissions follow the platform's
+normal umask or ACL behavior; the comparator does not change them.
+
+The output-path, identity, and no-clobber checks reduce accidental overwrite
+and link hazards but are not a race-free filesystem sandbox. Another process
+with the same permissions can race parent components between checks and
+operations. A raced destination is not replaced or removed; cleanup only
+unlinks a temporary or partial destination whose file identity still matches
+the comparator's own file. Filesystems without the required regular-file,
+identity, exclusive-create, sync, or hard-link behavior may reject output.
+The file contents are synced before publication, but no directory-fsync or
+power-loss durability guarantee is added.
+This comparison remains a view of recorded exports, not authentication,
+independent observation, live verification, or a change to what receipt fields
+or claims are accepted.

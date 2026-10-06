@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import secrets
 import stat
 import sys
 from pathlib import Path
@@ -85,6 +86,10 @@ _EVIDENCE_FIELDS = {
 
 class ComparisonError(ValueError):
     """A deliberately non-specific validation or filesystem failure."""
+
+
+class OutputAlreadyExistsError(ComparisonError):
+    """An existing output path must never be replaced."""
 
 
 def _fail() -> None:
@@ -222,6 +227,38 @@ def _check_directory_chain(path: Path) -> None:
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
+
+
+def _ensure_output_distinct(
+    output_value: str | os.PathLike[str],
+    input_values: tuple[str | os.PathLike[str], str | os.PathLike[str]],
+) -> Path:
+    output = _path_without_parent_links(output_value)
+    _check_directory_chain(output.parent)
+    output_key = os.path.normcase(os.path.abspath(os.fspath(output)))
+    for input_value in input_values:
+        source = _path_without_parent_links(input_value)
+        _check_directory_chain(source.parent)
+        source_key = os.path.normcase(os.path.abspath(os.fspath(source)))
+        if source_key == output_key:
+            raise OutputAlreadyExistsError()
+        try:
+            source_info = os.lstat(source)
+        except (OSError, ValueError):
+            _fail()
+        if _link_like(source_info) or not stat.S_ISREG(source_info.st_mode):
+            _fail()
+        try:
+            output_info = os.lstat(output)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            _fail()
+        if _link_like(output_info):
+            _fail()
+        if _identity(source_info) == _identity(output_info):
+            raise OutputAlreadyExistsError()
+    return output
 
 
 def _read_source(path_value: str | os.PathLike[str]) -> bytes:
@@ -546,6 +583,103 @@ def _encode_output(value: dict[str, Any]) -> bytes:
     return encoded
 
 
+def _unlink_if_owned(path: Path, identity: tuple[int, int] | None) -> None:
+    if identity is None:
+        return
+    try:
+        current = os.lstat(path)
+        if (
+            not _link_like(current)
+            and stat.S_ISREG(current.st_mode)
+            and _identity(current) == identity
+        ):
+            os.unlink(path)
+    except OSError:
+        pass
+
+
+def _write_new_output(path_value: str | os.PathLike[str], payload: bytes) -> None:
+    """Publish one bounded output through an exclusive temp and no-clobber link."""
+
+    output = _path_without_parent_links(path_value)
+    _check_directory_chain(output.parent)
+    try:
+        existing = os.lstat(output)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        _fail()
+    else:
+        if not _link_like(existing) and stat.S_ISREG(existing.st_mode):
+            raise OutputAlreadyExistsError()
+        _fail()
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    temporary: Path | None = None
+    identity: tuple[int, int] | None = None
+    descriptor: int | None = None
+    published = False
+    complete = False
+    try:
+        for _ in range(8):
+            candidate = output.parent / f".lumi-eggcracker-comparison-{secrets.token_hex(12)}.tmp"
+            try:
+                descriptor = os.open(candidate, flags, 0o666)
+                temporary = candidate
+                break
+            except FileExistsError:
+                continue
+        if descriptor is None or temporary is None:
+            _fail()
+
+        created = os.fstat(descriptor)
+        identity = _identity(created)
+        if _link_like(created) or not stat.S_ISREG(created.st_mode):
+            _fail()
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                _fail()
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+
+        current_temporary = os.lstat(temporary)
+        if (
+            _link_like(current_temporary)
+            or not stat.S_ISREG(current_temporary.st_mode)
+            or _identity(current_temporary) != identity
+        ):
+            _fail()
+        os.link(temporary, output, follow_symlinks=False)
+        published = True
+        current_output = os.lstat(output)
+        if (
+            _link_like(current_output)
+            or not stat.S_ISREG(current_output.st_mode)
+            or _identity(current_output) != identity
+        ):
+            _fail()
+        complete = True
+    except ComparisonError:
+        raise
+    except Exception:  # noqa: BLE001 - keep OS and path details out of diagnostics.
+        _fail()
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if published and not complete:
+            _unlink_if_owned(output, identity)
+        if temporary is not None:
+            _unlink_if_owned(temporary, identity)
+
+
 class _QuietArgumentParser(argparse.ArgumentParser):
     def error(self, _message: str) -> None:
         self.print_usage(sys.stderr)
@@ -559,13 +693,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--before", required=True, metavar="FILE", help="first export file")
     parser.add_argument("--after", required=True, metavar="FILE", help="second export file")
+    parser.add_argument("--output", metavar="FILE", help="new comparison JSON file")
     args = parser.parse_args(argv)
     try:
         output = _encode_output(compare_receipts(args.before, args.after))
-        sys.stdout.write(output.decode("utf-8"))
+        if args.output is None:
+            sys.stdout.write(output.decode("utf-8"))
+            return 0
+        _ensure_output_distinct(args.output, (args.before, args.after))
+        _write_new_output(args.output, output)
+    except OutputAlreadyExistsError:
+        print(
+            "comparison failed: OUTPUT_ALREADY_EXISTS; choose a new output filename",
+            file=sys.stderr,
+        )
+        return 1
     except Exception:  # noqa: BLE001 - never echo untrusted input or OS error text.
         print("comparison failed: invalid redacted export or filesystem path", file=sys.stderr)
         return 1
+    print("comparison written", file=sys.stderr)
     return 0
 
 
