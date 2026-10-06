@@ -7,10 +7,13 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 _MODULE_PATH = (
     Path(__file__).parents[1]
@@ -98,14 +101,27 @@ class DetectionReceiptComparisonTests(unittest.TestCase):
         return path
 
     @staticmethod
-    def _run_cli(before: Path, after: Path) -> tuple[int, str, str]:
+    def _run_cli(
+        before: str | Path,
+        after: str | Path,
+        output: str | Path | None = None,
+    ) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
+        argv = ["--before", str(before), "--after", str(after)]
+        if output is not None:
+            argv.extend(("--output", str(output)))
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            status = comparison.main(
-                ["--before", str(before), "--after", str(after)]
-            )
+            status = comparison.main(argv)
         return status, stdout.getvalue(), stderr.getvalue()
+
+    def _temporary_names(self, directory: Path | None = None) -> set[str]:
+        root = self.root if directory is None else directory
+        return {path.name for path in root.glob(".lumi-eggcracker-comparison-*.tmp")}
+
+    @staticmethod
+    def _input_bytes(before: Path, after: Path) -> tuple[bytes, bytes]:
+        return before.read_bytes(), after.read_bytes()
 
     def test_v2_accepts_all_profiles_and_result_branches(self) -> None:
         for profile in comparison._PROFILE_TRIGGER:
@@ -260,18 +276,327 @@ class DetectionReceiptComparisonTests(unittest.TestCase):
     def test_cli_normal_files_is_stdout_only_and_uses_fixed_safe_fields(self) -> None:
         before = self._write_document("before.json")
         after = self._write_document("after.json", event_id="4" * 24)
+        input_bytes = self._input_bytes(before, after)
         before_names = {entry.name for entry in self.root.iterdir()}
+        expected = comparison._encode_output(
+            comparison.compare_receipts(before, after)
+        ).decode("utf-8")
 
         status, stdout, stderr = self._run_cli(before, after)
 
         self.assertEqual(0, status)
         self.assertEqual("", stderr)
+        self.assertEqual(expected, stdout)
         parsed = json.loads(stdout)
         self.assertEqual(comparison.COMPARISON_SCHEMA, parsed["comparison_schema"])
         self.assertEqual(before_names, {entry.name for entry in self.root.iterdir()})
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
         self.assertNotIn(str(before), stdout)
         self.assertNotIn(str(after), stdout)
         self.assertLessEqual(len(stdout.encode("utf-8")), comparison.MAX_OUTPUT_BYTES)
+
+    def test_output_mode_publishes_unchanged_comparison_bytes_without_stdout(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="6" * 24)
+        output = self.root / "comparison.json"
+        input_bytes = self._input_bytes(before, after)
+        expected = comparison._encode_output(
+            comparison.compare_receipts(before, after)
+        )
+
+        status, stdout, stderr = self._run_cli(before, after, output)
+
+        self.assertEqual(0, status)
+        self.assertEqual("", stdout)
+        self.assertEqual("comparison written\n", stderr)
+        self.assertEqual(expected, output.read_bytes())
+        self.assertTrue(output.is_file())
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
+        self.assertEqual(set(), self._temporary_names())
+
+    def test_existing_output_is_preserved_without_temporary_files(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="7" * 24)
+        output = self.root / "existing-report.json"
+        output_bytes = b"existing synthetic report\n"
+        output.write_bytes(output_bytes)
+        input_bytes = self._input_bytes(before, after)
+
+        status, stdout, stderr = self._run_cli(before, after, output)
+
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout)
+        self.assertEqual(
+            "comparison failed: OUTPUT_ALREADY_EXISTS; choose a new output filename\n",
+            stderr,
+        )
+        self.assertEqual(output_bytes, output.read_bytes())
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
+        self.assertEqual(set(), self._temporary_names())
+
+    def test_output_aliases_to_either_input_are_refused(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="8" * 24)
+        input_bytes = self._input_bytes(before, after)
+        aliases: list[tuple[str, Path | str]] = [
+            ("exact-before", before),
+            ("exact-after", after),
+        ]
+
+        current_directory = Path.cwd()
+        try:
+            os.chdir(self.root)
+            aliases.extend(
+                (
+                    ("relative-before", before.name),
+                    ("relative-after", after.name),
+                )
+            )
+        finally:
+            os.chdir(current_directory)
+
+        for label, output in aliases:
+            with self.subTest(alias=label):
+                if isinstance(output, str) and output in (before.name, after.name):
+                    old_directory = Path.cwd()
+                    try:
+                        os.chdir(self.root)
+                        status, stdout, stderr = self._run_cli(before, after, output)
+                    finally:
+                        os.chdir(old_directory)
+                else:
+                    status, stdout, stderr = self._run_cli(before, after, output)
+                self.assertEqual(1, status)
+                self.assertEqual("", stdout)
+                self.assertEqual(
+                    "comparison failed: OUTPUT_ALREADY_EXISTS; choose a new output filename\n",
+                    stderr,
+                )
+                self.assertEqual(input_bytes, self._input_bytes(before, after))
+                self.assertEqual(set(), self._temporary_names())
+
+    def test_case_aliases_to_either_input_are_refused_when_available(self) -> None:
+        if os.name != "nt":
+            self.skipTest("case-insensitive path aliases are platform-specific")
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="8" * 24)
+        input_bytes = self._input_bytes(before, after)
+        aliases = [
+            (source, source.with_name(source.name.upper()))
+            for source in (before, after)
+        ]
+        if any(not alias.exists() or not os.path.samefile(source, alias) for source, alias in aliases):
+            self.skipTest("case-variant paths are distinct on this filesystem")
+
+        for source, alias in aliases:
+            with self.subTest(input=source.name):
+                status, stdout, stderr = self._run_cli(before, after, alias)
+                self.assertEqual(1, status)
+                self.assertEqual("", stdout)
+                self.assertEqual(
+                    "comparison failed: OUTPUT_ALREADY_EXISTS; choose a new output filename\n",
+                    stderr,
+                )
+                self.assertEqual(input_bytes, self._input_bytes(before, after))
+                self.assertEqual(set(), self._temporary_names())
+
+    def test_hardlink_identity_aliases_to_either_input_are_refused(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="8" * 24)
+        input_bytes = self._input_bytes(before, after)
+        aliases: list[tuple[Path, Path]] = []
+        try:
+            for source in (before, after):
+                alias = self.root / f"{source.stem}-hardlink.json"
+                os.link(source, alias)
+                if not os.path.samefile(source, alias):
+                    self.fail("hard-link fixture did not identify the same file")
+                aliases.append((source, alias))
+        except (OSError, NotImplementedError):
+            self.skipTest("hard-link creation is unavailable on this filesystem")
+
+        for source, alias in aliases:
+            with self.subTest(input=source.name):
+                status, stdout, stderr = self._run_cli(before, after, alias)
+                self.assertEqual(1, status)
+                self.assertEqual("", stdout)
+                self.assertEqual(
+                    "comparison failed: OUTPUT_ALREADY_EXISTS; choose a new output filename\n",
+                    stderr,
+                )
+                self.assertEqual(input_bytes, self._input_bytes(before, after))
+                self.assertEqual(set(), self._temporary_names())
+
+    def test_invalid_input_leaves_no_output_or_temporary_file(self) -> None:
+        before = self.root / "malformed-before.json"
+        before_bytes = b"{ malformed synthetic input"
+        before.write_bytes(before_bytes)
+        after = self._write_document("valid-after.json")
+        after_bytes = after.read_bytes()
+        output = self.root / "must-not-exist.json"
+
+        status, stdout, stderr = self._run_cli(before, after, output)
+
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout)
+        self.assertEqual(
+            "comparison failed: invalid redacted export or filesystem path\n", stderr
+        )
+        self.assertEqual(before_bytes, before.read_bytes())
+        self.assertEqual(after_bytes, after.read_bytes())
+        self.assertFalse(output.exists())
+        self.assertEqual(set(), self._temporary_names())
+
+    def test_nonexistent_output_parent_is_refused(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="9" * 24)
+        input_bytes = self._input_bytes(before, after)
+        missing_output = self.root / "missing-parent" / "report.json"
+        status, stdout, stderr = self._run_cli(before, after, missing_output)
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout)
+        self.assertEqual(
+            "comparison failed: invalid redacted export or filesystem path\n", stderr
+        )
+        self.assertFalse(missing_output.parent.exists())
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
+        self.assertEqual(set(), self._temporary_names())
+
+    def test_reparse_parent_is_refused_when_symlink_creation_is_available(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="9" * 24)
+        input_bytes = self._input_bytes(before, after)
+        real_parent = self.root / "real-parent"
+        real_parent.mkdir()
+        linked_parent = self.root / "linked-parent"
+        try:
+            os.symlink(real_parent, linked_parent, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("directory symlink/reparse creation is unavailable")
+        link_info = os.lstat(linked_parent)
+        self.assertTrue(comparison._link_like(link_info))
+        linked_output = linked_parent / "report.json"
+        status, stdout, stderr = self._run_cli(before, after, linked_output)
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout)
+        self.assertEqual(
+            "comparison failed: invalid redacted export or filesystem path\n", stderr
+        )
+        self.assertFalse((real_parent / "report.json").exists())
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
+        self.assertEqual(set(), self._temporary_names())
+
+    def test_reparse_attribute_parent_is_refused(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="9" * 24)
+        input_bytes = self._input_bytes(before, after)
+        parent = self.root / "synthetic-reparse-parent"
+        parent.mkdir()
+        output = parent / "report.json"
+        real_lstat = os.lstat
+
+        def report_reparse_point(
+            path: str | os.PathLike[str],
+        ) -> os.stat_result | SimpleNamespace:
+            info = real_lstat(path)
+            if Path(path) == parent:
+                return SimpleNamespace(
+                    st_mode=info.st_mode,
+                    st_file_attributes=0x400,
+                )
+            return info
+
+        with patch.object(comparison.os, "lstat", side_effect=report_reparse_point):
+            status, stdout, stderr = self._run_cli(before, after, output)
+
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout)
+        self.assertEqual(
+            "comparison failed: invalid redacted export or filesystem path\n", stderr
+        )
+        self.assertFalse(output.exists())
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
+        self.assertEqual(set(), self._temporary_names())
+
+    def test_reparse_attribute_destination_is_refused(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="9" * 24)
+        input_bytes = self._input_bytes(before, after)
+        output = self.root / "synthetic-reparse-output.json"
+        real_lstat = os.lstat
+
+        def report_reparse_point(
+            path: str | os.PathLike[str],
+        ) -> os.stat_result | SimpleNamespace:
+            if Path(path) == output:
+                return SimpleNamespace(
+                    st_mode=stat.S_IFREG | 0o600,
+                    st_file_attributes=0x400,
+                )
+            return real_lstat(path)
+
+        with patch.object(comparison.os, "lstat", side_effect=report_reparse_point):
+            status, stdout, stderr = self._run_cli(before, after, output)
+
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout)
+        self.assertEqual(
+            "comparison failed: invalid redacted export or filesystem path\n", stderr
+        )
+        self.assertFalse(output.exists())
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
+        self.assertEqual(set(), self._temporary_names())
+
+    def test_destination_symlink_is_refused_when_available(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="9" * 24)
+        input_bytes = self._input_bytes(before, after)
+        sentinel = self.root / "link-target.json"
+        sentinel_bytes = b"synthetic link target\n"
+        sentinel.write_bytes(sentinel_bytes)
+        linked_output = self.root / "linked-output.json"
+        try:
+            os.symlink(sentinel, linked_output)
+        except (OSError, NotImplementedError):
+            self.skipTest("file symlink/reparse creation is unavailable")
+        status, stdout, stderr = self._run_cli(before, after, linked_output)
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout)
+        self.assertEqual(
+            "comparison failed: invalid redacted export or filesystem path\n", stderr
+        )
+        self.assertEqual(sentinel_bytes, sentinel.read_bytes())
+        self.assertTrue(comparison._link_like(os.lstat(linked_output)))
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
+        self.assertEqual(set(), self._temporary_names())
+
+    def test_raced_destination_is_preserved_and_temporary_file_is_cleaned(self) -> None:
+        before = self._write_document("before.json")
+        after = self._write_document("after.json", event_id="a" * 24)
+        input_bytes = self._input_bytes(before, after)
+        output = self.root / "raced-report.json"
+        raced_bytes = b"synthetic concurrent destination\n"
+        real_link = os.link
+
+        def race_destination(
+            source: str | os.PathLike[str],
+            destination: str | os.PathLike[str],
+            **kwargs: object,
+        ) -> None:
+            Path(destination).write_bytes(raced_bytes)
+            real_link(source, destination, **kwargs)
+
+        with patch.object(comparison.os, "link", side_effect=race_destination):
+            status, stdout, stderr = self._run_cli(before, after, output)
+
+        self.assertEqual(1, status)
+        self.assertEqual("", stdout)
+        self.assertEqual(
+            "comparison failed: invalid redacted export or filesystem path\n", stderr
+        )
+        self.assertEqual(raced_bytes, output.read_bytes())
+        self.assertEqual(input_bytes, self._input_bytes(before, after))
+        self.assertEqual(set(), self._temporary_names())
 
     def test_strict_parser_rejects_malformed_oversized_duplicate_nonfinite_deep_and_extra_fields(self) -> None:
         valid = self._write_document("valid.json")
