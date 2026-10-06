@@ -46,3 +46,10 @@ groups:
           severity: warning
         annotations:
           summary: Supervisor reports unready or unhealthy; not a measured containment failure
+      - alert: EggcrackerIncidentLockdown
+        expr: (eggcracker_incident_lockdown == 1) and on(job, instance) (eggcracker_query_valid == 1) and on(job, instance) (time() - eggcracker_collection_timestamp_seconds <= 180) and on(job, instance) (eggcracker_collection_timestamp_seconds - time() <= 60) and on(job, instance) (up{eggcracker_monitor="true"} == 1)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Eggcracker reports an active local incident lockdown

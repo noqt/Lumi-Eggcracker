@@ -76,7 +76,10 @@ ability to alert on its absence. The rules use per-target `up` inventory, not
 global `absent()`, so one reporting host cannot hide another missing host.
 Exporter-down is a separate alert and suppresses Eggcracker missing/stale/health
 alerts. Missing output on a reachable exporter, stale output and query failure
-are distinct. These rules do not monitor Prometheus's own availability.
+are distinct. A fresh, valid report of active incident lockdown has its own
+two-minute warning; clearing lockdown resolves it. This warning is also gated
+by the target opt-in label, a valid query and collection freshness/clock-skew
+checks. These rules do not monitor Prometheus's own availability.
 
 Rules evaluate every 30 seconds and require two minutes of continuous condition.
 Collection is stale when older than 180 seconds, so stopping a fresh collector
@@ -99,11 +102,14 @@ values, catalogue data, event labels or cumulative detection counts are exported
 | `discovery_healthy` | Exact boolean `discovery.healthy` |
 | `receipt_storage_healthy` | Exact boolean `discovery.receipt_persistence_healthy` |
 | `installation_healthy` | 1 for HEALTHY; 0 for DRIFT, RECOVERY_REQUIRED or NOT_INSTALLED |
+| `incident_lockdown` | Exact boolean `incidents.lockdown` reported by the supervisor |
 
-The four health gauges are absent when the query is invalid. Missing fields,
-unknown installation enums and nonboolean health values are not false health or
-healthy defaults. Freshness checks gate health/query alerts. This privacy contract
-covers Eggcracker-produced metrics, **not the entire node_exporter endpoint**:
+The health and incident-lockdown gauges are absent when the query is invalid.
+Missing fields, unknown installation enums and nonboolean health or lockdown
+values make the query invalid; they are never exported as zero. Freshness checks
+gate health/query/lockdown alerts. The lockdown metric and warning report only
+the supervisor's local incident state; they do not establish containment
+effectiveness. This privacy contract covers Eggcracker-produced metrics, **not the entire node_exporter endpoint**:
 node_exporter's `node_textfile_mtime_seconds` includes a file-path label. Use neutral
 paths, restrict the existing endpoint appropriately and sanitise shared evidence.
 
@@ -115,6 +121,7 @@ a native daemon or containment test. The separate opt-in CI consumer test runs
 exact pinned test-only node_exporter on loopback with default collectors disabled
 and only textfile enabled, then real promtool evaluates these rules. Fixtures
 cover healthy, query loss, stopped/stale collection, recovery, missing output,
-two targets with one absent, exporter-down, clock skew and alert pending delays.
+two targets with one absent, exporter-down, clock skew, active and cleared
+incident lockdown, invalid/missing lockdown data, and alert pending delays.
 No user monitoring account, production endpoint, secret or additional proof run
 is needed. Test-only upstream licences/notices remain with downloaded archives.

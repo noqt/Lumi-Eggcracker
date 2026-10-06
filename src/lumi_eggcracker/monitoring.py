@@ -23,6 +23,7 @@ HELP = {
     "discovery_healthy": "Supervisor-reported discovery health.",
     "receipt_storage_healthy": "Supervisor-reported receipt persistence health.",
     "installation_healthy": "Whether the supervisor reports installation state HEALTHY.",
+    "incident_lockdown": "Whether the supervisor reports an active local incident lockdown.",
 }
 
 
@@ -33,10 +34,13 @@ def selected_health(value: dict) -> dict[str, int]:
         discovery = value["discovery"]["healthy"]
         receipts = value["discovery"]["receipt_persistence_healthy"]
         installation = value["installation"]["state"]
+        lockdown = value["incidents"]["lockdown"]
     except (KeyError, TypeError) as error:
         raise ValueError("unavailable health") from error
     if any(type(item) is not bool for item in (ready, discovery, receipts)):
         raise ValueError("invalid health")
+    if type(lockdown) is not bool:
+        raise ValueError("invalid incident lockdown")
     if installation not in ("HEALTHY", "DRIFT", "RECOVERY_REQUIRED", "NOT_INSTALLED"):
         raise ValueError("unknown installation state")
     return {
@@ -44,6 +48,7 @@ def selected_health(value: dict) -> dict[str, int]:
         "discovery_healthy": int(discovery),
         "receipt_storage_healthy": int(receipts),
         "installation_healthy": int(installation == "HEALTHY"),
+        "incident_lockdown": int(lockdown),
     }
 
 
