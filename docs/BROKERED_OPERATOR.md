@@ -224,11 +224,16 @@ comparator before comparing v2.
 
 Each input must be a normal, regular file no larger than the export ceiling of
 8 KiB. Parent directories must not contain symbolic links or Windows reparse
-points. The comparator does not discover files, read raw receipts, import a
-detector or containment runtime, create an output file, modify either input,
-upload data, or contact a service. It rejects malformed, duplicate-key,
-nonfinite, oversized, too-deep, and extra-field JSON with a fixed diagnostic
-that does not echo a supplied path, field, value, or operating-system error.
+points. By default, the comparator writes the bounded comparison to stdout. With
+explicit `--output FILE`, it can instead create one new comparison file,
+distinct from both inputs, on a filesystem supporting hard links; it never
+replaces an existing destination. See the [detailed export and comparison
+guide](./DETECTION_RECEIPT_EXPORT.md#comparing-two-redacted-exports). The
+comparator does not discover files, read raw receipts, import a detector or
+containment runtime, modify either input, upload data, or contact a service. It
+rejects malformed, duplicate-key, nonfinite, oversized, too-deep, and
+extra-field JSON with a fixed diagnostic that does not echo a supplied path,
+field, value, or operating-system error.
 
 The stdout allowlist reports the recorded source commit, version, catalogue
 hash, detector profile, and result for each side, plus fixed change labels. A
