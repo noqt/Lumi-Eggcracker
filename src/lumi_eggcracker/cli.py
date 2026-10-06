@@ -14,6 +14,7 @@ from .gate import main as gate_main
 from .jsonio import JsonInputError, write_new_json
 from .supervisor import main as supervisor_main
 from .support_bundle import main as support_bundle_main
+from .support_bundle import validate_main as validate_support_bundle_main
 from .watchdog import main as watchdog_main
 
 
@@ -105,6 +106,11 @@ def _parser() -> argparse.ArgumentParser:
         "support-bundle", help="write a local redacted health and receipt bundle"
     )
     support.add_argument("--output", required=True, type=Path)
+    validate_support = commands.add_parser(
+        "validate-support-bundle",
+        help="offline structural review of a support bundle",
+    )
+    validate_support.add_argument("FILE", type=Path)
     commands.add_parser("version", help="print the public version")
     return parser
 
@@ -115,6 +121,11 @@ def _command(argv: list[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     values = sys.argv[1:] if argv is None else argv
+    if values[:1] == ["validate-support-bundle"]:
+        if values[1:] == ["--help"]:
+            _parser().parse_args(values)
+            return 0
+        return validate_support_bundle_main(values[1:])
     if values[:1] == ["_supervisor"]:
         return supervisor_main(values[1:])
     if values[:1] == ["_gate"]:
