@@ -25,7 +25,40 @@ ANNOTATIONS = {
     "EggcrackerClockSkew": "Eggcracker collection clock is ahead; freshness is unknown",
     "EggcrackerQueryFailed": "Doctor query is unavailable; reported health is unknown",
     "EggcrackerReportedUnhealthy": "Supervisor reports unready or unhealthy; not a measured containment failure",
+    "EggcrackerIncidentLockdown": "Eggcracker reports an active local incident lockdown",
 }
+
+
+class MonitoringRuleContractTests(unittest.TestCase):
+    def test_incident_lockdown_warning_has_fresh_valid_opt_in_gates(self):
+        import re
+
+        source = RULES.read_text(encoding="utf-8")
+        self.assertIn("alert: EggcrackerExporterDown", source)
+        self.assertIn("alert: EggcrackerMetricsMissing", source)
+        self.assertIn("alert: EggcrackerCollectionStale", source)
+        self.assertIn("alert: EggcrackerClockSkew", source)
+        self.assertIn("alert: EggcrackerQueryFailed", source)
+        self.assertIn("alert: EggcrackerReportedUnhealthy", source)
+        match = re.search(
+            r"(?ms)^      - alert: EggcrackerIncidentLockdown\n(?P<body>.*?)(?=^      - alert: |\Z)",
+            source,
+        )
+        self.assertIsNotNone(match)
+        body = match.group("body")
+        self.assertIn("for: 2m", body)
+        self.assertIn("severity: warning", body)
+        self.assertIn("summary: Eggcracker reports an active local incident lockdown", body)
+        expression = next(line.strip()[6:] for line in body.splitlines() if line.strip().startswith("expr: "))
+        for gate in (
+            "eggcracker_incident_lockdown == 1",
+            "on(job, instance) (eggcracker_query_valid == 1)",
+            "on(job, instance) (time() - eggcracker_collection_timestamp_seconds <= 180)",
+            "on(job, instance) (eggcracker_collection_timestamp_seconds - time() <= 60)",
+            'on(job, instance) (up{eggcracker_monitor="true"} == 1)',
+        ):
+            with self.subTest(gate=gate):
+                self.assertIn(gate, expression)
 
 
 @unittest.skipUnless(os.environ.get("EGGCRACKER_REAL_CONSUMERS") == "1", "explicit accepted real-consumer CI only")
@@ -69,6 +102,10 @@ class PrometheusConsumerTests(unittest.TestCase):
                     self.assertIn(f"eggcracker_query_valid {int(valid)}\n", scrape)
                     self.assertIn("eggcracker_collection_timestamp_seconds 60\n", scrape)
                     self.assertIn("node_textfile_scrape_error 0\n", scrape)
+                    if valid:
+                        self.assertIn("eggcracker_incident_lockdown 0\n", scrape)
+                    else:
+                        self.assertNotIn("eggcracker_incident_lockdown", scrape)
                     for exposition in (metrics.read_text(), scrape):
                         checked = subprocess.run([promtool, "check", "metrics"], input=exposition, capture_output=True, text=True, timeout=30, check=False)
                         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
@@ -88,8 +125,8 @@ class PrometheusConsumerTests(unittest.TestCase):
                     process.wait(timeout=5)
 
     def _evaluate_rules(self, promtool: str, root: Path):
-        def series(name, values, instance="one"):
-            return {"series": f'{name}{{job="node",instance="{instance}",eggcracker_monitor="true"}}', "values": values}
+        def series(name, values, instance="one", monitor="true"):
+            return {"series": f'{name}{{job="node",instance="{instance}",eggcracker_monitor="{monitor}"}}', "values": values}
 
         def expected(alert, instance="one"):
             return {"exp_labels": {"job": "node", "instance": instance, "eggcracker_monitor": "true", "severity": "warning"}, "exp_annotations": {"summary": ANNOTATIONS[alert]}}
@@ -125,6 +162,94 @@ class PrometheusConsumerTests(unittest.TestCase):
                 tests.append({"eval_time": "2m", "alertname": "EggcrackerQueryFailed", "exp_alerts": [expected("EggcrackerQueryFailed")]})
             cases.append({"name": name, "interval": "1m", "input_series": inputs, "alert_rule_test": tests})
         cases.append({"name": "two targets one missing", "interval": "1m", "input_series": [series("up", "1+0x8"), series("up", "1+0x8", "two"), series("eggcracker_collection_timestamp_seconds", "0+60x8")], "alert_rule_test": [{"eval_time": "3m", "alertname": "EggcrackerMetricsMissing", "exp_alerts": [expected("EggcrackerMetricsMissing", "two")]}]})
+        cases.extend([
+            {
+                "name": "active incident lockdown",
+                "interval": "1m",
+                "input_series": [
+                    series("up", "1+0x8"),
+                    series("eggcracker_collection_timestamp_seconds", "0+60x8"),
+                    series("eggcracker_query_valid", "1+0x8"),
+                    series("eggcracker_incident_lockdown", "1+0x8"),
+                ],
+                "alert_rule_test": [
+                    {"eval_time": "1m30s", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": []},
+                    {"eval_time": "2m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": [expected("EggcrackerIncidentLockdown")]},
+                ],
+            },
+            {
+                "name": "lockdown cleared",
+                "interval": "1m",
+                "input_series": [
+                    series("up", "1+0x8"),
+                    series("eggcracker_collection_timestamp_seconds", "0+60x8"),
+                    series("eggcracker_query_valid", "1+0x8"),
+                    series("eggcracker_incident_lockdown", "1+0x3 0+0x5"),
+                ],
+                "alert_rule_test": [
+                    {"eval_time": "2m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": [expected("EggcrackerIncidentLockdown")]},
+                    {"eval_time": "3m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": [expected("EggcrackerIncidentLockdown")]},
+                    {"eval_time": "4m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": []},
+                ],
+            },
+            {
+                "name": "invalid query suppresses lockdown",
+                "interval": "1m",
+                "input_series": [
+                    series("up", "1+0x8"),
+                    series("eggcracker_collection_timestamp_seconds", "0+60x8"),
+                    series("eggcracker_query_valid", "0+0x8"),
+                    series("eggcracker_incident_lockdown", "1+0x8"),
+                ],
+                "alert_rule_test": [
+                    {"eval_time": "2m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": []},
+                    {"eval_time": "2m", "alertname": "EggcrackerQueryFailed", "exp_alerts": [expected("EggcrackerQueryFailed")]},
+                ],
+            },
+            {
+                "name": "missing lockdown metric",
+                "interval": "1m",
+                "input_series": [
+                    series("up", "1+0x8"),
+                    series("eggcracker_collection_timestamp_seconds", "0+60x8"),
+                    series("eggcracker_query_valid", "1+0x8"),
+                ],
+                "alert_rule_test": [{"eval_time": "3m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": []}],
+            },
+            {
+                "name": "stale collection suppresses lockdown",
+                "interval": "1m",
+                "input_series": [
+                    series("up", "1+0x8"),
+                    series("eggcracker_collection_timestamp_seconds", "0+0x8"),
+                    series("eggcracker_query_valid", "1+0x8"),
+                    series("eggcracker_incident_lockdown", "1+0x8"),
+                ],
+                "alert_rule_test": [{"eval_time": "6m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": []}],
+            },
+            {
+                "name": "future clock suppresses lockdown",
+                "interval": "1m",
+                "input_series": [
+                    series("up", "1+0x8"),
+                    series("eggcracker_collection_timestamp_seconds", "600+0x8"),
+                    series("eggcracker_query_valid", "1+0x8"),
+                    series("eggcracker_incident_lockdown", "1+0x8"),
+                ],
+                "alert_rule_test": [{"eval_time": "3m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": []}],
+            },
+            {
+                "name": "monitoring opt in required",
+                "interval": "1m",
+                "input_series": [
+                    series("up", "1+0x8", monitor="false"),
+                    series("eggcracker_collection_timestamp_seconds", "0+60x8", monitor="false"),
+                    series("eggcracker_query_valid", "1+0x8", monitor="false"),
+                    series("eggcracker_incident_lockdown", "1+0x8", monitor="false"),
+                ],
+                "alert_rule_test": [{"eval_time": "3m", "alertname": "EggcrackerIncidentLockdown", "exp_alerts": []}],
+            },
+        ])
         fixture = root / "rule-tests.json"
         fixture.write_text(json.dumps({"rule_files": [str(RULES)], "evaluation_interval": "30s", "tests": cases}), encoding="utf-8")
         for arguments in (["check", "rules", str(RULES)], ["test", "rules", str(fixture)]):

@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HEALTHY = {
     "autonomous_discovery": True,
     "discovery": {"healthy": True, "receipt_persistence_healthy": True},
+    "incidents": {"healthy": True, "count": 0, "active": 0, "lockdown": False},
     "installation": {"state": "HEALTHY"},
 }
 STRICT_BAD = [
@@ -227,13 +228,52 @@ class MetricTests(unittest.TestCase):
         rendered = monitoring.render_metrics(monitoring.selected_health(value), 42)
         self.assertNotIn("secret", rendered)
         self.assertNotIn("123", rendered)
-        self.assertEqual(len([line for line in rendered.splitlines() if not line.startswith("#")]), 6)
-        for broken in ({}, dict(HEALTHY, autonomous_discovery=1), dict(HEALTHY, autonomous_discovery=float("nan")), dict(HEALTHY, autonomous_discovery="true"), dict(HEALTHY, installation={"state": "NEW"}), dict(HEALTHY, discovery=None)):
+        self.assertEqual(len([line for line in rendered.splitlines() if not line.startswith("#")]), 7)
+        for broken in (
+            {},
+            dict(HEALTHY, autonomous_discovery=1),
+            dict(HEALTHY, autonomous_discovery=float("nan")),
+            dict(HEALTHY, autonomous_discovery="true"),
+            dict(HEALTHY, installation={"state": "NEW"}),
+            dict(HEALTHY, discovery=None),
+            dict(HEALTHY, incidents=None),
+            dict(HEALTHY, incidents={}),
+            dict(HEALTHY, incidents={"lockdown": 0}),
+            dict(HEALTHY, incidents={"lockdown": "false"}),
+        ):
             with self.subTest(broken=broken), self.assertRaises(ValueError):
                 monitoring.selected_health(broken)
         invalid = monitoring.render_metrics(None, 42)
         self.assertNotIn("eggcracker_reported_ready", invalid)
+        self.assertNotIn("eggcracker_incident_lockdown", invalid)
         self.assertIn("eggcracker_query_valid 0", invalid)
+
+    def test_incident_lockdown_is_strict_boolean_and_fixed_cardinality(self):
+        for state, expected in ((False, 0), (True, 1)):
+            value = dict(HEALTHY, incidents={"healthy": True, "count": expected, "active": expected, "lockdown": state})
+            with self.subTest(state=state):
+                health = monitoring.selected_health(value)
+                rendered = monitoring.render_metrics(health, 42)
+                self.assertEqual(health["incident_lockdown"], expected)
+                samples = [
+                    line
+                    for line in rendered.splitlines()
+                    if not line.startswith("#") and line.startswith("eggcracker_incident_lockdown ")
+                ]
+                self.assertEqual(len(samples), 1)
+                sample = samples[0]
+                self.assertEqual(sample, f"eggcracker_incident_lockdown {expected}")
+                self.assertNotIn("incident_id", rendered)
+
+    def test_malformed_lockdown_publishes_invalid_query_never_zero(self):
+        for incidents in (None, {}, {"lockdown": 0}, {"lockdown": "true"}):
+            with self.subTest(incidents=incidents), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "health.prom"
+                with patch.object(monitoring, "doctor_strict", return_value=dict(HEALTHY, incidents=incidents)):
+                    self.assertFalse(monitoring.collect(output))
+                rendered = output.read_text()
+                self.assertIn("eggcracker_query_valid 0\n", rendered)
+                self.assertNotIn("eggcracker_incident_lockdown", rendered)
 
     def test_nonfinite_clock_rejected(self):
         for value in (float("nan"), float("inf"), -1, True):
