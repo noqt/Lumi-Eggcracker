@@ -18,11 +18,42 @@ class CliTests(unittest.TestCase):
     def test_public_help_has_only_supported_commands(self) -> None:
         from lumi_eggcracker.cli import _parser
         help_text = _parser().format_help()
-        for command in ("start", "kill", "status", "list", "approve", "revoke", "approvals", "detections", "doctor", "version"):
+        for command in (
+            "start",
+            "kill",
+            "status",
+            "list",
+            "approve",
+            "revoke",
+            "approvals",
+            "detections",
+            "doctor",
+            "support-bundle",
+            "validate-support-bundle",
+            "version",
+        ):
             self.assertIn(command, help_text)
         self.assertIn("exec-policy", help_text)
         self.assertNotIn("_supervisor", help_text)
         self.assertNotIn("network" + "-deny", help_text)
+
+    def test_validate_support_bundle_dispatches_before_connected_commands(self) -> None:
+        with (
+            patch("lumi_eggcracker.cli.validate_support_bundle_main", return_value=0) as validate,
+            patch("lumi_eggcracker.cli.request") as request,
+            patch("lumi_eggcracker.cli.supervisor_main") as supervisor,
+            patch("lumi_eggcracker.cli.gate_main") as gate,
+            patch("lumi_eggcracker.cli.watchdog_main") as watchdog,
+        ):
+            self.assertEqual(
+                0,
+                main(["validate-support-bundle", "private-name-must-not-be-echoed.json"]),
+            )
+        validate.assert_called_once_with(["private-name-must-not-be-echoed.json"])
+        request.assert_not_called()
+        supervisor.assert_not_called()
+        gate.assert_not_called()
+        watchdog.assert_not_called()
 
     def test_internal_supervisor_dispatch_remains_available(self) -> None:
         with patch("lumi_eggcracker.cli.supervisor_main", return_value=7) as supervisor:

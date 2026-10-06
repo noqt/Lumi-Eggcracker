@@ -448,6 +448,20 @@ The command performs no network upload and does not copy raw receipts,
 arguments, model paths, process IDs, credentials or model data. Review the
 file before attaching it to an issue or discussion.
 
+For an offline structural pre-share review, run:
+
+```sh
+eggcracker validate-support-bundle ./eggcracker-support.json
+```
+
+This reads a regular file of at most 1 MiB and accepts only the supported v1
+producer structure. Its output contains aggregate counts only; it does not echo
+bundle values. At most 100 detection summaries are included in a bundle, and
+the producer does not represent the total number of detections. A successful
+check is structural validation only, not authentication, privacy assurance,
+completeness, containment or incident truth. It does not certify that a bundle
+is safe to share; review the file yourself before attaching it.
+
 ## Install and remove
 
 The first-kill command is the recommended campaign path. A release is complete
