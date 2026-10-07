@@ -10,6 +10,7 @@ with an existing Prometheus/node_exporter workflow.
 · [Watch a recorded workflow—nothing runs on your device](https://noqt.no-qt.chatgpt.site/products/eggcracker/demo)
 · [Try it without installing](TRY_IT.md)
 · [Check host compatibility](#check-host-compatibility)
+· [Name the restart owner](#who-can-restart-a-stopped-workload)
 · [Run the portable synthetic broker example](docs/BROKERED_OPERATOR.md#portable-in-process-reference)
 · [Inert developer contract example](docs/security-control-handoff.md)
 · [Run the first kill](#run-the-first-kill)
@@ -432,6 +433,22 @@ TGI, LocalAI, llamafile, GPU-specific deployments, containers and remote API
 workloads are not claimed as covered profiles. Ollama and vLLM support is
 limited to the exact native CPU fixtures and identities qualified for this
 release; names alone never trigger a kill.
+
+### Who can restart a stopped workload?
+
+A stop receipt can be correct and a workload can still return. Ending one instance and sustaining an interruption are different claims: a service manager or deployment controller may be trying to keep another instance running.
+
+These examples explain restart ownership; they are **not Eggcracker container or Kubernetes qualification**. Eggcracker's supported native path and exact protected-relaunch suppression remain bounded as described above. Containers, Kubernetes and remote services are not covered by those claims.
+
+| Workload owner | What can bring it back | Establish before interpreting a stop |
+| --- | --- | --- |
+| A systemd service | Its `Restart=` policy can restart a service after specified exits, signals or timeouts. A deliberate service-manager stop is an important exception. | Identify the owning unit, effective policy, and whether the action stopped the unit or externally terminated a process. See the [systemd service specification](https://github.com/systemd/systemd/blob/main/man/systemd.service.xml). |
+| A Docker container | A restart policy acts on the container's exit, not necessarily on the loss of any child process. Manual-stop behavior is policy-dependent: `always` can resume after a daemon restart; `unless-stopped` remains stopped. | Identify the container policy, how it stopped and any other manager. Killing a process and manually stopping its container are not equivalent. See [Docker restart policies](https://docs.docker.com/engine/containers/start-containers-automatically/). |
+| A Kubernetes Deployment | Its controllers work toward a desired replica count and can create a replacement Pod. | Identify the owning Deployment, desired replicas and any autoscaler. The absence of one old Pod does not establish that the application is unavailable. See [Deployments](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/). |
+
+For example, suppose a Deployment wants one replica. Pod A is deleted; a hypothetical observation records that A is gone. A replacement Pod B then serves the endpoint. The observation about A need not be wrong. This is an illustration, **not an Eggcracker-generated Kubernetes receipt or a tested cluster**; terminating a process inside a Pod need not result in replacement of the Pod itself.
+
+Sustained interruption requires an authorised decision at the relevant owner of desired state and observation of the service during the claimed interval. Pausing a Kubernetes rollout is not stopping service. An urgent local interruption can still be useful: record that narrower result, then assess replacement separately. Before choosing a supported native first-use path, name both the instance you intend to stop and its restart owner. For an unsupported platform, use its own authorised operating procedures rather than treating an Eggcracker receipt as coverage. Do not share raw process arguments, credentials or private workload data to answer these questions.
 
 ## Support bundle
 
