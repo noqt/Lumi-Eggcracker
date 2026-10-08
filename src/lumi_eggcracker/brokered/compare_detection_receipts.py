@@ -686,9 +686,13 @@ class _QuietArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"{self.prog}: invalid command line\n")
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    prog: str = "compare_detection_receipts.py",
+) -> int:
     parser = _QuietArgumentParser(
-        prog="compare_detection_receipts.py",
+        prog=prog,
         description="Compare two explicit redacted detection receipt exports.",
     )
     parser.add_argument("--before", required=True, metavar="FILE", help="first export file")
