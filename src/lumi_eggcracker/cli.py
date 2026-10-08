@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .brokered.compare_detection_receipts import main as compare_detection_receipts_main
 from .client import request
 from .gate import main as gate_main
 from .jsonio import JsonInputError, write_new_json
@@ -111,6 +112,10 @@ def _parser() -> argparse.ArgumentParser:
         help="offline structural review of a support bundle",
     )
     validate_support.add_argument("FILE", type=Path)
+    commands.add_parser(
+        "compare-detection-receipts",
+        help="compare two redacted detection receipt exports",
+    )
     commands.add_parser("version", help="print the public version")
     return parser
 
@@ -121,6 +126,10 @@ def _command(argv: list[str]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     values = sys.argv[1:] if argv is None else argv
+    if values[:1] == ["compare-detection-receipts"]:
+        return compare_detection_receipts_main(
+            values[1:], prog="eggcracker compare-detection-receipts"
+        )
     if values[:1] == ["validate-support-bundle"]:
         if values[1:] == ["--help"]:
             _parser().parse_args(values)

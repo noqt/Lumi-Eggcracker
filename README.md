@@ -479,6 +479,25 @@ check is structural validation only, not authentication, privacy assurance,
 completeness, containment or incident truth. It does not certify that a bundle
 is safe to share; review the file yourself before attaching it.
 
+## Compare detection receipt exports
+
+The published v1.0.10 package does not include this installed subcommand. After
+building and installing a package or wheel from source that contains this
+change, compare two redacted detection receipt exports with the offline CLI
+command:
+
+```sh
+eggcracker compare-detection-receipts \
+  --before ./before-export.json \
+  --after ./after-export.json
+```
+
+Use `--output ./comparison.json` to write the bounded JSON report to a new
+file. The command refuses to replace an existing output. It compares recorded
+exports only; it does not authenticate them or verify a live workload. See
+[the export and comparison guide](docs/DETECTION_RECEIPT_EXPORT.md) for input,
+output, redaction and filesystem behavior.
+
 ## Install and remove
 
 The first-kill command is the recommended campaign path. A release is complete

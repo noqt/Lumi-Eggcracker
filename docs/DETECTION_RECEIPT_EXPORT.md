@@ -124,23 +124,36 @@ and filesystem operations.
 
 ## Comparing two redacted exports
 
-The offline comparator validates two existing exports and reports only the
-same bounded recorded-context comparison to stdout:
+A package or wheel built from source that contains this change exposes the
+comparator through the installed `eggcracker` command as an additive, offline
+subcommand. The published v1.0.10 package does not include this subcommand. It
+validates exactly two existing exports and reports only the bounded
+recorded-context comparison to stdout:
+
+```sh
+eggcracker compare-detection-receipts \
+  --before ./before-export.json \
+  --after ./after-export.json
+```
+
+Run `eggcracker compare-detection-receipts --help` to see the installed
+command's options. The optional `--output FILE` writes those exact UTF-8 JSON
+bytes, including the final newline, to a new comparison file instead of writing
+JSON to stdout:
+
+```sh
+eggcracker compare-detection-receipts \
+  --before ./before-export.json \
+  --after ./after-export.json \
+  --output ./comparison.json
+```
+
+The source checkout also retains direct invocation of the comparator module:
 
 ```sh
 python src/lumi_eggcracker/brokered/compare_detection_receipts.py \
   --before ./before-export.json \
   --after ./after-export.json
-```
-
-The optional `--output FILE` writes those exact UTF-8 JSON bytes, including the
-final newline, to a new comparison file instead of writing JSON to stdout:
-
-```sh
-python src/lumi_eggcracker/brokered/compare_detection_receipts.py \
-  --before ./before-export.json \
-  --after ./after-export.json \
-  --output ./comparison.json
 ```
 
 On successful file output, stdout remains empty and the comparator prints only

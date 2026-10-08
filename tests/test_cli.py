@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import io
+import json
+import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from lumi_eggcracker.cli import main
@@ -30,12 +33,132 @@ class CliTests(unittest.TestCase):
             "doctor",
             "support-bundle",
             "validate-support-bundle",
+            "compare-detection-receipts",
             "version",
         ):
             self.assertIn(command, help_text)
         self.assertIn("exec-policy", help_text)
         self.assertNotIn("_supervisor", help_text)
         self.assertNotIn("network" + "-deny", help_text)
+
+    def test_compare_detection_receipts_help_uses_installed_command(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            main(["compare-detection-receipts", "--help"])
+        self.assertEqual(0, raised.exception.code)
+        self.assertIn("usage: eggcracker compare-detection-receipts", output.getvalue())
+        self.assertIn("--before FILE", output.getvalue())
+        self.assertIn("--after FILE", output.getvalue())
+
+    def test_compare_detection_receipts_forwards_arguments_before_connected_commands(
+        self,
+    ) -> None:
+        forwarded = [
+            "--before",
+            "before-export.json",
+            "--after",
+            "after-export.json",
+            "--output",
+            "comparison.json",
+        ]
+        with (
+            patch(
+                "lumi_eggcracker.cli.compare_detection_receipts_main", return_value=0
+            ) as compare,
+            patch("lumi_eggcracker.cli.request") as request,
+            patch("lumi_eggcracker.cli.supervisor_main") as supervisor,
+            patch("lumi_eggcracker.cli.gate_main") as gate,
+            patch("lumi_eggcracker.cli.watchdog_main") as watchdog,
+        ):
+            self.assertEqual(0, main(["compare-detection-receipts", *forwarded]))
+        compare.assert_called_once_with(
+            forwarded, prog="eggcracker compare-detection-receipts"
+        )
+        request.assert_not_called()
+        supervisor.assert_not_called()
+        gate.assert_not_called()
+        watchdog.assert_not_called()
+
+    def test_compare_detection_receipts_success_and_existing_output_refusal(self) -> None:
+        def synthetic_export(event_id: str) -> dict[str, object]:
+            return {
+                "export_schema": "lumi-eggcracker.redacted-detection-receipt-export.v1",
+                "source_sha256": "f" * 64,
+                "authentication": "NOT_AUTHENTICATED",
+                "live_verification": "NOT_PERFORMED",
+                "receipt": {
+                    "schema_version": "lumi-eggcracker.detection-receipt.v2",
+                    "event_id": event_id,
+                    "source_commit": "a" * 40,
+                    "version": "1.0.10",
+                    "catalogue_sha256": "b" * 64,
+                    "receipt_written_utc": "2026-10-02T00:00:00Z",
+                    "detector": {
+                        "profile": "content.gguf-llama",
+                        "detection_path": "CONTENT",
+                        "catalogue_schema": "lumi-eggcracker.detectors.v3",
+                    },
+                    "trigger": {"kind": "UNAPPROVED_AI_MATCH"},
+                    "recorded_result": "CONTAINMENT_FAILED",
+                },
+            }
+
+        with tempfile.TemporaryDirectory(prefix="cli-receipt-comparison-") as directory:
+            root = Path(directory)
+            before = root / "before.json"
+            after = root / "after.json"
+            before.write_text(json.dumps(synthetic_export("0" * 24)), encoding="utf-8")
+            after.write_text(json.dumps(synthetic_export("1" * 24)), encoding="utf-8")
+            output = root / "existing-comparison.json"
+            original_output = b"preserve this synthetic report\n"
+            output.write_bytes(original_output)
+
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                patch("lumi_eggcracker.cli.request") as request,
+                patch("lumi_eggcracker.cli.supervisor_main") as supervisor,
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "compare-detection-receipts",
+                            "--before",
+                            str(before),
+                            "--after",
+                            str(after),
+                        ]
+                    ),
+                )
+                comparison = json.loads(stdout.getvalue())
+                self.assertEqual("RECORDED", comparison["comparison_status"])
+                self.assertEqual("", stderr.getvalue())
+                stdout.seek(0)
+                stdout.truncate(0)
+                stderr.seek(0)
+                stderr.truncate(0)
+                self.assertEqual(
+                    1,
+                    main(
+                        [
+                            "compare-detection-receipts",
+                            "--before",
+                            str(before),
+                            "--after",
+                            str(after),
+                            "--output",
+                            str(output),
+                        ]
+                    ),
+                )
+                self.assertEqual("", stdout.getvalue())
+                self.assertIn("OUTPUT_ALREADY_EXISTS", stderr.getvalue())
+                request.assert_not_called()
+                supervisor.assert_not_called()
+            self.assertEqual(original_output, output.read_bytes())
 
     def test_validate_support_bundle_dispatches_before_connected_commands(self) -> None:
         with (
