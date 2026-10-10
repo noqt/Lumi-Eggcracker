@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -18,8 +19,9 @@ def receipt(
     response: bool = False,
     cleanup_update_error: bool = False,
     boundary_resolution_error: bool = False,
+    cleanup_returncode: int = 0,
 ) -> dict[str, object]:
-    run_id = "a" * 24
+    run_id = "d" * 24
     value: dict[str, object] = {
         "cleanup": {"attempted": False},
         "containment": {
@@ -33,22 +35,22 @@ def receipt(
             "surviving_pids": [],
             "trigger_to_empty_ms": 0.0012,
         },
-        "event_id": "b" * 24,
-        "receipt_written_utc": "2026-10-11T00:00:00Z",
+        "event_id": "e" * 24,
+        "receipt_written_utc": "2026-10-11T12:34:56.123456Z",
         "result": "TERMINATED",
         "schema_version": kill_receipt.RECEIPT_SCHEMA,
-        "source_commit": "c" * 40,
+        "source_commit": "f" * 40,
         "trigger": {"kind": "OPERATOR", "observed_monotonic_ns": 1_000},
-        "version": "1.0.10",
+        "version": "9.8.7-canary",
         "workload": {
-            "boot_id": "01234567-89ab-cdef-0123-456789abcdef",
+            "boot_id": "fedcba98-7654-3210-fedc-ba9876543210",
             "cgroup": f"/system.slice/lumi-eggcracker-workload-{run_id}.service",
-            "cgroup_device": 1,
-            "cgroup_inode": 2,
-            "name": "manual-test",
+            "cgroup_device": 31337,
+            "cgroup_inode": 424242,
+            "name": "manual-name-canary",
             "run_id": run_id,
             "unit": f"lumi-eggcracker-workload-{run_id}.service",
-            "workload_uid": 2001,
+            "workload_uid": 3987,
         },
     }
     if post_cleanup:
@@ -59,15 +61,15 @@ def receipt(
                 "sink_namespace_removed": True,
                 "workload_namespace_removed": True,
             },
-            "systemctl_stop_returncode": 0,
-            "systemctl_stop_stderr": "",
+            "systemctl_stop_returncode": cleanup_returncode,
+            "systemctl_stop_stderr": "systemctl-stderr-canary",
         }
         if boundary_resolution_error:
             del cleanup["offline_boundary"]
             cleanup["offline_boundary_error"] = "boundary lookup unavailable"
         value["cleanup"] = cleanup
     if response:
-        value["receipt_path"] = "/private/canary/receipt.json"
+        value["receipt_path"] = "/private/receipt-path-canary.json"
     if cleanup_update_error:
         value["cleanup_update_error"] = True
     return value
@@ -110,6 +112,15 @@ class KillReceiptTests(unittest.TestCase):
             self.assertEqual(4, kill_receipt.main([str(path)]))
         self.assertEqual("", output.getvalue())
         self.assertEqual(kill_receipt.SAFE_ERROR + "\n", error.getvalue())
+        self.assertNotIn("canary", error.getvalue())
+
+    def assert_handoff_failure(self, arguments: list[str]) -> None:
+        output = io.StringIO()
+        error = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(error):
+            self.assertEqual(4, main(arguments))
+        self.assertEqual("", output.getvalue())
+        self.assertEqual(kill_receipt.HANDOFF_SAFE_ERROR + "\n", error.getvalue())
         self.assertNotIn("canary", error.getvalue())
 
     def test_accepts_pre_cleanup_receipt(self) -> None:
@@ -237,6 +248,314 @@ class KillReceiptTests(unittest.TestCase):
                 self.assertEqual(0, main(["validate-kill-receipt", str(path)]))
             self.assertEqual("", error.getvalue())
             self.assertNotIn("canary", output.getvalue())
+
+    def test_handoff_projection_is_fixed_for_all_routes_and_cleanup_forms(self) -> None:
+        routes = ("q-and-a", "bug-report", "private-security")
+        cleanup_forms = (
+            receipt(),
+            receipt(post_cleanup=True, response=True),
+            receipt(post_cleanup=True, boundary_resolution_error=True),
+        )
+        expected_keys = {
+            "schema_version",
+            "result",
+            "trigger",
+            "primitive",
+            "cgroup_kill_written",
+            "root_populated",
+            "surviving_pids_count",
+            "descendant_cgroups_checked",
+            "trigger_to_empty_ms",
+            "cleanup_outcome",
+            "route",
+            "limitations",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for route, value in zip(routes, cleanup_forms):
+                receipt_path = self.write(directory, value)
+                before = receipt_path.read_bytes()
+                output_path = Path(directory) / f"handoff-{route}.json"
+                output = io.StringIO()
+                error = io.StringIO()
+                with (
+                    patch("lumi_eggcracker.kill_receipt.write_new_json") as write_new_json,
+                    patch("lumi_eggcracker.cli.request", side_effect=AssertionError),
+                    patch("lumi_eggcracker.cli.supervisor_main", side_effect=AssertionError),
+                    patch("socket.socket", side_effect=AssertionError),
+                    redirect_stdout(output),
+                    redirect_stderr(error),
+                ):
+                    self.assertEqual(
+                        0,
+                        main(
+                            [
+                                "prepare-kill-receipt-handoff",
+                                str(receipt_path),
+                                "--route",
+                                route,
+                                "--output",
+                                str(output_path),
+                            ]
+                        ),
+                )
+                self.assertEqual("", error.getvalue())
+                self.assertEqual(before, receipt_path.read_bytes())
+                write_new_json.assert_called_once()
+                destination, projection = write_new_json.call_args.args
+                self.assertEqual(output_path, destination)
+                self.assertEqual(expected_keys, set(projection))
+                self.assertEqual(route, projection["route"])
+                self.assertEqual("HANDOFF_PREPARED", projection["result"])
+                self.assertEqual("OPERATOR", projection["trigger"])
+                self.assertEqual("cgroup.kill", projection["primitive"])
+                self.assertEqual(True, projection["cgroup_kill_written"])
+                self.assertEqual(0, projection["root_populated"])
+                self.assertEqual(0, projection["surviving_pids_count"])
+                self.assertEqual(1, projection["descendant_cgroups_checked"])
+                self.assertEqual(0.0012, projection["trigger_to_empty_ms"])
+                cleanup = value["cleanup"]
+                self.assertEqual(
+                    (
+                        "NOT_ATTEMPTED"
+                        if cleanup["attempted"] is False
+                        else "ATTEMPTED_WITH_ERRORS"
+                        if "offline_boundary_error" in cleanup
+                        else "ATTEMPTED"
+                    ),
+                    projection["cleanup_outcome"],
+                )
+                self.assertEqual(kill_receipt.HANDOFF_SCHEMA, projection["schema_version"])
+                self.assertEqual(kill_receipt.HANDOFF_LIMITATIONS, projection["limitations"])
+                serialized = output.getvalue()
+                workload = value["workload"]
+                excluded_values = (
+                    value["event_id"],
+                    value["source_commit"],
+                    value["receipt_written_utc"],
+                    value["version"],
+                    value["trigger"]["observed_monotonic_ns"],
+                    workload["boot_id"],
+                    workload["run_id"],
+                    workload["unit"],
+                    workload["cgroup"],
+                    workload["name"],
+                    workload["workload_uid"],
+                    workload["cgroup_device"],
+                    workload["cgroup_inode"],
+                )
+                if "receipt_path" in value:
+                    excluded_values += (value["receipt_path"],)
+                if "systemctl_stop_stderr" in cleanup:
+                    excluded_values += (cleanup["systemctl_stop_stderr"],)
+                if "offline_boundary_error" in cleanup:
+                    excluded_values += (cleanup["offline_boundary_error"],)
+                projection_serialized = json.dumps(projection, sort_keys=True)
+                for excluded in excluded_values:
+                    self.assertNotIn(str(excluded), serialized)
+                    self.assertNotIn(str(excluded), projection_serialized)
+                self.assertNotIn("/system.slice/", serialized)
+
+    def test_handoff_nonzero_cleanup_return_is_bounded_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = self.write(
+                directory,
+                receipt(post_cleanup=True, response=True, cleanup_returncode=1),
+            )
+            output_path = Path(directory) / "handoff.json"
+            with patch("lumi_eggcracker.kill_receipt.write_new_json") as write_new_json:
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "prepare-kill-receipt-handoff",
+                            str(receipt_path),
+                            "--route",
+                            "bug-report",
+                            "--output",
+                            str(output_path),
+                        ]
+                    ),
+                )
+            projection = write_new_json.call_args.args[1]
+            self.assertEqual("ATTEMPTED_WITH_ERRORS", projection["cleanup_outcome"])
+
+    def test_handoff_boundary_error_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = self.write(
+                directory,
+                receipt(post_cleanup=True, boundary_resolution_error=True),
+            )
+            output_path = Path(directory) / "handoff.json"
+            with patch("lumi_eggcracker.kill_receipt.write_new_json") as write_new_json:
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "prepare-kill-receipt-handoff",
+                            str(receipt_path),
+                            "--route",
+                            "private-security",
+                            "--output",
+                            str(output_path),
+                        ]
+                    ),
+                )
+            projection = write_new_json.call_args.args[1]
+            self.assertEqual("ATTEMPTED_WITH_ERRORS", projection["cleanup_outcome"])
+            self.assertNotIn("boundary", json.dumps(projection))
+
+    def test_handoff_rejects_bad_routes_and_outputs_without_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = self.write(directory, receipt())
+            output_path = Path(directory) / "output-canary.json"
+            with patch("lumi_eggcracker.kill_receipt.write_new_json") as write_new_json:
+                self.assert_handoff_failure(
+                    [
+                        "prepare-kill-receipt-handoff",
+                        str(receipt_path),
+                        "--route",
+                        "route-canary",
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+            write_new_json.assert_not_called()
+            self.assertFalse(output_path.exists())
+
+            invalid_parent = Path(directory) / "missing-parent" / "output.json"
+            self.assert_handoff_failure(
+                [
+                    "prepare-kill-receipt-handoff",
+                    str(receipt_path),
+                    "--route",
+                    "q-and-a",
+                    "--output",
+                    str(invalid_parent),
+                ]
+            )
+            self.assertFalse(invalid_parent.exists())
+
+            existing = Path(directory) / "existing.json"
+            existing_bytes = b"existing-output-canary"
+            existing.write_bytes(existing_bytes)
+            self.assert_handoff_failure(
+                [
+                    "prepare-kill-receipt-handoff",
+                    str(receipt_path),
+                    "--route",
+                    "bug-report",
+                    "--output",
+                    str(existing),
+                ]
+            )
+            self.assertEqual(existing_bytes, existing.read_bytes())
+
+    def test_handoff_preserves_raced_output_and_cleans_no_partial(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = self.write(directory, receipt())
+            raced = Path(directory) / "raced.json"
+            raced_bytes = b"raced-existing-canary"
+            owned_temps: list[Path] = []
+
+            def race(temporary: str, destination: str) -> None:
+                owned_temps.append(Path(temporary))
+                Path(destination).write_bytes(raced_bytes)
+                raise FileExistsError
+
+            with patch("lumi_eggcracker.jsonio.os.link", side_effect=race):
+                self.assert_handoff_failure(
+                    [
+                        "prepare-kill-receipt-handoff",
+                        str(receipt_path),
+                        "--route",
+                        "q-and-a",
+                        "--output",
+                        str(raced),
+                    ]
+                )
+            self.assertEqual(raced_bytes, raced.read_bytes())
+            self.assertEqual(1, len(owned_temps))
+            self.assertFalse(owned_temps[0].exists())
+
+            failed = Path(directory) / "failed.json"
+            failed_temps: list[Path] = []
+
+            def fail(temporary: str, _destination: str) -> None:
+                failed_temps.append(Path(temporary))
+                raise OSError("write-canary")
+
+            with patch("lumi_eggcracker.jsonio.os.link", side_effect=fail):
+                self.assert_handoff_failure(
+                    [
+                        "prepare-kill-receipt-handoff",
+                        str(receipt_path),
+                        "--route",
+                        "q-and-a",
+                        "--output",
+                        str(failed),
+                    ]
+                )
+            self.assertFalse(failed.exists())
+            self.assertEqual(1, len(failed_temps))
+            self.assertFalse(failed_temps[0].exists())
+
+    def test_handoff_real_publication_when_hard_links_are_supported(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            probe_source = Path(directory) / "link-probe-source"
+            probe_destination = Path(directory) / "link-probe-destination"
+            probe_source.write_bytes(b"probe")
+            try:
+                os.link(probe_source, probe_destination)
+            except OSError:
+                if os.name == "nt":
+                    self.skipTest(
+                        "Windows F: filesystem does not support hard-link publication"
+                    )
+                raise
+            finally:
+                probe_destination.unlink(missing_ok=True)
+                probe_source.unlink(missing_ok=True)
+
+            if os.name == "nt":
+                try:
+                    directory_descriptor = os.open(
+                        directory,
+                        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    )
+                    try:
+                        os.fsync(directory_descriptor)
+                    finally:
+                        os.close(directory_descriptor)
+                except OSError:
+                    self.skipTest(
+                        "Windows F: filesystem cannot fsync the publication directory"
+                    )
+
+            receipt_path = self.write(directory, receipt(post_cleanup=True, response=True))
+            output_path = Path(directory) / "real-handoff.json"
+            output = io.StringIO()
+            error = io.StringIO()
+            with redirect_stdout(output), redirect_stderr(error):
+                result = main(
+                    [
+                        "prepare-kill-receipt-handoff",
+                        str(receipt_path),
+                        "--route",
+                        "q-and-a",
+                        "--output",
+                        str(output_path),
+                    ]
+                )
+            if result != 0 and os.name == "nt":
+                if output_path.exists():
+                    self.assertEqual("HANDOFF_PREPARED", json.loads(output_path.read_text())["result"])
+                    output_path.unlink()
+                self.assertEqual([], list(Path(directory).glob(".real-handoff.json.*")))
+                self.skipTest("Windows F: filesystem cannot complete atomic hard-link publication")
+            self.assertEqual(0, result)
+            self.assertEqual("", error.getvalue())
+            self.assertEqual("HANDOFF_PREPARED", json.loads(output_path.read_text())["result"])
+            self.assertEqual([], list(Path(directory).glob(".real-handoff.json.*")))
 
     def test_existing_dispatches_remain_separate(self) -> None:
         output = io.StringIO()

@@ -14,6 +14,7 @@ from .client import request
 from .gate import main as gate_main
 from .jsonio import JsonInputError, write_new_json
 from .kill_receipt import main as validate_kill_receipt_main
+from .kill_receipt import prepare_handoff_main
 from .supervisor import main as supervisor_main
 from .support_bundle import main as support_bundle_main
 from .support_bundle import validate_main as validate_support_bundle_main
@@ -239,6 +240,17 @@ def _parser() -> argparse.ArgumentParser:
         help="offline structural review of one manual kill receipt",
     )
     validate_kill_receipt.add_argument("FILE", type=Path)
+    handoff = commands.add_parser(
+        "prepare-kill-receipt-handoff",
+        help="prepare a local redacted manual kill receipt handoff",
+    )
+    handoff.add_argument("RECEIPT", type=Path)
+    handoff.add_argument(
+        "--route",
+        required=True,
+        choices=("q-and-a", "bug-report", "private-security"),
+    )
+    handoff.add_argument("--output", required=True, type=Path)
     commands.add_parser(
         "compare-detection-receipts",
         help="compare two redacted detection receipt exports",
@@ -267,6 +279,11 @@ def main(argv: list[str] | None = None) -> int:
             _parser().parse_args(values)
             return 0
         return validate_kill_receipt_main(values[1:])
+    if values[:1] == ["prepare-kill-receipt-handoff"]:
+        if values[1:] == ["--help"]:
+            _parser().parse_args(values)
+            return 0
+        return prepare_handoff_main(values[1:])
     if values[:1] == ["_supervisor"]:
         return supervisor_main(values[1:])
     if values[:1] == ["_gate"]:
