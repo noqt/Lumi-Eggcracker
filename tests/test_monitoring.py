@@ -223,6 +223,32 @@ class StrictAndLegacyTests(unittest.TestCase):
 
 
 class MetricTests(unittest.TestCase):
+    def test_check_start_guide_separates_source_review_from_installed_workflow(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        heading = "### Check an exact approved launch (source version)"
+        self.assertEqual(readme.count(heading), 1)
+        section_start = readme.index(heading)
+        section_end = readme.index("\n## Current boundary", section_start)
+        section = readme[section_start:section_end]
+        normalized = " ".join(section.split())
+
+        self.assertIn("review evidence", normalized)
+        self.assertIn("does not provision the installed `/usr/local/bin/eggcracker` client", normalized)
+        self.assertIn("installed supervisor", normalized)
+        self.assertIn("one future signed artifact", normalized)
+        self.assertIn("same signed artifact containing this change", normalized)
+        self.assertIn("published v1.0.10 package does not provide this workflow", normalized)
+
+        fenced = section.split("```")
+        self.assertEqual(len(fenced) % 2, 1)
+        source_blocks = [
+            block
+            for block in fenced[1::2]
+            if "git clone" in block and "git checkout --detach" in block
+        ]
+        self.assertEqual(len(source_blocks), 1)
+        self.assertNotIn("eggcracker check-start", source_blocks[0])
+
     def test_allowlist_and_unknown(self):
         value = dict(HEALTHY, workload_uid=123, catalogue={"secret": "private"})
         rendered = monitoring.render_metrics(monitoring.selected_health(value), 42)
