@@ -377,9 +377,38 @@ The command checks host compatibility, authenticates the tag and detached
 release checksums, verifies the exact downloaded bundle, installs the
 root-controlled supervisor, downloads the pinned demo model only after the
 explicit acceptance flag, launches the real model, prints the kill receipt,
-and offers clean removal. Use `--remove` for a
-non-interactive removal or `--keep` to inspect the installation after the
-demonstration. Share a passing, refused, or confusing supported-path run through
+and offers clean removal after a successful demonstration. On that success
+path, use `--remove` for a non-interactive removal or `--keep` to inspect the
+installation after the demonstration.
+
+If a handled full-run failure occurs, the command exits `2` and prints one
+bounded object to standard error instead of raw exception text. For example:
+
+```json
+{
+  "installation_state": "INSTALLED",
+  "next_action": "STOP_AND_REVIEW_BEFORE_RETRY",
+  "reason_code": "POST_INSTALL_FAILURE",
+  "removal_guidance": "MANUAL_REVIEW_REQUIRED",
+  "result": "FULL_RUN_FAILED",
+  "schema": "lumi-eggcracker.first-kill-failure.v1",
+  "stage": "post-install",
+  "version": 1
+}
+```
+
+The object always contains exactly those eight fields. Its stage and reason
+code pairs are `pre-install` / `PRE_INSTALL_FAILURE`, `install` /
+`INSTALL_FAILURE`, `post-install` / `POST_INSTALL_FAILURE`, `removal` /
+`REMOVAL_FAILURE`, and `unknown` / `UNKNOWN_FAILURE`. Always stop and review
+before retrying. `NOT_INSTALLED` with `NOT_REQUIRED` means no Eggcracker removal
+is required. `UNKNOWN_OR_PARTIAL` or `INSTALLED` with
+`MANUAL_REVIEW_REQUIRED` means preserve the current state and obtain manual
+review. Do not rerun `scripts/first_kill.py` or use `--remove` as an automatic
+failure-recovery command; `--remove` and `--keep` are successful-demonstration
+choices only.
+
+Share a passing, refused, or confusing supported-path run through
 the [redacted result form](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=first_kill_result.yml).
 If the supported path exposes a reproducible non-security defect, open a
 [reproducible bug](https://github.com/noqt/Lumi-Eggcracker/issues/new?template=bug_report.yml)
