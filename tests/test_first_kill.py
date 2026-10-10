@@ -44,7 +44,7 @@ SPEC.loader.exec_module(first_kill)
 class FirstKillTests(unittest.TestCase):
     def assert_entrypoint_refuses_before_side_effects(
         self,
-        expected_error: str,
+        expected_reason_code: str,
         passwd=None,
         group=None,
         platform_release: str = "6.8.0-generic",
@@ -134,8 +134,19 @@ class FirstKillTests(unittest.TestCase):
             )
 
         self.assertEqual(2, result)
-        self.assertIn("eggcracker first-kill:", errors.getvalue())
-        self.assertIn(expected_error, errors.getvalue())
+        summary = json.loads(errors.getvalue())
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_FIELDS, set(summary))
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_SCHEMA, summary["schema"])
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_VERSION, summary["version"])
+        self.assertEqual("FULL_RUN_FAILED", summary["result"])
+        self.assertEqual(first_kill.FULL_RUN_STAGE_PRE_INSTALL, summary["stage"])
+        self.assertEqual(expected_reason_code, summary["reason_code"])
+        self.assertEqual(
+            first_kill.FULL_RUN_INSTALL_STATE_NOT_INSTALLED,
+            summary["installation_state"],
+        )
+        self.assertEqual(first_kill.FULL_RUN_REMOVAL_NOT_REQUIRED, summary["removal_guidance"])
+        self.assertEqual(first_kill.FULL_RUN_NEXT_ACTION, summary["next_action"])
         for forbidden in (
             repository_root,
             prepare_workspace,
@@ -158,7 +169,7 @@ class FirstKillTests(unittest.TestCase):
             first_kill.Path, "is_file", autospec=True, return_value=True
         ):
             self.assert_entrypoint_refuses_before_side_effects(
-                "first-kill requires at least 7 GiB of kernel-reported memory",
+                "PRE_INSTALL_FAILURE",
                 total_memory_bytes=first_kill.MIN_TOTAL_MEMORY_BYTES - 1,
             )
 
@@ -167,7 +178,7 @@ class FirstKillTests(unittest.TestCase):
             first_kill.Path, "is_file", autospec=True, return_value=True
         ):
             self.assert_entrypoint_refuses_before_side_effects(
-                "first-kill requires at least 8 GiB free on the root filesystem",
+                "PRE_INSTALL_FAILURE",
                 free_root_bytes=first_kill.MIN_FREE_ROOT_BYTES - 1,
             )
 
@@ -176,7 +187,7 @@ class FirstKillTests(unittest.TestCase):
             first_kill.Path, "is_file", autospec=True, return_value=True
         ):
             self.assert_entrypoint_refuses_before_side_effects(
-                "first-kill requires native Linux; WSL2 is unsupported",
+                "PRE_INSTALL_FAILURE",
                 platform_release="6.18.33.1-microsoft-standard-WSL2",
             )
 
@@ -185,7 +196,7 @@ class FirstKillTests(unittest.TestCase):
             first_kill.Path, "is_file", autospec=True, return_value=True
         ):
             self.assert_entrypoint_refuses_before_side_effects(
-                "first-kill requires native Linux; WSL2 is unsupported",
+                "PRE_INSTALL_FAILURE",
                 platform_release="6.8.0-custom",
                 wsl_distro_name="test-wsl",
             )
@@ -226,7 +237,7 @@ class FirstKillTests(unittest.TestCase):
                     first_kill.Path, "is_file", autospec=True, side_effect=present
                 ):
                     self.assert_entrypoint_refuses_before_side_effects(
-                        f"required host command is missing or not executable: {missing}"
+                        "PRE_INSTALL_FAILURE"
                     )
 
     def test_preflight_rejects_residual_workload_identity(self) -> None:
@@ -272,7 +283,7 @@ class FirstKillTests(unittest.TestCase):
                     ),
                 ):
                     self.assert_entrypoint_refuses_before_side_effects(
-                        f"refusing a pre-existing Eggcracker workload {residual}",
+                        "PRE_INSTALL_FAILURE",
                         passwd,
                         group,
                     )
@@ -556,6 +567,241 @@ class FirstKillTests(unittest.TestCase):
             ),
             smoke_args[1:],
         )
+
+    def test_full_run_pre_install_failure_is_bounded_and_redacted(self) -> None:
+        canary = "SECRET_PATH=/private/pre-install --argv=hidden ENV_SECRET=hidden"
+        output = io.StringIO()
+        errors = io.StringIO()
+        with (
+            mock.patch.object(
+                first_kill,
+                "operator_name",
+                side_effect=first_kill.FirstKillError(canary),
+            ),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            result = first_kill.main(
+                ["--operator", "tester", "--accept-third-party-downloads"]
+            )
+
+        self.assertEqual(2, result)
+        summary = json.loads(errors.getvalue())
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_FIELDS, set(summary))
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_SCHEMA, summary["schema"])
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_VERSION, summary["version"])
+        self.assertEqual("FULL_RUN_FAILED", summary["result"])
+        self.assertEqual(first_kill.FULL_RUN_STAGE_PRE_INSTALL, summary["stage"])
+        self.assertEqual("PRE_INSTALL_FAILURE", summary["reason_code"])
+        self.assertEqual(
+            first_kill.FULL_RUN_INSTALL_STATE_NOT_INSTALLED,
+            summary["installation_state"],
+        )
+        self.assertEqual(first_kill.FULL_RUN_REMOVAL_NOT_REQUIRED, summary["removal_guidance"])
+        self.assertEqual(first_kill.FULL_RUN_NEXT_ACTION, summary["next_action"])
+        self.assertNotIn(canary, output.getvalue() + errors.getvalue())
+
+    def test_full_run_install_failure_reports_partial_install_without_leaks(self) -> None:
+        canary = "SECRET_PATH=/private/install --argv=hidden ENV_SECRET=hidden"
+        output = io.StringIO()
+        errors = io.StringIO()
+        with (
+            mock.patch.object(first_kill, "operator_name", return_value="tester"),
+            mock.patch.object(first_kill, "compatibility"),
+            mock.patch.object(first_kill, "repository_root", return_value=Path("/checkout")),
+            mock.patch.object(
+                first_kill, "prepare_workspace", return_value=Path("/private-workspace")
+            ),
+            mock.patch.object(
+                first_kill,
+                "release_files",
+                return_value=(
+                    Path("/bundle.zip"),
+                    Path("/key.asc"),
+                    Path("/SHA256SUMS"),
+                    Path("/SHA256SUMS.asc"),
+                ),
+            ),
+            mock.patch.object(first_kill, "verify_tag", return_value=TAG_COMMIT),
+            mock.patch.object(first_kill, "verify_checksum_signature"),
+            mock.patch.object(first_kill, "verify_bundle_checksum"),
+            mock.patch.object(first_kill, "extracted_release", return_value=Path("/release")),
+            mock.patch.object(
+                first_kill,
+                "manifest",
+                return_value={
+                    "artifact": "lumi-eggcracker-1.0.0.pyz",
+                    "sha256": "a" * 64,
+                    "source_archive": "lumi-eggcracker-1.0.0-source.zip",
+                    "source_commit": TAG_COMMIT,
+                    "version": "1.0.0",
+                },
+            ),
+            mock.patch.object(first_kill, "run"),
+            mock.patch.object(
+                first_kill,
+                "install_release",
+                side_effect=first_kill.FirstKillError(canary),
+            ),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            result = first_kill.main(
+                ["--operator", "tester", "--accept-third-party-downloads"]
+            )
+
+        self.assertEqual(2, result)
+        summary = json.loads(errors.getvalue())
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_FIELDS, set(summary))
+        self.assertEqual(first_kill.FULL_RUN_STAGE_INSTALL, summary["stage"])
+        self.assertEqual("INSTALL_FAILURE", summary["reason_code"])
+        self.assertEqual(
+            first_kill.FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL,
+            summary["installation_state"],
+        )
+        self.assertEqual(
+            first_kill.FULL_RUN_REMOVAL_MANUAL_REVIEW_REQUIRED,
+            summary["removal_guidance"],
+        )
+        self.assertEqual(first_kill.FULL_RUN_NEXT_ACTION, summary["next_action"])
+        self.assertNotIn(canary, output.getvalue() + errors.getvalue())
+
+    def test_full_run_post_install_failure_reports_installed_and_redacts(self) -> None:
+        canary = "SECRET_PATH=/private/post-install --argv=hidden ENV_SECRET=hidden"
+        output = io.StringIO()
+        errors = io.StringIO()
+        release = {
+            "artifact": "lumi-eggcracker-1.0.0.pyz",
+            "sha256": "a" * 64,
+            "source_archive": "lumi-eggcracker-1.0.0-source.zip",
+            "source_commit": TAG_COMMIT,
+            "version": "1.0.0",
+        }
+        with (
+            mock.patch.object(first_kill, "operator_name", return_value="tester"),
+            mock.patch.object(first_kill, "compatibility"),
+            mock.patch.object(first_kill, "repository_root", return_value=Path("/checkout")),
+            mock.patch.object(
+                first_kill, "prepare_workspace", return_value=Path("/private-workspace")
+            ),
+            mock.patch.object(
+                first_kill,
+                "release_files",
+                return_value=(
+                    Path("/bundle.zip"),
+                    Path("/key.asc"),
+                    Path("/SHA256SUMS"),
+                    Path("/SHA256SUMS.asc"),
+                ),
+            ),
+            mock.patch.object(first_kill, "verify_tag", return_value=TAG_COMMIT),
+            mock.patch.object(first_kill, "verify_checksum_signature"),
+            mock.patch.object(first_kill, "verify_bundle_checksum"),
+            mock.patch.object(first_kill, "extracted_release", return_value=Path("/release")),
+            mock.patch.object(first_kill, "manifest", return_value=release),
+            mock.patch.object(first_kill, "run"),
+            mock.patch.object(first_kill, "install_release"),
+            mock.patch.object(first_kill, "installed_workload_user", return_value="workload"),
+            mock.patch.object(
+                first_kill,
+                "run_real_smoke",
+                side_effect=first_kill.FirstKillError(canary),
+            ),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            result = first_kill.main(
+                ["--operator", "tester", "--accept-third-party-downloads"]
+            )
+
+        self.assertEqual(2, result)
+        summary = json.loads(errors.getvalue())
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_FIELDS, set(summary))
+        self.assertEqual(first_kill.FULL_RUN_STAGE_POST_INSTALL, summary["stage"])
+        self.assertEqual("POST_INSTALL_FAILURE", summary["reason_code"])
+        self.assertEqual(first_kill.FULL_RUN_INSTALL_STATE_INSTALLED, summary["installation_state"])
+        self.assertEqual(
+            first_kill.FULL_RUN_REMOVAL_MANUAL_REVIEW_REQUIRED,
+            summary["removal_guidance"],
+        )
+        self.assertEqual(first_kill.FULL_RUN_NEXT_ACTION, summary["next_action"])
+        self.assertNotIn(canary, output.getvalue() + errors.getvalue())
+        self.assertNotIn("--remove", output.getvalue() + errors.getvalue())
+
+    def test_full_run_removal_failure_reports_unknown_state_and_redacts(self) -> None:
+        canary = "SECRET_PATH=/private/removal --argv=hidden ENV_SECRET=hidden"
+        output = io.StringIO()
+        errors = io.StringIO()
+        release = {
+            "artifact": "lumi-eggcracker-1.0.0.pyz",
+            "sha256": "a" * 64,
+            "source_archive": "lumi-eggcracker-1.0.0-source.zip",
+            "source_commit": TAG_COMMIT,
+            "version": "1.0.0",
+        }
+        receipt = {
+            "result": "TERMINATED",
+            "containment": {"surviving_pids": [], "root_populated": 0},
+        }
+        with (
+            mock.patch.object(first_kill, "operator_name", return_value="tester"),
+            mock.patch.object(first_kill, "compatibility"),
+            mock.patch.object(first_kill, "repository_root", return_value=Path("/checkout")),
+            mock.patch.object(
+                first_kill, "prepare_workspace", return_value=Path("/private-workspace")
+            ),
+            mock.patch.object(
+                first_kill,
+                "release_files",
+                return_value=(
+                    Path("/bundle.zip"),
+                    Path("/key.asc"),
+                    Path("/SHA256SUMS"),
+                    Path("/SHA256SUMS.asc"),
+                ),
+            ),
+            mock.patch.object(first_kill, "verify_tag", return_value=TAG_COMMIT),
+            mock.patch.object(first_kill, "verify_checksum_signature"),
+            mock.patch.object(first_kill, "verify_bundle_checksum"),
+            mock.patch.object(first_kill, "extracted_release", return_value=Path("/release")),
+            mock.patch.object(first_kill, "manifest", return_value=release),
+            mock.patch.object(first_kill, "run"),
+            mock.patch.object(first_kill, "install_release"),
+            mock.patch.object(first_kill, "installed_workload_user", return_value="workload"),
+            mock.patch.object(first_kill, "run_real_smoke", return_value=receipt),
+            mock.patch.object(
+                first_kill,
+                "remove_installation",
+                side_effect=first_kill.FirstKillError(canary),
+            ),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            result = first_kill.main(
+                [
+                    "--operator",
+                    "tester",
+                    "--accept-third-party-downloads",
+                    "--remove",
+                ]
+            )
+
+        self.assertEqual(2, result)
+        summary = json.loads(errors.getvalue())
+        self.assertEqual(first_kill.FULL_RUN_FAILURE_FIELDS, set(summary))
+        self.assertEqual(first_kill.FULL_RUN_STAGE_REMOVAL, summary["stage"])
+        self.assertEqual("REMOVAL_FAILURE", summary["reason_code"])
+        self.assertEqual(
+            first_kill.FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL,
+            summary["installation_state"],
+        )
+        self.assertEqual(
+            first_kill.FULL_RUN_REMOVAL_MANUAL_REVIEW_REQUIRED,
+            summary["removal_guidance"],
+        )
+        self.assertEqual(first_kill.FULL_RUN_NEXT_ACTION, summary["next_action"])
+        self.assertNotIn(canary, output.getvalue() + errors.getvalue())
+        self.assertNotIn("--remove", output.getvalue() + errors.getvalue())
 
     def test_real_smoke_uses_current_campaign_preparer(self) -> None:
         campaign_root = Path("/campaign-checkout")
