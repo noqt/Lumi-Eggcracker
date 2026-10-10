@@ -169,7 +169,7 @@ Fetch an immutable source snapshot and run the read-only preflight:
 cd "${TMPDIR:-/tmp}"
 git clone https://github.com/noqt/Lumi-Eggcracker.git
 cd Lumi-Eggcracker
-SOURCE_COMMIT="7b190897bf246cb93f03d647510b641ce42ec0a3"
+SOURCE_COMMIT="a6452bc55907bedf2f2997592ed5c12b36069461"
 git fetch --tags https://github.com/noqt/Lumi-Eggcracker.git "$SOURCE_COMMIT"
 git checkout --detach "$SOURCE_COMMIT"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
