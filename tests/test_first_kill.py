@@ -204,6 +204,130 @@ class FirstKillTests(unittest.TestCase):
     def test_default_release_identity_is_the_1_0_candidate(self) -> None:
         self.assertEqual("v1.0.10", first_kill.DEFAULT_TAG)
 
+    def test_third_party_plan_is_exact_and_deterministic(self) -> None:
+        expected = {
+            "schema_version": "lumi-eggcracker.third-party-download-plan.v1",
+            "plan_version": 1,
+            "result": "THIRD_PARTY_DOWNLOAD_PLAN",
+            "mode": "offline-source-only",
+            "llama": {
+                "repository": "https://github.com/ggml-org/llama.cpp.git",
+                "tag": "b10240",
+                "commit": "0b14b87d7c20cb753b94b96854dd7b45306fc696",
+                "license": "MIT",
+                "license_status": "DECLARED_METADATA_NOT_VERIFIED",
+                "license_verified": False,
+                "legal_clearance": False,
+            },
+            "model": {
+                "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+                "license": "Apache-2.0",
+                "license_status": "DECLARED_METADATA_NOT_VERIFIED",
+                "license_verified": False,
+                "legal_clearance": False,
+            },
+            "model_download_max_bytes": 600 * 1024 * 1024,
+            "minimum_total_memory_bytes": 7 * 1024 * 1024 * 1024,
+            "minimum_free_root_bytes": 8 * 1024 * 1024 * 1024,
+            "transfer_limits": {
+                "llama_cpp_clone": {
+                    "status": "UNKNOWN",
+                    "bound": "UNCAPPED_BY_THIS_TOOL",
+                    "max_bytes": None,
+                    "bounded_by_this_tool": False,
+                },
+                "model_download": {
+                    "max_bytes": 600 * 1024 * 1024,
+                    "bounded_by_this_tool": True,
+                    "is_total_transfer_bound": False,
+                },
+                "source_clone_build_package_release": {
+                    "status": "UNCAPPED_BY_THIS_TOOL",
+                    "max_bytes": None,
+                    "bounded_by_this_tool": False,
+                },
+            },
+        }
+        first = first_kill.build_third_party_download_plan()
+        second = first_kill.build_third_party_download_plan()
+        self.assertEqual(expected, first)
+        self.assertEqual(first, second)
+        self.assertEqual(json.dumps(first, sort_keys=True), json.dumps(second, sort_keys=True))
+
+    def test_third_party_plan_rejects_malformed_pinned_projection_without_reflection(self) -> None:
+        canary = "https://unsafe.example/private-path?argv=secret"
+        output = io.StringIO()
+        errors = io.StringIO()
+        with (
+            mock.patch.object(first_kill, "MODEL_URL", canary),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            first_kill.main(["--third-party-download-plan"])
+        self.assertEqual("third-party download plan unavailable: pinned inputs are invalid", str(raised.exception))
+        self.assertEqual("", output.getvalue())
+        self.assertNotIn(canary, errors.getvalue())
+
+    def test_third_party_plan_is_zero_effect_before_host_or_install_steps(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(first_kill, "operator_name") as operator,
+            mock.patch.object(first_kill, "compatibility") as compatibility,
+            mock.patch.object(first_kill, "repository_root") as repository_root,
+            mock.patch.object(first_kill, "local_release_identity") as identity,
+            mock.patch.object(first_kill, "prepare_workspace") as prepare_workspace,
+            mock.patch.object(first_kill, "release_files") as release_files,
+            mock.patch.object(first_kill, "download") as download,
+            mock.patch.object(first_kill, "run") as run,
+            mock.patch.object(first_kill, "install_release") as install_release,
+            mock.patch.object(first_kill, "run_real_smoke") as run_real_smoke,
+            mock.patch.object(first_kill, "remove_installation") as remove_installation,
+            mock.patch.object(first_kill.tempfile, "mkdtemp") as make_temporary,
+            mock.patch.object(first_kill.urllib.request, "urlopen") as urlopen,
+            mock.patch.object(first_kill, "total_memory_bytes") as memory,
+            mock.patch.object(first_kill, "free_root_bytes") as disk,
+            contextlib.redirect_stdout(output),
+        ):
+            result = first_kill.main(["--third-party-download-plan"])
+        self.assertEqual(0, result)
+        payload = output.getvalue()
+        self.assertEqual(first_kill.build_third_party_download_plan(), json.loads(payload))
+        for forbidden_field in ('"path"', '"argv"', '"env"', '"platform"', '"host"'):
+            self.assertNotIn(forbidden_field, payload)
+        for forbidden in (
+            operator,
+            compatibility,
+            repository_root,
+            identity,
+            prepare_workspace,
+            release_files,
+            download,
+            run,
+            install_release,
+            run_real_smoke,
+            remove_installation,
+            make_temporary,
+            urlopen,
+            memory,
+            disk,
+        ):
+            forbidden.assert_not_called()
+
+    def test_third_party_plan_rejects_preflight_flag_before_effects(self) -> None:
+        errors = io.StringIO()
+        with (
+            mock.patch.object(first_kill, "operator_name") as operator,
+            contextlib.redirect_stderr(errors),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            first_kill.main(["--third-party-download-plan", "--preflight-only"])
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("--third-party-download-plan cannot be combined", errors.getvalue())
+        operator.assert_not_called()
+
     def test_preflight_requires_every_fixed_installer_command(self) -> None:
         self.assertEqual(
             EXPECTED_FIRST_KILL_COMMANDS,

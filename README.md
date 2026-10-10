@@ -79,6 +79,33 @@ llama.cpp runner, shows it running, lets Eggcracker recognise the unapproved
 workload, and prints the post-kill receipt. It also checks that an unrelated
 canary survives.
 
+### Inspect the third-party download plan before consent
+
+Before supplying an acceptance flag, inspect the deterministic, offline
+source-only plan from the exact source checkout:
+
+```sh
+/usr/bin/python3 -B -I -S scripts/prepare_ai_smoke.py \
+  --third-party-download-plan
+/usr/bin/python3 -B -I -S scripts/first_kill.py \
+  --third-party-download-plan
+```
+
+These commands print only the pinned llama.cpp repository/tag/commit, the
+declared model URL/revision/SHA256 and license labels, the model download cap,
+the existing minimum memory and root-storage requirements, and explicit
+transfer-limit caveats. They make no network request, host probe, subprocess,
+workspace, installation, or other effect. The llama.cpp clone has `status: UNKNOWN`
+and is `UNCAPPED_BY_THIS_TOOL`; `model_download_max_bytes` is only a model response
+cap, not a total transfer bound, and source clone/build/package/release
+transfers are not bounded. License labels are declared metadata, not verified
+licenses or legal clearance.
+
+The plan is not a released capability and is not a source-install workaround.
+It cannot be combined with execution, preflight, or third-party-download
+consent flags. Continue with the supported signed-release workflow below only
+after reviewing the plan and deciding whether to provide explicit consent.
+
 The release demonstration prints a bounded result like this after native
 qualification:
 
