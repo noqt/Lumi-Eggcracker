@@ -31,6 +31,7 @@ SOCKETS = {
     "incident_acknowledge": ADMIN_SOCKET,
     "incident_clear": ADMIN_SOCKET,
     "revoke": ADMIN_SOCKET,
+    "check_start": OPERATOR_SOCKET,
     "kill": OPERATOR_SOCKET,
     "start": OPERATOR_SOCKET,
 }

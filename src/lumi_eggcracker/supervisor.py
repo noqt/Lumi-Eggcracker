@@ -76,6 +76,7 @@ from .elfmarkers import scan_snapshot as runtime_scan_snapshot
 from .execution_policy import STATE_DIR as EXEC_POLICY_DIR
 from .execution_policy import create as create_execution_policy
 from .execution_policy import ephemeral as ephemeral_execution_policy
+from .execution_policy import inspect_executable
 from .execution_policy import load as load_execution_policy
 from .execution_policy import load_all as load_execution_policies
 from .execution_policy import public as public_execution_policy
@@ -116,13 +117,41 @@ from .watchdog import HEARTBEAT, HEARTBEAT_MAGIC, HEARTBEAT_SOCKET
 MAX_FRAME = 32 * 1024
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 POLICY_SCHEMA = "lumi-eggcracker.policy.v5"
+CHECK_START_SCHEMA = "lumi-eggcracker.check-start.v1"
+CHECK_START_READY_REASON = "EXACT_APPROVAL_MATCHED"
+CHECK_START_REASONS = frozenset(
+    {
+        CHECK_START_READY_REASON,
+        "APPROVAL_MISSING",
+        "EXECUTION_POLICY_INVALID",
+        "INVALID_ARGUMENTS",
+        "LOCKDOWN",
+        "NAME_UNAVAILABLE",
+        "STATE_UNAVAILABLE",
+    }
+)
+CHECK_START_NEXT_ACTIONS = {
+    CHECK_START_READY_REASON: (
+        "run start --require-approval immediately; admission is revalidated"
+    ),
+    "APPROVAL_MISSING": (
+        "create or restore the exact root approval for this tuple, then check again"
+    ),
+    "EXECUTION_POLICY_INVALID": (
+        "use a valid root-created execution policy or omit it, then check again"
+    ),
+    "INVALID_ARGUMENTS": "correct the launch tuple, then check again",
+    "LOCKDOWN": "clear the exact local lockdown through root recovery, then check again",
+    "NAME_UNAVAILABLE": "choose an unused workload name, then check again",
+    "STATE_UNAVAILABLE": "repair unavailable supervisor state, then check again",
+}
 QUERY_SOCKET = Path("/run/lumi-eggcracker/query.sock")
 OPERATOR_SOCKET = Path("/run/lumi-eggcracker/operator.sock")
 ADMIN_SOCKET = Path("/run/lumi-eggcracker/admin.sock")
 LEGACY_SOCKET = Path("/run/lumi-eggcracker/control.sock")
 SOCKET_ACTIONS = {
     QUERY_SOCKET: frozenset({"approvals", "detections", "doctor", "exec_policies", "incidents", "list", "status"}),
-    OPERATOR_SOCKET: frozenset({"kill", "start"}),
+    OPERATOR_SOCKET: frozenset({"check_start", "kill", "start"}),
     ADMIN_SOCKET: frozenset({
         "approve",
         "exec_policy_create",
@@ -190,6 +219,22 @@ def policy_network_mode(policy: dict[str, Any]) -> str:
     return value if value == "offline" else "unsupported"
 
 
+def check_start_projection(reason_code: str) -> dict[str, str]:
+    """Return the closed, nonidentifying result for a read-only launch check."""
+    if reason_code not in CHECK_START_REASONS:
+        raise JsonInputError("check-start reason is invalid")
+    return {
+        "next_action": CHECK_START_NEXT_ACTIONS[reason_code],
+        "reason_code": reason_code,
+        "result": (
+            "READY_TO_ATTEMPT"
+            if reason_code == CHECK_START_READY_REASON
+            else "NOT_READY"
+        ),
+        "schema": CHECK_START_SCHEMA,
+    }
+
+
 @dataclass(frozen=True)
 class _EvidenceCandidate:
     snapshot: ProcessSnapshot
@@ -206,6 +251,15 @@ class _DetectionGroup:
     witness: tuple[_EvidenceCandidate, ...]
     scope: tuple[_EvidenceCandidate, ...]
     boundary: str
+
+
+class _CheckStartNotReady(Exception):
+    """Internal marker for one allowlisted read-only launch-check reason."""
+
+    def __init__(self, reason_code: str) -> None:
+        if reason_code not in CHECK_START_REASONS - {CHECK_START_READY_REASON}:
+            raise ValueError("invalid check-start reason")
+        self.reason_code = reason_code
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -2959,8 +3013,9 @@ class Supervisor:
     def _active_exists(self) -> bool:
         return bool(getattr(self, "active_cgroups", set()))
 
-    def _start(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._require_workload_identity()
+    @staticmethod
+    def _parse_start_args(args: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Apply the one start argument contract without causing side effects."""
         base_arguments = {
             "argv",
             "cpu_quota_percent",
@@ -2977,8 +3032,6 @@ class Supervisor:
         if set(args) != base_arguments | {"exec_policy", "require_approval"}:
             raise JsonInputError("start arguments are invalid")
         name, argv, maximum = args["name"], args["argv"], args["max_pids"]
-        exec_policy_id = args["exec_policy"]
-        require_approval = args["require_approval"]
         memory_mib, cpu_quota = args["max_memory_mib"], args["cpu_quota_percent"]
         if not isinstance(name, str) or not NAME.fullmatch(name):
             raise JsonInputError("workload name is invalid")
@@ -2989,46 +3042,210 @@ class Supervisor:
             raise JsonInputError("max_memory_mib must be from 64 to 131072")
         if isinstance(cpu_quota, bool) or not isinstance(cpu_quota, int) or not 10 <= cpu_quota <= 10_000:
             raise JsonInputError("cpu_quota_percent must be from 10 to 10000")
-        if not isinstance(require_approval, bool):
+        if not isinstance(args["require_approval"], bool):
             raise JsonInputError("require_approval must be boolean")
+        return args, summary
+
+    def _read_only_incident_status(self) -> dict[str, Any]:
+        """Read incident health without the normal bounded-compaction write."""
+        root = getattr(self, "incidents", None)
+        if root is None:
+            return {"healthy": False, "count": 0, "active": 0, "lockdown": True}
+        if not getattr(self, "incident_health_healthy", True):
+            return {"healthy": False, "count": 0, "active": 0, "lockdown": True}
+        try:
+            values = incident_store.load_all(root)
+            active = incident_store.active(values)
+        except (JsonInputError, OSError, TypeError, ValueError, KeyError):
+            return {"healthy": False, "count": 0, "active": 0, "lockdown": True}
+        return {
+            "healthy": True,
+            "count": len(values),
+            "active": len(active),
+            "lockdown": bool(active),
+        }
+
+    def _incident_block_for_start_read_only(self, argv_sha256: str) -> dict[str, Any] | None:
+        """Find an exact relaunch lockdown without compacting incident history."""
+        root = getattr(self, "incidents", None)
+        if root is None:
+            raise JsonInputError("incident store is unavailable")
+        values = incident_store.load_all(root)
+        return incident_store.find_match(
+            values,
+            argv_sha256=argv_sha256,
+            uid=self.policy["workload_uid"],
+        )
+
+    def _start_admission(
+        self,
+        args: dict[str, Any],
+        summary: dict[str, Any],
+        *,
+        check_only: bool,
+        require_approval: bool,
+    ) -> dict[str, Any] | None:
+        """Run the shared read-only admission checks under the normal lock order."""
+        name = args["name"]
+        maximum = args["max_pids"]
+        memory_mib = args["max_memory_mib"]
+        cpu_quota = args["cpu_quota_percent"]
+        argv = args["argv"]
+        reserved_name = name_path(self.names, name)
+        if (
+            reserved_name.exists()
+            or reserved_name.is_symlink()
+            or self._active_exists()
+        ):
+            if check_only:
+                raise _CheckStartNotReady("NAME_UNAVAILABLE")
+            raise JsonInputError(
+                "one protected workload is already active or name is unavailable"
+            )
+        blocked = (
+            self._incident_block_for_start_read_only(summary["argv_sha256"])
+            if check_only
+            else self._incident_block_for_start(summary["argv_sha256"])
+        )
+        if blocked is not None:
+            if check_only:
+                raise _CheckStartNotReady("LOCKDOWN")
+            raise JsonInputError(
+                f"INCIDENT_LOCKDOWN: exact protected relaunch is blocked ({blocked['incident_id']})"
+            )
+        try:
+            approval = match_launch(
+                uid=self.policy["workload_uid"],
+                argv=argv,
+                approvals=self._load_approvals(),
+                max_pids=maximum,
+                max_memory_mib=memory_mib,
+                cpu_quota_percent=cpu_quota,
+            )
+        except JsonInputError:
+            approval = None
+        if require_approval and approval is None:
+            if check_only:
+                raise _CheckStartNotReady("APPROVAL_MISSING")
+            raise JsonInputError("protected launch is not approved")
+        return approval
+
+    def _start_execution_policy(
+        self,
+        args: dict[str, Any],
+        *,
+        run_id: str | None,
+    ) -> dict[str, Any] | None:
+        """Load the selected policy, or inspect the default executable read-only."""
+        exec_policy_id = args["exec_policy"]
+        if exec_policy_id is None:
+            if run_id is None:
+                inspect_executable(args["argv"][0])
+                return None
+            return ephemeral_execution_policy(args["argv"][0], run_id)
+        if isinstance(exec_policy_id, str):
+            return load_execution_policy(self.exec_policies, exec_policy_id)
+        raise JsonInputError("execution policy identity is invalid")
+
+    def _check_start(self, args: dict[str, Any]) -> dict[str, str]:
+        """Report exact launch eligibility without reserving or authorising anything."""
+        try:
+            self._require_workload_identity()
+        except (JsonInputError, OSError, TypeError, ValueError, KeyError, AttributeError):
+            return check_start_projection("STATE_UNAVAILABLE")
+        if not isinstance(args, dict) or set(args) not in (
+            {
+                "argv",
+                "cpu_quota_percent",
+                "max_memory_mib",
+                "max_pids",
+                "name",
+            },
+            {
+                "argv",
+                "cpu_quota_percent",
+                "exec_policy",
+                "max_memory_mib",
+                "max_pids",
+                "name",
+            },
+        ):
+            return check_start_projection("INVALID_ARGUMENTS")
+        try:
+            parsed, summary = self._parse_start_args(args)
+        except (
+            JsonInputError,
+            TypeError,
+            ValueError,
+            KeyError,
+            AttributeError,
+            RuntimeError,
+            RecursionError,
+            UnicodeError,
+        ):
+            return check_start_projection("INVALID_ARGUMENTS")
+        try:
+            incident_status = self._read_only_incident_status()
+        except (JsonInputError, OSError, TypeError, ValueError, KeyError, AttributeError, RuntimeError):
+            return check_start_projection("STATE_UNAVAILABLE")
+        if not isinstance(incident_status, dict) or incident_status.get("healthy") is not True:
+            return check_start_projection("STATE_UNAVAILABLE")
+        try:
+            with self.start_lock, self.approval_lock:
+                self._start_admission(
+                    parsed,
+                    summary,
+                    check_only=True,
+                    require_approval=True,
+                )
+                try:
+                    self._start_execution_policy(parsed, run_id=None)
+                except (
+                    JsonInputError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                    AttributeError,
+                    RuntimeError,
+                    RecursionError,
+                    UnicodeError,
+                ) as error:
+                    raise _CheckStartNotReady("EXECUTION_POLICY_INVALID") from error
+        except _CheckStartNotReady as error:
+            return check_start_projection(error.reason_code)
+        except (
+            JsonInputError,
+            OSError,
+            TypeError,
+            ValueError,
+            KeyError,
+            AttributeError,
+            RuntimeError,
+            RecursionError,
+            UnicodeError,
+        ):
+            return check_start_projection("STATE_UNAVAILABLE")
+        return check_start_projection(CHECK_START_READY_REASON)
+
+    def _start(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._require_workload_identity()
+        args, summary = self._parse_start_args(args)
+        name, argv, maximum = args["name"], args["argv"], args["max_pids"]
+        require_approval = args["require_approval"]
+        memory_mib, cpu_quota = args["max_memory_mib"], args["cpu_quota_percent"]
         if not self._incident_status()["healthy"]:
             raise JsonInputError("local lockdown state is unavailable; root recovery is required")
         with self.start_lock, self.approval_lock:
-            reserved_name = name_path(self.names, name)
-            if (
-                reserved_name.exists()
-                or reserved_name.is_symlink()
-                or self._active_exists()
-            ):
-                raise JsonInputError(
-                    "one protected workload is already active or name is unavailable"
-                )
-            blocked = self._incident_block_for_start(summary["argv_sha256"])
-            if blocked is not None:
-                raise JsonInputError(
-                    f"INCIDENT_LOCKDOWN: exact protected relaunch is blocked ({blocked['incident_id']})"
-                )
-            try:
-                approval = match_launch(
-                    uid=self.policy["workload_uid"],
-                    argv=argv,
-                    approvals=self._load_approvals(),
-                    max_pids=maximum,
-                    max_memory_mib=memory_mib,
-                    cpu_quota_percent=cpu_quota,
-                )
-            except JsonInputError:
-                approval = None
-            if require_approval and approval is None:
-                raise JsonInputError("protected launch is not approved")
+            approval = self._start_admission(
+                args,
+                summary,
+                check_only=False,
+                require_approval=require_approval,
+            )
             address_families = protected_systemd_address_families(approval)
             run_id = os.urandom(12).hex()
-            if exec_policy_id is None:
-                execution_policy = ephemeral_execution_policy(argv[0], run_id)
-            elif isinstance(exec_policy_id, str):
-                execution_policy = load_execution_policy(self.exec_policies, exec_policy_id)
-            else:
-                raise JsonInputError("execution policy identity is invalid")
+            execution_policy = self._start_execution_policy(args, run_id=run_id)
             unit = f"{UNIT_PREFIX}{run_id}.service"
             boundary: OfflineBoundary | None = None
             gate: Path | None = None
@@ -3486,6 +3703,8 @@ class Supervisor:
                 "workload_identity": workload_identity,
                 "workload_uid": self.policy["workload_uid"],
             }
+        if action == "check_start":
+            return self._check_start(args)
         if action == "start":
             return self._start(args)
         def public_run(record: dict[str, Any]) -> dict[str, Any]:

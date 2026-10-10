@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 from lumi_eggcracker import incidents
 from lumi_eggcracker.artifacts import ArtifactEvidence
+from lumi_eggcracker.client import OPERATOR_SOCKET as CLIENT_OPERATOR_SOCKET
+from lumi_eggcracker.client import SOCKETS as CLIENT_SOCKETS
 from lumi_eggcracker.containment import EmptyProof
 from lumi_eggcracker.detectors import DetectionMatch, load_bundled, match
 from lumi_eggcracker.discovery import ProcessIdentity, ProcessSnapshot
@@ -29,10 +31,12 @@ from lumi_eggcracker.jsonio import JsonInputError
 from lumi_eggcracker.records import RUN_SCHEMA, command_summary, load_run
 from lumi_eggcracker.supervisor import (
     MAX_FRAME,
+    OPERATOR_SOCKET,
     PROTECTED_SYSTEMD_ADDRESS_FAMILIES,
     PROTECTED_SYSTEMD_ENVIRONMENT,
     PROTECTED_SYSTEMD_INTERFACE_DISCOVERY_ADDRESS_FAMILIES,
     QUERY_SOCKET,
+    SOCKET_ACTIONS,
     Supervisor,
     _bounded_query_items,
     _EvidenceCandidate,
@@ -417,6 +421,203 @@ class SupervisorTests(unittest.TestCase):
                     }
                 )
             boundary.assert_not_called()
+
+    def test_check_start_matches_exact_tuple_and_is_side_effect_free(self) -> None:
+        supervisor = self._instance()
+        supervisor.approval_lock = threading.Lock()
+        supervisor.active_cgroups = set()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supervisor.approvals = root / "approvals"
+            supervisor.approvals.mkdir()
+            supervisor.names = root / "names"
+            supervisor.names.mkdir()
+            supervisor.incidents = root / "incidents"
+            supervisor.exec_policies = root / "exec-policies"
+            args = {
+                "argv": ["/bin/true", "--exact"],
+                "cpu_quota_percent": 700,
+                "max_memory_mib": 4096,
+                "max_pids": 12,
+                "name": "demo",
+            }
+            approval = {"allow_interface_discovery": False}
+            with (
+                patch.object(supervisor, "_require_workload_identity"),
+                patch(
+                    "lumi_eggcracker.supervisor.match_launch",
+                    return_value=approval,
+                ) as match_launch,
+                patch(
+                    "lumi_eggcracker.supervisor.inspect_executable",
+                    return_value={"sha256": "a" * 64},
+                ) as inspect,
+                patch("lumi_eggcracker.supervisor.OfflineBoundary.create") as boundary,
+                patch("lumi_eggcracker.supervisor.os.urandom") as random,
+                patch("lumi_eggcracker.supervisor.write_atomic") as write,
+                patch.object(supervisor, "_make_gate") as make_gate,
+                patch.object(supervisor, "_make_exec_channel") as make_exec,
+                patch.object(supervisor, "_run") as run,
+            ):
+                value = supervisor.handle({"action": "check_start", "args": args})
+            self.assertEqual(
+                {
+                    "next_action": (
+                        "run start --require-approval immediately; admission is revalidated"
+                    ),
+                    "reason_code": "EXACT_APPROVAL_MATCHED",
+                    "result": "READY_TO_ATTEMPT",
+                    "schema": "lumi-eggcracker.check-start.v1",
+                },
+                value,
+            )
+            match_launch.assert_called_once_with(
+                uid=2001,
+                argv=["/bin/true", "--exact"],
+                approvals=[],
+                max_pids=12,
+                max_memory_mib=4096,
+                cpu_quota_percent=700,
+            )
+            inspect.assert_called_once_with("/bin/true")
+            boundary.assert_not_called()
+            random.assert_not_called()
+            write.assert_not_called()
+            make_gate.assert_not_called()
+            make_exec.assert_not_called()
+            run.assert_not_called()
+
+    def test_check_start_rejects_missing_approval_without_mutation(self) -> None:
+        supervisor = self._instance()
+        supervisor.approval_lock = threading.Lock()
+        supervisor.active_cgroups = set()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supervisor.approvals = root / "approvals"
+            supervisor.approvals.mkdir()
+            supervisor.names = root / "names"
+            supervisor.names.mkdir()
+            supervisor.incidents = root / "incidents"
+            supervisor.exec_policies = root / "exec-policies"
+            args = {
+                "argv": ["/bin/true"],
+                "cpu_quota_percent": 400,
+                "max_memory_mib": 2048,
+                "max_pids": 8,
+                "name": "demo",
+            }
+            with (
+                patch.object(supervisor, "_require_workload_identity"),
+                patch("lumi_eggcracker.supervisor.match_launch", return_value=None),
+                patch("lumi_eggcracker.supervisor.OfflineBoundary.create") as boundary,
+                patch("lumi_eggcracker.supervisor.os.urandom") as random,
+                patch("lumi_eggcracker.supervisor.write_atomic") as write,
+            ):
+                value = supervisor.handle({"action": "check_start", "args": args})
+            self.assertEqual("NOT_READY", value["result"])
+            self.assertEqual("APPROVAL_MISSING", value["reason_code"])
+            self.assertNotIn("/bin/true", json.dumps(value))
+            boundary.assert_not_called()
+            random.assert_not_called()
+            write.assert_not_called()
+
+    def test_check_start_reports_name_lockdown_and_unavailable_state(self) -> None:
+        supervisor = self._instance()
+        supervisor.approval_lock = threading.Lock()
+        supervisor.active_cgroups = set()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supervisor.approvals = root / "approvals"
+            supervisor.approvals.mkdir()
+            supervisor.names = root / "names"
+            supervisor.names.mkdir()
+            supervisor.incidents = root / "incidents"
+            supervisor.exec_policies = root / "exec-policies"
+            args = {
+                "argv": ["/bin/true"],
+                "cpu_quota_percent": 400,
+                "max_memory_mib": 2048,
+                "max_pids": 8,
+                "name": "demo",
+            }
+            with patch.object(supervisor, "_require_workload_identity"):
+                supervisor.active_cgroups.add("owned")
+                self.assertEqual(
+                    "NAME_UNAVAILABLE",
+                    supervisor.handle({"action": "check_start", "args": args})[
+                        "reason_code"
+                    ],
+                )
+                supervisor.active_cgroups.clear()
+                with patch.object(
+                    supervisor,
+                    "_incident_block_for_start_read_only",
+                    return_value={"incident_id": "private-incident"},
+                ):
+                    value = supervisor.handle({"action": "check_start", "args": args})
+                self.assertEqual("LOCKDOWN", value["reason_code"])
+                self.assertNotIn("private-incident", json.dumps(value))
+                with patch.object(
+                    supervisor,
+                    "_read_only_incident_status",
+                    return_value={"healthy": False},
+                ):
+                    self.assertEqual(
+                        "STATE_UNAVAILABLE",
+                        supervisor.handle({"action": "check_start", "args": args})[
+                            "reason_code"
+                        ],
+                    )
+
+    def test_check_start_rejects_invalid_arguments_and_execution_policy(self) -> None:
+        supervisor = self._instance()
+        supervisor.approval_lock = threading.Lock()
+        supervisor.active_cgroups = set()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            supervisor.approvals = root / "approvals"
+            supervisor.approvals.mkdir()
+            supervisor.names = root / "names"
+            supervisor.names.mkdir()
+            supervisor.incidents = root / "incidents"
+            supervisor.exec_policies = root / "exec-policies"
+            invalid = {
+                "argv": ["/bin/true"],
+                "cpu_quota_percent": 400,
+                "max_memory_mib": 2048,
+                "max_pids": 3,
+                "name": "demo",
+            }
+            with patch.object(supervisor, "_require_workload_identity"):
+                self.assertEqual(
+                    "INVALID_ARGUMENTS",
+                    supervisor.handle({"action": "check_start", "args": invalid})[
+                        "reason_code"
+                    ],
+                )
+                valid = {**invalid, "max_pids": 8}
+                with (
+                    patch("lumi_eggcracker.supervisor.match_launch", return_value={}),
+                    patch(
+                        "lumi_eggcracker.supervisor.inspect_executable",
+                        side_effect=JsonInputError("private policy path"),
+                    ),
+                ):
+                    self.assertEqual(
+                        "EXECUTION_POLICY_INVALID",
+                        supervisor.handle({"action": "check_start", "args": valid})[
+                            "reason_code"
+                        ],
+                    )
+
+    def test_check_start_is_only_authorized_on_operator_socket(self) -> None:
+        self.assertIn("check_start", SOCKET_ACTIONS[OPERATOR_SOCKET])
+        self.assertNotIn("check_start", SOCKET_ACTIONS[QUERY_SOCKET])
+        self.assertNotIn(
+            "check_start",
+            SOCKET_ACTIONS[Path("/run/lumi-eggcracker/admin.sock")],
+        )
+        self.assertEqual(CLIENT_OPERATOR_SOCKET, CLIENT_SOCKETS["check_start"])
 
     def test_oversized_valid_json_integer_is_rejected_without_escaping(self) -> None:
         server, client = socket.socketpair()

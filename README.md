@@ -443,6 +443,52 @@ with a redacted support bundle; route security-sensitive findings through
   missing or concurrently revoked approval rejects the launch before Eggcracker
   creates any workload boundary or process.
 
+### Check an exact approved launch (source version)
+
+The source build containing this change adds a read-only operator check for the
+same name, complete argv, and resource tuple used by
+`start --require-approval`:
+
+```sh
+SOURCE_COMMIT="<exact integrated commit containing check-start>"
+if [ "$SOURCE_COMMIT" = "<exact integrated commit containing check-start>" ]; then
+  echo "replace SOURCE_COMMIT with the exact integrated commit first" >&2
+  exit 1
+fi
+git clone https://github.com/noqt/Lumi-Eggcracker.git
+cd Lumi-Eggcracker
+git fetch --tags https://github.com/noqt/Lumi-Eggcracker.git "$SOURCE_COMMIT"
+git checkout --detach "$SOURCE_COMMIT"
+test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+
+eggcracker check-start \
+  --name demo \
+  --max-pids 8 \
+  --max-memory-mib 2048 \
+  --cpu-quota-percent 400 \
+  -- /absolute/path/to/runtime --arg value
+```
+
+The command is only a current snapshot of operator admission checks. It
+requires the exact root approval, reads the name/active-workload and exact
+lockdown state, and validates the selected execution policy when one is given.
+It creates no reservation, approval, run ID, stage, gate, execution channel,
+boundary, process, or durable state. `READY_TO_ATTEMPT` means the tuple matched
+those checks at that instant; `start --require-approval` performs its own
+atomic revalidation and remains the only launch authority. It does not prove
+all host prerequisites or future launch success, and it is not containment
+evidence or an approval grant.
+
+The fixed JSON result uses `READY_TO_ATTEMPT` or `NOT_READY` (`0` and `6`
+respectively). Corrective
+`NOT_READY` reason codes are `APPROVAL_MISSING`, `NAME_UNAVAILABLE`,
+`LOCKDOWN`, `STATE_UNAVAILABLE`, `INVALID_ARGUMENTS`, and
+`EXECUTION_POLICY_INVALID`; correct the indicated local condition and run the
+same snapshot check again. The result contains no command, path, workload name,
+UID, incident identity, or raw exception text. This workflow is available only
+in a source/build containing the change; it is not a claim about the published
+v1.0.10 package.
+
 The product is intentionally a kill switch, not an alerting dashboard. It
 does not wait for an operator after an unapproved complete match.
 
