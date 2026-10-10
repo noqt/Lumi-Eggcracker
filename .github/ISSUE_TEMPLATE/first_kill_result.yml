@@ -41,7 +41,7 @@ body:
         - Containment probe passed, the target tree was empty, and the canary survived
         - Containment probe stopped with a redacted reason code
         - Full demonstration passed and the unrelated canary survived
-        - Full demonstration stopped with a non-security error
+        - Full demonstration stopped with the bounded failure object
         - Result was confusing or did not match the documentation
     validations:
       required: true
@@ -49,7 +49,8 @@ body:
     id: redacted_result
     attributes:
       label: Redacted result
-      description: For a containment-probe pass, paste only its complete JSON receipt. For a full pass, include only result, profile, trigger, primitive, captured_processes, root_populated, surviving_pids count, trigger_to_empty_ms, canary outcome, and cleanup outcome. For a refusal or error, include only the redacted reason code and the smallest safe reproduction; never paste raw commands, arguments, paths, process IDs, or environment values.
+      description: For a containment-probe pass, paste only its complete JSON receipt. For a full pass, include only result, profile, trigger, primitive, captured_processes, root_populated, surviving_pids count, trigger_to_empty_ms, canary outcome, and cleanup outcome. For a full-run failure, paste the complete bounded JSON object from stderr with exactly schema, version, result, stage, reason_code, installation_state, removal_guidance, and next_action; keep its fixed values unchanged. For a refusal or error, never paste exception text, raw commands, arguments, paths, process IDs, account names, or environment values.
+      placeholder: '{"installation_state":"NOT_INSTALLED","next_action":"STOP_AND_REVIEW_BEFORE_RETRY","reason_code":"PRE_INSTALL_FAILURE","removal_guidance":"NOT_REQUIRED","result":"FULL_RUN_FAILED","schema":"lumi-eggcracker.first-kill-failure.v1","stage":"pre-install","version":1}'
     validations:
       required: true
   - type: textarea

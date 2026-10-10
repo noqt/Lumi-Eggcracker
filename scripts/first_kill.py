@@ -84,6 +84,86 @@ class FirstKillError(RuntimeError):
 
 
 PREFLIGHT_SCHEMA = "lumi-eggcracker.first-kill-preflight.v1"
+FULL_RUN_FAILURE_SCHEMA = "lumi-eggcracker.first-kill-failure.v1"
+FULL_RUN_FAILURE_VERSION = 1
+FULL_RUN_NEXT_ACTION = "STOP_AND_REVIEW_BEFORE_RETRY"
+
+FULL_RUN_STAGE_PRE_INSTALL = "pre-install"
+FULL_RUN_STAGE_INSTALL = "install"
+FULL_RUN_STAGE_POST_INSTALL = "post-install"
+FULL_RUN_STAGE_REMOVAL = "removal"
+FULL_RUN_STAGE_UNKNOWN = "unknown"
+FULL_RUN_STAGES = frozenset(
+    {
+        FULL_RUN_STAGE_PRE_INSTALL,
+        FULL_RUN_STAGE_INSTALL,
+        FULL_RUN_STAGE_POST_INSTALL,
+        FULL_RUN_STAGE_REMOVAL,
+        FULL_RUN_STAGE_UNKNOWN,
+    }
+)
+FULL_RUN_INSTALL_STATE_NOT_INSTALLED = "NOT_INSTALLED"
+FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL = "UNKNOWN_OR_PARTIAL"
+FULL_RUN_INSTALL_STATE_INSTALLED = "INSTALLED"
+FULL_RUN_INSTALL_STATES = frozenset(
+    {
+        FULL_RUN_INSTALL_STATE_NOT_INSTALLED,
+        FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL,
+        FULL_RUN_INSTALL_STATE_INSTALLED,
+    }
+)
+FULL_RUN_REMOVAL_NOT_REQUIRED = "NOT_REQUIRED"
+FULL_RUN_REMOVAL_MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
+FULL_RUN_FAILURE_FIELDS = frozenset(
+    {
+        "installation_state",
+        "next_action",
+        "reason_code",
+        "removal_guidance",
+        "result",
+        "schema",
+        "stage",
+        "version",
+    }
+)
+
+
+def _full_run_failure_diagnostic(stage: str, installation_state: str) -> dict[str, str | int]:
+    """Return the fixed-shape, redacted report for a full-run failure."""
+    if stage not in FULL_RUN_STAGES:
+        stage = FULL_RUN_STAGE_UNKNOWN
+    if installation_state not in FULL_RUN_INSTALL_STATES:
+        installation_state = FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL
+    reason_code = {
+        FULL_RUN_STAGE_PRE_INSTALL: "PRE_INSTALL_FAILURE",
+        FULL_RUN_STAGE_INSTALL: "INSTALL_FAILURE",
+        FULL_RUN_STAGE_POST_INSTALL: "POST_INSTALL_FAILURE",
+        FULL_RUN_STAGE_REMOVAL: "REMOVAL_FAILURE",
+        FULL_RUN_STAGE_UNKNOWN: "UNKNOWN_FAILURE",
+    }[stage]
+    removal_guidance = {
+        FULL_RUN_INSTALL_STATE_NOT_INSTALLED: FULL_RUN_REMOVAL_NOT_REQUIRED,
+        FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL: FULL_RUN_REMOVAL_MANUAL_REVIEW_REQUIRED,
+        FULL_RUN_INSTALL_STATE_INSTALLED: FULL_RUN_REMOVAL_MANUAL_REVIEW_REQUIRED,
+    }[installation_state]
+    return {
+        "installation_state": installation_state,
+        "next_action": FULL_RUN_NEXT_ACTION,
+        "reason_code": reason_code,
+        "removal_guidance": removal_guidance,
+        "result": "FULL_RUN_FAILED",
+        "schema": FULL_RUN_FAILURE_SCHEMA,
+        "stage": stage,
+        "version": FULL_RUN_FAILURE_VERSION,
+    }
+
+
+def _print_full_run_failure(stage: str, installation_state: str) -> None:
+    """Print only the bounded full-run failure object; never serialize the exception."""
+    print(
+        json.dumps(_full_run_failure_diagnostic(stage, installation_state), indent=2, sort_keys=True),
+        file=sys.stderr,
+    )
 
 
 class PreflightDiagnostic:
@@ -1098,9 +1178,11 @@ def main(argv: list[str] | None = None) -> int:
     workspace: Path | None = None
     ai_workspace: Path | None = None
     ai_workspace_preexisting = False
-    installed = False
     release_root: Path | None = None
+    stage = FULL_RUN_STAGE_PRE_INSTALL
+    installation_state = FULL_RUN_INSTALL_STATE_NOT_INSTALLED
     try:
+        stage = FULL_RUN_STAGE_PRE_INSTALL
         operator = operator_name(args.operator)
         say("checking Linux, cgroup-v2, pidfd and clean-install compatibility")
         compatibility(operator)
@@ -1145,8 +1227,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         say(f"signature and release identity verified: {args.tag} -> {commit}")
         say("installing the root-controlled supervisor")
+        stage = FULL_RUN_STAGE_INSTALL
+        installation_state = FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL
         install_release(release_root, operator, release)
-        installed = True
+        installation_state = FULL_RUN_INSTALL_STATE_INSTALLED
+        stage = FULL_RUN_STAGE_POST_INSTALL
         workload_user = installed_workload_user()
         say("preparing the pinned real local-AI smoke assets (explicit third-party download)")
         say("launching an unapproved model and waiting for the complete-tree kill")
@@ -1162,12 +1247,13 @@ def main(argv: list[str] | None = None) -> int:
         should_remove = args.remove or (not args.keep and cleanup_choice())
         if should_remove:
             say("removing Eggcracker and temporary smoke assets")
+            stage = FULL_RUN_STAGE_REMOVAL
+            installation_state = FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL
             remove_installation(
                 release_root,
                 workspace,
                 None if ai_workspace_preexisting else ai_workspace,
             )
-            installed = False
             workspace = None
             ai_workspace = None
             say("clean removal passed")
@@ -1178,9 +1264,7 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(error, KeyboardInterrupt):
             say("cancelled")
         else:
-            print(f"eggcracker first-kill: {error}", file=sys.stderr)
-        if installed and release_root is not None and workspace is not None and not args.keep:
-            say("installation remains in place; rerun with --remove after reviewing the failure")
+            _print_full_run_failure(stage, installation_state)
         return 2
 
 
