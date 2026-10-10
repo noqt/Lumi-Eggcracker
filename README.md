@@ -541,6 +541,21 @@ The snapshot is not containment proof. `doctor --summary` is available only in
 the source/build that contains this change; its presence is not a claim that
 the published v1.0.10 release includes this option.
 
+## Validate a manual kill receipt
+
+After building and installing a source revision that contains this change,
+validate one local manual-kill receipt offline:
+
+```sh
+eggcracker validate-kill-receipt ./kill-receipt.json
+```
+
+The command accepts only a bounded current v3 OPERATOR receipt, including its
+pre- and post-cleanup forms, and reports structural validity with fixed
+nonidentifying output. It does not authenticate a receipt or prove independent
+containment. This option is available only in a source/build containing the
+change; it is not a claim that the published v1.0.10 release includes it.
+
 ## Install and remove
 
 The first-kill command is the recommended campaign path. A release is complete
