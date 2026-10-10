@@ -18,6 +18,122 @@ from .support_bundle import main as support_bundle_main
 from .support_bundle import validate_main as validate_support_bundle_main
 from .watchdog import main as watchdog_main
 
+_DOCTOR_SUMMARY_SCHEMA = "lumi-eggcracker.doctor-summary.v1"
+_DOCTOR_SUMMARY_ERROR = "eggcracker: doctor summary unavailable"
+_DOCTOR_SUMMARY_INSTALLATION_STATES = frozenset(
+    {"HEALTHY", "DRIFT", "RECOVERY_REQUIRED", "NOT_INSTALLED"}
+)
+_DOCTOR_SUMMARY_NETWORK_MODES = frozenset({"offline", "unsupported"})
+
+
+class _DoctorSummaryInvalid(ValueError):
+    """The supervisor response cannot be safely reduced to a doctor summary."""
+
+
+def _doctor_summary(value: object) -> dict[str, object]:
+    """Reduce a doctor response to a fixed, nonidentifying health object."""
+
+    if type(value) is not dict:
+        raise _DoctorSummaryInvalid
+
+    result = value.get("result")
+    if type(result) is not str or result not in {"PASS", "UNSUPPORTED"}:
+        raise _DoctorSummaryInvalid
+
+    def required_bool(container: object, key: str) -> bool:
+        if type(container) is not dict or key not in container:
+            raise _DoctorSummaryInvalid
+        item = container[key]
+        if type(item) is not bool:
+            raise _DoctorSummaryInvalid
+        return item
+
+    autonomous_discovery = required_bool(value, "autonomous_discovery")
+    cgroup_v2 = required_bool(value, "cgroup_v2")
+    pidfd = required_bool(value, "pidfd")
+
+    network = value.get("network")
+    if type(network) is not dict:
+        raise _DoctorSummaryInvalid
+    network_mode = network.get("mode")
+    if type(network_mode) is not str or network_mode not in _DOCTOR_SUMMARY_NETWORK_MODES:
+        raise _DoctorSummaryInvalid
+    network_primitives = network.get("primitives")
+    primitives_supported = required_bool(network_primitives, "supported")
+    network_cleanup = required_bool(network, "cleanup_healthy")
+
+    execution_boundary = value.get("execution_boundary")
+    execution_supported = required_bool(execution_boundary, "supported")
+
+    discovery = value.get("discovery")
+    discovery_healthy = required_bool(discovery, "healthy")
+    receipt_persistence = required_bool(discovery, "receipt_persistence_healthy")
+
+    incidents = value.get("incidents")
+    incidents_healthy = required_bool(incidents, "healthy")
+    incidents_lockdown = required_bool(incidents, "lockdown")
+    if not incidents_healthy and not incidents_lockdown:
+        raise _DoctorSummaryInvalid
+
+    installation = value.get("installation")
+    if type(installation) is not dict or "state" not in installation:
+        raise _DoctorSummaryInvalid
+    installation_state = installation["state"]
+    if (
+        type(installation_state) is not str
+        or installation_state not in _DOCTOR_SUMMARY_INSTALLATION_STATES
+    ):
+        raise _DoctorSummaryInvalid
+
+    workload_identity = value.get("workload_identity")
+    workload_identity_healthy = required_bool(workload_identity, "healthy")
+
+    failed_checks: set[str] = set()
+    if not cgroup_v2:
+        failed_checks.add("cgroup_v2")
+    if not pidfd:
+        failed_checks.add("pidfd")
+    if network_mode != "offline":
+        failed_checks.add("network_mode")
+    if not primitives_supported:
+        failed_checks.add("network_primitives")
+    if not network_cleanup:
+        failed_checks.add("network_cleanup")
+    if not execution_supported:
+        failed_checks.add("execution_boundary")
+    if not discovery_healthy:
+        failed_checks.add("discovery")
+    if not receipt_persistence:
+        failed_checks.add("receipt_persistence")
+    if not incidents_healthy:
+        failed_checks.add("incidents")
+    if installation_state != "HEALTHY":
+        failed_checks.add("installation")
+    if not workload_identity_healthy:
+        failed_checks.add("workload_identity")
+
+    if result == "PASS":
+        if not autonomous_discovery or failed_checks:
+            raise _DoctorSummaryInvalid
+        summary_result = "READY"
+    else:
+        if autonomous_discovery:
+            raise _DoctorSummaryInvalid
+        if not failed_checks:
+            # The supervisor also gates readiness on quarantine_root, which is
+            # deliberately not exposed by its public doctor response.
+            failed_checks.add("supervisor_readiness")
+        summary_result = "NOT_READY"
+
+    return {
+        "failed_checks": sorted(failed_checks),
+        "next_action": (
+            "NONE" if summary_result == "READY" else "REVIEW_SUPERVISOR_READINESS"
+        ),
+        "result": summary_result,
+        "schema": _DOCTOR_SUMMARY_SCHEMA,
+    }
+
 
 class _RejectDuplicateIdentifier(argparse.Action):
     """Accept one identifier option and fail closed on a repeated spelling."""
@@ -102,7 +218,12 @@ def _parser() -> argparse.ArgumentParser:
     ):
         command = incident_commands.add_parser(action, help=help_text)
         command.add_argument("incident_id")
-    commands.add_parser("doctor", help="check the installed protected supervisor")
+    doctor = commands.add_parser("doctor", help="check the installed protected supervisor")
+    doctor.add_argument(
+        "--summary",
+        action="store_true",
+        help="emit a bounded readiness summary instead of the full doctor response",
+    )
     support = commands.add_parser(
         "support-bundle", help="write a local redacted health and receipt bundle"
     )
@@ -149,6 +270,14 @@ def main(argv: list[str] | None = None) -> int:
         return support_bundle_main(args.output)
     try:
         if args.command == "doctor":
+            if args.summary:
+                try:
+                    summary = _doctor_summary(request("doctor"))
+                except Exception:  # noqa: BLE001 - summary failures are intentionally constant
+                    print(_DOCTOR_SUMMARY_ERROR, file=sys.stderr)
+                    return 6
+                print(json.dumps(summary, sort_keys=True))
+                return 0 if summary["result"] == "READY" else 6
             value = request("doctor")
             print(json.dumps(value, sort_keys=True))
             return 0 if value.get("result") == "PASS" else 6
