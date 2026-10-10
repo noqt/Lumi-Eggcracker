@@ -12,8 +12,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .jsonio import write_new_json
+
 RECEIPT_SCHEMA = "lumi-eggcracker.receipt.v3"
 VALIDATION_SCHEMA = "lumi-eggcracker.kill-receipt-validation.v1"
+HANDOFF_SCHEMA = "lumi-eggcracker.kill-receipt-handoff.v1"
 MAX_INPUT_BYTES = 32 * 1024
 MAX_OUTPUT_BYTES = 2048
 MAX_JSON_DEPTH = 32
@@ -22,9 +25,18 @@ MAX_INTEGER = (1 << 63) - 1
 MAX_TEXT_BYTES = 4096
 MAX_RETURN_CODE = (1 << 31) - 1
 SAFE_ERROR = "eggcracker validate-kill-receipt: receipt is invalid or cannot be read"
+HANDOFF_SAFE_ERROR = (
+    "eggcracker prepare-kill-receipt-handoff: receipt is invalid or cannot be prepared"
+)
 LIMITATIONS = (
     "Structural validation only; not authentication or independent containment proof."
 )
+HANDOFF_LIMITATIONS = (
+    "Intended destination only; not permission or authorization to submit. "
+    "Not authentication, anonymity or privacy-safety, independent containment proof, "
+    "or safe-to-share certification. Operator review required."
+)
+HANDOFF_ROUTES = frozenset({"q-and-a", "bug-report", "private-security"})
 
 _EVENT_ID = re.compile(r"[0-9a-f]{24}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}\Z")
@@ -434,11 +446,16 @@ def _validate_receipt(value: dict[str, Any]) -> None:
         _fail()
 
 
+def _validated_receipt(path: str | os.PathLike[str]) -> dict[str, Any]:
+    value = _decode(_read_source(path))
+    _validate_receipt(value)
+    return value
+
+
 def validate_receipt(path: str | os.PathLike[str]) -> dict[str, str]:
     """Validate one receipt and return only fixed nonidentifying fields."""
 
-    value = _decode(_read_source(path))
-    _validate_receipt(value)
+    _validated_receipt(path)
     result = {
         "limitations": LIMITATIONS,
         "result": "STRUCTURE_VALID",
@@ -450,6 +467,92 @@ def validate_receipt(path: str | os.PathLike[str]) -> dict[str, str]:
     if len(encoded) > MAX_OUTPUT_BYTES:
         _fail()
     return result
+
+
+def _cleanup_outcome(value: dict[str, Any]) -> str:
+    cleanup = value["cleanup"]
+    if cleanup["attempted"] is False:
+        return "NOT_ATTEMPTED"
+    if (
+        "offline_boundary_error" in cleanup
+        or isinstance(cleanup.get("offline_boundary"), dict)
+        and set(cleanup["offline_boundary"]) == {"error"}
+        or cleanup["systemctl_stop_returncode"] != 0
+        or value.get("cleanup_update_error") is True
+    ):
+        return "ATTEMPTED_WITH_ERRORS"
+    return "ATTEMPTED"
+
+
+def _handoff_projection(value: dict[str, Any], route: str) -> dict[str, Any]:
+    if type(route) is not str or route not in HANDOFF_ROUTES:
+        _fail()
+    containment = value["containment"]
+    return {
+        "schema_version": HANDOFF_SCHEMA,
+        "result": "HANDOFF_PREPARED",
+        "trigger": "OPERATOR",
+        "primitive": "cgroup.kill",
+        "cgroup_kill_written": containment["cgroup_kill_written"],
+        "root_populated": containment["root_populated"],
+        "surviving_pids_count": len(containment["surviving_pids"]),
+        "descendant_cgroups_checked": containment["descendant_cgroups_checked"],
+        "trigger_to_empty_ms": containment["trigger_to_empty_ms"],
+        "cleanup_outcome": _cleanup_outcome(value),
+        "route": route,
+        "limitations": HANDOFF_LIMITATIONS,
+    }
+
+
+def _new_output_path(path_value: str | os.PathLike[str]) -> Path:
+    if not isinstance(path_value, (str, os.PathLike)):
+        _fail()
+    try:
+        path = Path(path_value)
+        parent = path.parent
+        parent_info = os.lstat(parent)
+        if _link_like(parent_info) or not stat.S_ISDIR(parent_info.st_mode):
+            _fail()
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return path
+        _fail()
+    except (OSError, TypeError, ValueError):
+        _fail()
+
+
+def prepare_handoff(
+    receipt_path: str | os.PathLike[str],
+    route: str,
+    output_path: str | os.PathLike[str],
+) -> dict[str, Any]:
+    value = _validated_receipt(receipt_path)
+    projection = _handoff_projection(value, route)
+    destination = _new_output_path(output_path)
+    try:
+        write_new_json(destination, projection)
+    except Exception:  # noqa: BLE001 - all publication failures are constant.
+        _fail()
+    return projection
+
+
+def prepare_handoff_main(arguments: list[str]) -> int:
+    try:
+        if (
+            len(arguments) != 5
+            or arguments[1] != "--route"
+            or arguments[3] != "--output"
+            or type(arguments[2]) is not str
+            or arguments[2] not in HANDOFF_ROUTES
+        ):
+            _fail()
+        projection = prepare_handoff(arguments[0], arguments[2], arguments[4])
+    except Exception:  # noqa: BLE001 - never echo untrusted arguments or receipt data.
+        print(HANDOFF_SAFE_ERROR, file=sys.stderr)
+        return 4
+    print(json.dumps(projection, sort_keys=True, separators=(",", ":")))
+    return 0
 
 
 def main(arguments: list[str]) -> int:
