@@ -52,6 +52,7 @@ class CliTests(unittest.TestCase):
         help_text = _parser().format_help()
         for command in (
             "start",
+            "check-start",
             "kill",
             "status",
             "list",
@@ -396,6 +397,144 @@ class CliTests(unittest.TestCase):
             argv=["/bin/sleep", "1"],
             require_approval=True,
         )
+
+    def test_check_start_forwards_exact_tuple_and_emits_fixed_projection(self) -> None:
+        response = {
+            "next_action": (
+                "run start --require-approval immediately; admission is revalidated"
+            ),
+            "reason_code": "EXACT_APPROVAL_MATCHED",
+            "result": "READY_TO_ATTEMPT",
+            "schema": "lumi-eggcracker.check-start.v1",
+        }
+        output = io.StringIO()
+        with patch("lumi_eggcracker.cli.request", return_value=response) as request, redirect_stdout(output):
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "check-start",
+                        "--name",
+                        "demo",
+                        "--max-pids",
+                        "8",
+                        "--max-memory-mib",
+                        "4096",
+                        "--cpu-quota-percent",
+                        "700",
+                        "--exec-policy",
+                        "a" * 24,
+                        "--",
+                        "/bin/sleep",
+                        "1",
+                    ]
+                ),
+            )
+        request.assert_called_once_with(
+            "check_start",
+            name="demo",
+            max_pids=8,
+            max_memory_mib=4096,
+            cpu_quota_percent=700,
+            argv=["/bin/sleep", "1"],
+            exec_policy="a" * 24,
+        )
+        self.assertEqual(response, json.loads(output.getvalue()))
+
+    def test_check_start_malformed_or_transport_response_is_constant_safe_error(self) -> None:
+        cases = (
+            {"result": "READY_TO_ATTEMPT", "name": "/private/name"},
+            {
+                "next_action": "raw /private/path",
+                "reason_code": "EXACT_APPROVAL_MATCHED",
+                "result": "READY_TO_ATTEMPT",
+                "schema": "lumi-eggcracker.check-start.v1",
+            },
+        )
+        for response in (*cases, OSError("/private/socket")):
+            with self.subTest(response=response):
+                output = io.StringIO()
+                error = io.StringIO()
+                with patch(
+                    "lumi_eggcracker.cli.request",
+                    side_effect=response if isinstance(response, BaseException) else None,
+                    return_value=None if isinstance(response, BaseException) else response,
+                ) as request, redirect_stdout(output), redirect_stderr(error):
+                    self.assertEqual(
+                        4,
+                        main(
+                            [
+                                "check-start",
+                                "--name",
+                                "demo",
+                                "--max-pids",
+                                "8",
+                                "--",
+                                "/private/executable",
+                            ]
+                        ),
+                    )
+                self.assertEqual("", output.getvalue())
+                self.assertEqual(
+                    "eggcracker: check-start response unavailable\n",
+                    error.getvalue(),
+                )
+                self.assertNotIn("/private", error.getvalue())
+                request.assert_called_once()
+
+    def test_check_start_parse_failure_is_constant_and_excludes_canary(self) -> None:
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch("lumi_eggcracker.cli.request") as request, redirect_stdout(output), redirect_stderr(error):
+            self.assertEqual(
+                4,
+                main(
+                    [
+                        "check-start",
+                        "--name",
+                        "demo",
+                        "--max-pids",
+                        "/private/parse-canary",
+                        "--",
+                        "/private/executable-canary",
+                    ]
+                ),
+            )
+        self.assertEqual("", output.getvalue())
+        self.assertEqual(
+            "eggcracker: check-start response unavailable\n",
+            error.getvalue(),
+        )
+        self.assertNotIn("/private", error.getvalue())
+        request.assert_not_called()
+
+    def test_check_start_not_ready_is_a_nonzero_snapshot_result(self) -> None:
+        response = {
+            "next_action": (
+                "create or restore the exact root approval for this tuple, then check again"
+            ),
+            "reason_code": "APPROVAL_MISSING",
+            "result": "NOT_READY",
+            "schema": "lumi-eggcracker.check-start.v1",
+        }
+        output = io.StringIO()
+        with patch("lumi_eggcracker.cli.request", return_value=response), redirect_stdout(output):
+            self.assertEqual(
+                6,
+                main(
+                    [
+                        "check-start",
+                        "--name",
+                        "demo",
+                        "--max-pids",
+                        "8",
+                        "--",
+                        "/bin/sleep",
+                        "1",
+                    ]
+                ),
+            )
+        self.assertEqual(response, json.loads(output.getvalue()))
 
     def test_execution_policy_create_requires_root(self) -> None:
         with patch("lumi_eggcracker.cli.os.geteuid", return_value=1001, create=True):

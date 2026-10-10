@@ -22,6 +22,35 @@ from .watchdog import main as watchdog_main
 
 _DOCTOR_SUMMARY_SCHEMA = "lumi-eggcracker.doctor-summary.v1"
 _DOCTOR_SUMMARY_ERROR = "eggcracker: doctor summary unavailable"
+_CHECK_START_SCHEMA = "lumi-eggcracker.check-start.v1"
+_CHECK_START_ERROR = "eggcracker: check-start response unavailable"
+_CHECK_START_REASONS = frozenset(
+    {
+        "APPROVAL_MISSING",
+        "EXACT_APPROVAL_MATCHED",
+        "EXECUTION_POLICY_INVALID",
+        "INVALID_ARGUMENTS",
+        "LOCKDOWN",
+        "NAME_UNAVAILABLE",
+        "STATE_UNAVAILABLE",
+    }
+)
+_CHECK_START_NEXT_ACTIONS = {
+    "EXACT_APPROVAL_MATCHED": (
+        "run start --require-approval immediately; admission is revalidated"
+    ),
+    "APPROVAL_MISSING": (
+        "create or restore the exact root approval for this tuple, then check again"
+    ),
+    "EXECUTION_POLICY_INVALID": (
+        "use a valid root-created execution policy or omit it, then check again"
+    ),
+    "INVALID_ARGUMENTS": "correct the launch tuple, then check again",
+    "LOCKDOWN": "clear the exact local lockdown through root recovery, then check again",
+    "NAME_UNAVAILABLE": "choose an unused workload name, then check again",
+    "STATE_UNAVAILABLE": "repair unavailable supervisor state, then check again",
+}
+_CHECK_START_RESULTS = frozenset({"READY_TO_ATTEMPT", "NOT_READY"})
 _DOCTOR_SUMMARY_INSTALLATION_STATES = frozenset(
     {"HEALTHY", "DRIFT", "RECOVERY_REQUIRED", "NOT_INSTALLED"}
 )
@@ -137,6 +166,39 @@ def _doctor_summary(value: object) -> dict[str, object]:
     }
 
 
+def _check_start_projection(value: object) -> dict[str, str]:
+    """Accept only the supervisor's fixed, nonidentifying check result."""
+    if type(value) is not dict or set(value) != {
+        "next_action",
+        "reason_code",
+        "result",
+        "schema",
+    }:
+        raise ValueError
+    schema = value["schema"]
+    reason_code = value["reason_code"]
+    result = value["result"]
+    next_action = value["next_action"]
+    if (
+        type(schema) is not str
+        or schema != _CHECK_START_SCHEMA
+        or type(reason_code) is not str
+        or reason_code not in _CHECK_START_REASONS
+        or type(result) is not str
+        or result not in _CHECK_START_RESULTS
+        or type(next_action) is not str
+        or next_action != _CHECK_START_NEXT_ACTIONS[reason_code]
+        or (result == "READY_TO_ATTEMPT") != (reason_code == "EXACT_APPROVAL_MATCHED")
+    ):
+        raise ValueError
+    return {
+        "next_action": next_action,
+        "reason_code": reason_code,
+        "result": result,
+        "schema": schema,
+    }
+
+
 class _RejectDuplicateIdentifier(argparse.Action):
     """Accept one identifier option and fail closed on a repeated spelling."""
 
@@ -155,6 +217,39 @@ class _RejectDuplicateIdentifier(argparse.Action):
             )
         setattr(namespace, marker, True)
         setattr(namespace, self.dest, values)
+
+
+class _CheckStartParseFailure(Exception):
+    """Internal marker for one closed check-start parse failure."""
+
+
+class _CheckStartHelp(Exception):
+    """Internal marker for successfully rendered check-start help."""
+
+
+class _CheckStartParser(argparse.ArgumentParser):
+    """Keep check-start parser failures fixed and nonidentifying."""
+
+    def error(self, message: str) -> None:
+        raise _CheckStartParseFailure from None
+
+    def exit(self, status: int = 0, message: str | None = None) -> None:
+        if status == 0:
+            raise _CheckStartHelp
+        raise _CheckStartParseFailure from None
+
+
+def _add_check_start_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
+    parser.add_argument("--max-pids", required=True, type=int)
+    parser.add_argument("--max-memory-mib", default=2048, type=int)
+    parser.add_argument("--cpu-quota-percent", default=400, type=int)
+    parser.add_argument(
+        "--exec-policy",
+        action=_RejectDuplicateIdentifier,
+        help="root-created sealed-exec policy identifier",
+    )
+    parser.add_argument("argv", nargs=argparse.REMAINDER)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -176,6 +271,11 @@ def _parser() -> argparse.ArgumentParser:
         help="reject the launch unless an exact approval exists at admission time",
     )
     start.add_argument("argv", nargs=argparse.REMAINDER)
+    check_start = commands.add_parser(
+        "check-start",
+        help="check one exact approved launch without reserving or starting it",
+    )
+    _add_check_start_arguments(check_start)
     kill = commands.add_parser("kill", help="terminate one protected workload")
     kill.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     kill.add_argument("--receipt", required=True, type=Path)
@@ -263,8 +363,34 @@ def _command(argv: list[str]) -> list[str]:
     return argv[1:] if argv[:1] == ["--"] else argv
 
 
+def _check_start_main(values: list[str]) -> int:
+    parser = _CheckStartParser(prog="eggcracker check-start")
+    _add_check_start_arguments(parser)
+    try:
+        args = parser.parse_args(values)
+        check_args = {
+            "name": args.name,
+            "max_pids": args.max_pids,
+            "max_memory_mib": args.max_memory_mib,
+            "cpu_quota_percent": args.cpu_quota_percent,
+            "argv": _command(args.argv),
+        }
+        if args.exec_policy is not None:
+            check_args["exec_policy"] = args.exec_policy
+        value = _check_start_projection(request("check_start", **check_args))
+    except _CheckStartHelp:
+        return 0
+    except Exception:  # noqa: BLE001 - parse/transport/shape failures are constant
+        print(_CHECK_START_ERROR, file=sys.stderr)
+        return 4
+    print(json.dumps(value, sort_keys=True))
+    return 0 if value["result"] == "READY_TO_ATTEMPT" else 6
+
+
 def main(argv: list[str] | None = None) -> int:
     values = sys.argv[1:] if argv is None else argv
+    if values[:1] == ["check-start"]:
+        return _check_start_main(values[1:])
     if values[:1] == ["compare-detection-receipts"]:
         return compare_detection_receipts_main(
             values[1:], prog="eggcracker compare-detection-receipts"
