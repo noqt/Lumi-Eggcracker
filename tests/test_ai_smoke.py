@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -150,6 +152,112 @@ class AiSmokeTests(unittest.TestCase):
         self.assertEqual(40, len(prepare.LLAMA_COMMIT))
         self.assertEqual(64, len(prepare.MODEL_SHA256))
         self.assertIn("/resolve/", prepare.MODEL_URL)
+
+    def test_third_party_plan_is_exact_and_deterministic(self) -> None:
+        expected = {
+            "schema_version": "lumi-eggcracker.third-party-download-plan.v1",
+            "plan_version": 1,
+            "result": "THIRD_PARTY_DOWNLOAD_PLAN",
+            "mode": "offline-source-only",
+            "llama": {
+                "repository": "https://github.com/ggml-org/llama.cpp.git",
+                "tag": "b10240",
+                "commit": "0b14b87d7c20cb753b94b96854dd7b45306fc696",
+                "license": "MIT",
+                "license_status": "DECLARED_METADATA_NOT_VERIFIED",
+                "license_verified": False,
+                "legal_clearance": False,
+            },
+            "model": {
+                "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+                "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+                "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+                "license": "Apache-2.0",
+                "license_status": "DECLARED_METADATA_NOT_VERIFIED",
+                "license_verified": False,
+                "legal_clearance": False,
+            },
+            "model_download_max_bytes": 600 * 1024 * 1024,
+            "minimum_total_memory_bytes": 7 * 1024 * 1024 * 1024,
+            "minimum_free_root_bytes": 8 * 1024 * 1024 * 1024,
+            "transfer_limits": {
+                "llama_cpp_clone": {
+                    "status": "UNKNOWN",
+                    "bound": "UNCAPPED_BY_THIS_TOOL",
+                    "max_bytes": None,
+                    "bounded_by_this_tool": False,
+                },
+                "model_download": {
+                    "max_bytes": 600 * 1024 * 1024,
+                    "bounded_by_this_tool": True,
+                    "is_total_transfer_bound": False,
+                },
+                "source_clone_build_package_release": {
+                    "status": "UNCAPPED_BY_THIS_TOOL",
+                    "max_bytes": None,
+                    "bounded_by_this_tool": False,
+                },
+            },
+        }
+        first = prepare.build_third_party_download_plan()
+        second = prepare.build_third_party_download_plan()
+        self.assertEqual(expected, first)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            json.dumps(first, sort_keys=True),
+            json.dumps(second, sort_keys=True),
+        )
+
+    def test_third_party_plan_rejects_malformed_pinned_projection_without_reflection(self) -> None:
+        canary = "https://unsafe.example/private-path?argv=secret"
+        errors = io.StringIO()
+        with (
+            mock.patch.object(prepare, "MODEL_URL", canary),
+            contextlib.redirect_stderr(errors),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            prepare.main(["--third-party-download-plan"])
+        self.assertEqual("third-party download plan unavailable: pinned inputs are invalid", str(raised.exception))
+        self.assertNotIn(canary, errors.getvalue())
+
+    def test_third_party_plan_is_zero_effect_before_workspace_or_subprocess(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch.object(prepare, "validate_workspace") as validate_workspace,
+            mock.patch.object(prepare, "verify_manifest") as verify_manifest,
+            mock.patch.object(prepare, "prepare") as execute,
+            mock.patch.object(prepare, "run") as run,
+            mock.patch.object(prepare.subprocess, "run") as subprocess_run,
+            mock.patch.object(prepare.urllib.request, "urlopen") as urlopen,
+            contextlib.redirect_stdout(output),
+        ):
+            result = prepare.main(["--third-party-download-plan"])
+        self.assertEqual(0, result)
+        payload = output.getvalue()
+        self.assertEqual(prepare.build_third_party_download_plan(), json.loads(payload))
+        for forbidden_field in ('"path"', '"argv"', '"env"', '"platform"', '"host"'):
+            self.assertNotIn(forbidden_field, payload)
+        for forbidden in (
+            validate_workspace,
+            verify_manifest,
+            execute,
+            run,
+            subprocess_run,
+            urlopen,
+        ):
+            forbidden.assert_not_called()
+
+    def test_third_party_plan_rejects_consent_flag_before_effects(self) -> None:
+        errors = io.StringIO()
+        with (
+            mock.patch.object(prepare, "validate_workspace") as validate_workspace,
+            contextlib.redirect_stderr(errors),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            prepare.main(["--third-party-download-plan", "--accept-third-party-downloads"])
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("--third-party-download-plan cannot be combined", errors.getvalue())
+        validate_workspace.assert_not_called()
 
     def test_prepare_build_parallelism_matches_small_host(self) -> None:
         with mock.patch.object(prepare.os, "cpu_count", return_value=2):

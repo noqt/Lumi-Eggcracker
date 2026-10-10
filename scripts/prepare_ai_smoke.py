@@ -17,18 +17,37 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "lumi-eggcracker.ai-smoke-assets.v1"
+THIRD_PARTY_PLAN_SCHEMA = "lumi-eggcracker.third-party-download-plan.v1"
+THIRD_PARTY_DOWNLOAD_PLAN_SCHEMA = THIRD_PARTY_PLAN_SCHEMA
+PLAN_SCHEMA = THIRD_PARTY_PLAN_SCHEMA
+PLAN_VERSION = 1
 LLAMA_REPOSITORY = "https://github.com/ggml-org/llama.cpp.git"
 LLAMA_TAG = "b10240"
 LLAMA_COMMIT = "0b14b87d7c20cb753b94b96854dd7b45306fc696"
 MODEL_URL = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+MODEL_REVISION = "9217f5db79a29953eb74d5343926648285ec7e67"
 MODEL_SHA256 = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db"
 MODEL_NAME = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+LLAMA_LICENSE = "MIT"
+MODEL_LICENSE = "Apache-2.0"
+LICENSE_STATUS = "DECLARED_METADATA_NOT_VERIFIED"
 QUALIFIED_LLAMA_SHA256 = "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5"
 MAX_MODEL_BYTES = 600 * 1024 * 1024
+MODEL_DOWNLOAD_MAX_BYTES = MAX_MODEL_BYTES
+# These are repeated here deliberately: the source-only projection must not
+# import or inspect the first-kill entrypoint before it prints its plan.
+MIN_TOTAL_MEMORY_BYTES = 7 * 1024 * 1024 * 1024
+MIN_FREE_ROOT_BYTES = 8 * 1024 * 1024 * 1024
+PLAN_TRANSFER_UNKNOWN = "UNKNOWN"
+PLAN_TRANSFER_UNCAPPED = "UNCAPPED_BY_THIS_TOOL"
 # A serial build avoids exhausting the minimum qualified native host.
 MAX_BUILD_JOBS = 1
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 900
 BUILD_TIMEOUT_SECONDS = 1800
+
+
+class ThirdPartyPlanError(RuntimeError):
+    """The fixed source-only projection cannot be emitted safely."""
 
 
 def digest(path: Path) -> str:
@@ -37,6 +56,93 @@ def digest(path: Path) -> str:
         for block in iter(lambda: handle.read(64 * 1024), b""):
             value.update(block)
     return value.hexdigest()
+
+
+def _plan_inputs_are_pinned() -> bool:
+    try:
+        values = (
+            (PLAN_SCHEMA, "lumi-eggcracker.third-party-download-plan.v1", str),
+            (PLAN_VERSION, 1, int),
+            (LLAMA_REPOSITORY, "https://github.com/ggml-org/llama.cpp.git", str),
+            (LLAMA_TAG, "b10240", str),
+            (LLAMA_COMMIT, "0b14b87d7c20cb753b94b96854dd7b45306fc696", str),
+            (MODEL_URL, "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf", str),
+            (MODEL_REVISION, "9217f5db79a29953eb74d5343926648285ec7e67", str),
+            (MODEL_SHA256, "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db", str),
+            (MODEL_NAME, "qwen2.5-0.5b-instruct-q4_k_m.gguf", str),
+            (LLAMA_LICENSE, "MIT", str),
+            (MODEL_LICENSE, "Apache-2.0", str),
+            (LICENSE_STATUS, "DECLARED_METADATA_NOT_VERIFIED", str),
+            (MAX_MODEL_BYTES, 600 * 1024 * 1024, int),
+            (MODEL_DOWNLOAD_MAX_BYTES, 600 * 1024 * 1024, int),
+            (MIN_TOTAL_MEMORY_BYTES, 7 * 1024 * 1024 * 1024, int),
+            (MIN_FREE_ROOT_BYTES, 8 * 1024 * 1024 * 1024, int),
+            (QUALIFIED_LLAMA_SHA256, "ef0b86d353638b74519079b5937b9d62b4d4c6c6cdbf68812d7898437ecc4fb5", str),
+            (PLAN_TRANSFER_UNKNOWN, "UNKNOWN", str),
+            (PLAN_TRANSFER_UNCAPPED, "UNCAPPED_BY_THIS_TOOL", str),
+        )
+        return all(
+            type(actual) is expected_type and actual == expected
+            for actual, expected, expected_type in values
+        )
+    except Exception:  # noqa: BLE001 - fail closed without reflecting malformed input
+        return False
+
+
+def build_third_party_download_plan() -> dict[str, Any]:
+    """Return the deterministic, offline source-only third-party projection."""
+    if not _plan_inputs_are_pinned():
+        raise ThirdPartyPlanError("pinned third-party plan inputs are invalid")
+    return {
+        "schema_version": PLAN_SCHEMA,
+        "plan_version": PLAN_VERSION,
+        "result": "THIRD_PARTY_DOWNLOAD_PLAN",
+        "mode": "offline-source-only",
+        "llama": {
+            "repository": LLAMA_REPOSITORY,
+            "tag": LLAMA_TAG,
+            "commit": LLAMA_COMMIT,
+            "license": LLAMA_LICENSE,
+            "license_status": LICENSE_STATUS,
+            "license_verified": False,
+            "legal_clearance": False,
+        },
+        "model": {
+            "url": MODEL_URL,
+            "revision": MODEL_REVISION,
+            "sha256": MODEL_SHA256,
+            "license": MODEL_LICENSE,
+            "license_status": LICENSE_STATUS,
+            "license_verified": False,
+            "legal_clearance": False,
+        },
+        "model_download_max_bytes": MODEL_DOWNLOAD_MAX_BYTES,
+        "minimum_total_memory_bytes": MIN_TOTAL_MEMORY_BYTES,
+        "minimum_free_root_bytes": MIN_FREE_ROOT_BYTES,
+        "transfer_limits": {
+            "llama_cpp_clone": {
+                "status": PLAN_TRANSFER_UNKNOWN,
+                "bound": PLAN_TRANSFER_UNCAPPED,
+                "max_bytes": None,
+                "bounded_by_this_tool": False,
+            },
+            "model_download": {
+                "max_bytes": MODEL_DOWNLOAD_MAX_BYTES,
+                "bounded_by_this_tool": True,
+                "is_total_transfer_bound": False,
+            },
+            "source_clone_build_package_release": {
+                "status": PLAN_TRANSFER_UNCAPPED,
+                "max_bytes": None,
+                "bounded_by_this_tool": False,
+            },
+        },
+    }
+
+
+def third_party_download_plan() -> dict[str, Any]:
+    """Compatibility name for callers that request the source-only plan."""
+    return build_third_party_download_plan()
 
 
 def run(argv: list[str], *, timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS) -> str:
@@ -121,7 +227,7 @@ def verify_manifest(workspace: Path) -> dict[str, Any]:
     regular(gguf)
     if llama["repository"] != LLAMA_REPOSITORY or llama["tag"] != LLAMA_TAG or llama["commit"] != LLAMA_COMMIT:
         raise RuntimeError("runner provenance differs from the pinned smoke input")
-    if model["url"] != MODEL_URL or model["revision"] != "9217f5db79a29953eb74d5343926648285ec7e67" or model["sha256"] != MODEL_SHA256:
+    if model["url"] != MODEL_URL or model["revision"] != MODEL_REVISION or model["sha256"] != MODEL_SHA256:
         raise RuntimeError("model provenance differs from the pinned smoke input")
     if digest(runner) != llama["sha256"] or runner.stat().st_size != llama["size"]:
         raise RuntimeError("runner digest or size differs from manifest")
@@ -197,18 +303,46 @@ def prepare(workspace: Path) -> dict[str, Any]:
     value = {
         "schema_version": SCHEMA,
         "platform": {"machine": platform.machine(), "system": platform.system()},
-        "llama": {"repository": LLAMA_REPOSITORY, "tag": LLAMA_TAG, "commit": LLAMA_COMMIT, "path": str(runner), "sha256": digest(runner), "size": runner.stat().st_size, "license": "MIT"},
-        "model": {"url": MODEL_URL, "revision": "9217f5db79a29953eb74d5343926648285ec7e67", "path": str(model), "sha256": MODEL_SHA256, "size": model.stat().st_size, "license": "Apache-2.0"},
+        "llama": {"repository": LLAMA_REPOSITORY, "tag": LLAMA_TAG, "commit": LLAMA_COMMIT, "path": str(runner), "sha256": digest(runner), "size": runner.stat().st_size, "license": LLAMA_LICENSE},
+        "model": {"url": MODEL_URL, "revision": MODEL_REVISION, "path": str(model), "sha256": MODEL_SHA256, "size": model.stat().st_size, "license": MODEL_LICENSE},
     }
     atomic_json(manifest_path(workspace), value)
     return verify_manifest(workspace)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--workspace", required=True, type=Path)
+    parser.add_argument("--workspace", type=Path)
     parser.add_argument("--accept-third-party-downloads", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--third-party-download-plan",
+        action="store_true",
+        help="print the deterministic offline source-only third-party download plan",
+    )
+    args = parser.parse_args(argv)
+
+    # Keep this branch immediately after parsing: a plan is an informational
+    # projection and must not validate a path, inspect a host, or touch a
+    # workspace, network, subprocess, or asset.
+    if args.third_party_download_plan:
+        incompatible = []
+        if args.workspace is not None:
+            incompatible.append("--workspace")
+        if args.accept_third_party_downloads:
+            incompatible.append("--accept-third-party-downloads")
+        if incompatible:
+            parser.error(
+                "--third-party-download-plan cannot be combined with " + ", ".join(incompatible)
+            )
+        try:
+            value = build_third_party_download_plan()
+        except ThirdPartyPlanError as error:
+            raise SystemExit("third-party download plan unavailable: pinned inputs are invalid") from error
+        print(json.dumps(value, sort_keys=True))
+        return 0
+
+    if args.workspace is None:
+        parser.error("the following arguments are required: --workspace")
     workspace = validate_workspace(args.workspace)
     if workspace.exists() and any(workspace.iterdir()):
         print(json.dumps(verify_manifest(workspace), sort_keys=True))

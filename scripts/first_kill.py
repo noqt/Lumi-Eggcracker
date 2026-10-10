@@ -84,9 +84,31 @@ class FirstKillError(RuntimeError):
 
 
 PREFLIGHT_SCHEMA = "lumi-eggcracker.first-kill-preflight.v1"
+THIRD_PARTY_PLAN_SCHEMA = "lumi-eggcracker.third-party-download-plan.v1"
+THIRD_PARTY_DOWNLOAD_PLAN_SCHEMA = THIRD_PARTY_PLAN_SCHEMA
+PLAN_SCHEMA = THIRD_PARTY_PLAN_SCHEMA
+PLAN_VERSION = 1
 FULL_RUN_FAILURE_SCHEMA = "lumi-eggcracker.first-kill-failure.v1"
 FULL_RUN_FAILURE_VERSION = 1
 FULL_RUN_NEXT_ACTION = "STOP_AND_REVIEW_BEFORE_RETRY"
+
+LLAMA_REPOSITORY = "https://github.com/ggml-org/llama.cpp.git"
+LLAMA_TAG = "b10240"
+LLAMA_COMMIT = "0b14b87d7c20cb753b94b96854dd7b45306fc696"
+MODEL_URL = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+MODEL_REVISION = "9217f5db79a29953eb74d5343926648285ec7e67"
+MODEL_SHA256 = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db"
+LLAMA_LICENSE = "MIT"
+MODEL_LICENSE = "Apache-2.0"
+LICENSE_STATUS = "DECLARED_METADATA_NOT_VERIFIED"
+MODEL_DOWNLOAD_MAX_BYTES = 600 * 1024 * 1024
+PLAN_TRANSFER_UNKNOWN = "UNKNOWN"
+PLAN_TRANSFER_UNCAPPED = "UNCAPPED_BY_THIS_TOOL"
+
+
+class ThirdPartyPlanError(RuntimeError):
+    """The fixed source-only projection cannot be emitted safely."""
+
 
 FULL_RUN_STAGE_PRE_INSTALL = "pre-install"
 FULL_RUN_STAGE_INSTALL = "install"
@@ -268,6 +290,90 @@ def preflight_failure(diagnostic_key: str, message: str) -> PreflightFailure:
 
 def say(message: str) -> None:
     print(f"[eggcracker] {message}", flush=True)
+
+
+def _plan_inputs_are_pinned() -> bool:
+    try:
+        values = (
+            (PLAN_SCHEMA, "lumi-eggcracker.third-party-download-plan.v1", str),
+            (PLAN_VERSION, 1, int),
+            (LLAMA_REPOSITORY, "https://github.com/ggml-org/llama.cpp.git", str),
+            (LLAMA_TAG, "b10240", str),
+            (LLAMA_COMMIT, "0b14b87d7c20cb753b94b96854dd7b45306fc696", str),
+            (MODEL_URL, "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf", str),
+            (MODEL_REVISION, "9217f5db79a29953eb74d5343926648285ec7e67", str),
+            (MODEL_SHA256, "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db", str),
+            (LLAMA_LICENSE, "MIT", str),
+            (MODEL_LICENSE, "Apache-2.0", str),
+            (LICENSE_STATUS, "DECLARED_METADATA_NOT_VERIFIED", str),
+            (MODEL_DOWNLOAD_MAX_BYTES, 600 * 1024 * 1024, int),
+            (MIN_TOTAL_MEMORY_BYTES, 7 * 1024 * 1024 * 1024, int),
+            (MIN_FREE_ROOT_BYTES, 8 * 1024 * 1024 * 1024, int),
+            (PLAN_TRANSFER_UNKNOWN, "UNKNOWN", str),
+            (PLAN_TRANSFER_UNCAPPED, "UNCAPPED_BY_THIS_TOOL", str),
+        )
+        return all(
+            type(actual) is expected_type and actual == expected
+            for actual, expected, expected_type in values
+        )
+    except Exception:  # noqa: BLE001 - fail closed without reflecting malformed input
+        return False
+
+
+def build_third_party_download_plan() -> dict[str, Any]:
+    """Return the deterministic, offline source-only third-party projection."""
+    if not _plan_inputs_are_pinned():
+        raise ThirdPartyPlanError("pinned third-party plan inputs are invalid")
+    return {
+        "schema_version": PLAN_SCHEMA,
+        "plan_version": PLAN_VERSION,
+        "result": "THIRD_PARTY_DOWNLOAD_PLAN",
+        "mode": "offline-source-only",
+        "llama": {
+            "repository": LLAMA_REPOSITORY,
+            "tag": LLAMA_TAG,
+            "commit": LLAMA_COMMIT,
+            "license": LLAMA_LICENSE,
+            "license_status": LICENSE_STATUS,
+            "license_verified": False,
+            "legal_clearance": False,
+        },
+        "model": {
+            "url": MODEL_URL,
+            "revision": MODEL_REVISION,
+            "sha256": MODEL_SHA256,
+            "license": MODEL_LICENSE,
+            "license_status": LICENSE_STATUS,
+            "license_verified": False,
+            "legal_clearance": False,
+        },
+        "model_download_max_bytes": MODEL_DOWNLOAD_MAX_BYTES,
+        "minimum_total_memory_bytes": MIN_TOTAL_MEMORY_BYTES,
+        "minimum_free_root_bytes": MIN_FREE_ROOT_BYTES,
+        "transfer_limits": {
+            "llama_cpp_clone": {
+                "status": PLAN_TRANSFER_UNKNOWN,
+                "bound": PLAN_TRANSFER_UNCAPPED,
+                "max_bytes": None,
+                "bounded_by_this_tool": False,
+            },
+            "model_download": {
+                "max_bytes": MODEL_DOWNLOAD_MAX_BYTES,
+                "bounded_by_this_tool": True,
+                "is_total_transfer_bound": False,
+            },
+            "source_clone_build_package_release": {
+                "status": PLAN_TRANSFER_UNCAPPED,
+                "max_bytes": None,
+                "bounded_by_this_tool": False,
+            },
+        },
+    }
+
+
+def third_party_download_plan() -> dict[str, Any]:
+    """Compatibility name for callers that request the source-only plan."""
+    return build_third_party_download_plan()
 
 
 def run(
@@ -1125,7 +1231,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Verify, install and demonstrate the signed Eggcracker release on Linux."
     )
     parser.add_argument("--operator", help="non-root login that will operate Eggcracker")
-    parser.add_argument("--tag", default=DEFAULT_TAG, help=f"signed release tag (default: {DEFAULT_TAG})")
+    parser.add_argument("--tag", help=f"signed release tag (default: {DEFAULT_TAG})")
     parser.add_argument("--workspace", type=Path, help="temporary workspace; default is a new /tmp directory")
     parser.add_argument(
         "--ai-workspace",
@@ -1135,13 +1241,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--demo-delay-seconds",
         type=float,
-        default=0,
+        default=None,
         help="keep the real workload visibly running before model execution (recording aid; max 60s)",
     )
     parser.add_argument(
         "--accept-third-party-downloads",
         action="store_true",
         help="accept downloading the pinned llama.cpp source and Qwen model for the demonstration",
+    )
+    parser.add_argument(
+        "--third-party-download-plan",
+        action="store_true",
+        help="print the deterministic offline source-only third-party download plan",
     )
     parser.add_argument(
         "--preflight-only",
@@ -1151,9 +1262,47 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep", action="store_true", help="leave the installation and smoke assets in place")
     parser.add_argument("--remove", action="store_true", help="remove the installation without prompting")
     args = parser.parse_args(argv)
+
+    # Keep this branch immediately after parsing: a plan is an informational
+    # projection and must not inspect the operator, host, checkout or paths,
+    # and must not perform any workspace, network, subprocess, install or
+    # other effect.
+    if args.third_party_download_plan:
+        incompatible = []
+        if args.operator is not None:
+            incompatible.append("--operator")
+        if args.tag is not None:
+            incompatible.append("--tag")
+        if args.workspace is not None:
+            incompatible.append("--workspace")
+        if args.ai_workspace is not None:
+            incompatible.append("--ai-workspace")
+        if args.demo_delay_seconds is not None:
+            incompatible.append("--demo-delay-seconds")
+        if args.accept_third_party_downloads:
+            incompatible.append("--accept-third-party-downloads")
+        if args.preflight_only:
+            incompatible.append("--preflight-only")
+        if args.keep:
+            incompatible.append("--keep")
+        if args.remove:
+            incompatible.append("--remove")
+        if incompatible:
+            parser.error(
+                "--third-party-download-plan cannot be combined with " + ", ".join(incompatible)
+            )
+        try:
+            value = build_third_party_download_plan()
+        except ThirdPartyPlanError as error:
+            raise SystemExit("third-party download plan unavailable: pinned inputs are invalid") from error
+        print(json.dumps(value, sort_keys=True))
+        return 0
+
+    tag = DEFAULT_TAG if args.tag is None else args.tag
+    demo_delay_seconds = 0 if args.demo_delay_seconds is None else args.demo_delay_seconds
     if args.keep and args.remove:
         parser.error("--keep and --remove are mutually exclusive")
-    if not 0 <= args.demo_delay_seconds <= 60:
+    if not 0 <= demo_delay_seconds <= 60:
         parser.error("--demo-delay-seconds must be between 0 and 60")
     if args.preflight_only:
         incompatible = []
@@ -1171,7 +1320,7 @@ def main(argv: list[str] | None = None) -> int:
             incompatible.append("--accept-third-party-downloads")
         if incompatible:
             parser.error("--preflight-only cannot be combined with " + ", ".join(incompatible))
-        return run_preflight(args.operator, args.tag)
+        return run_preflight(args.operator, tag)
     if not args.accept_third_party_downloads:
         parser.error("--accept-third-party-downloads is required because the demo downloads a real model")
 
@@ -1198,9 +1347,9 @@ def main(argv: list[str] | None = None) -> int:
             raise FirstKillError("--ai-workspace must be a non-symlink directory")
         if ai_workspace_preexisting:
             require_root_directory(ai_workspace, "--ai-workspace", private=False)
-        say(f"downloading and checking signed {args.tag} release assets")
-        bundle, key, sums, signature = release_files(args.tag, workspace)
-        commit = verify_tag(root, args.tag, key)
+        say(f"downloading and checking signed {tag} release assets")
+        bundle, key, sums, signature = release_files(tag, workspace)
+        commit = verify_tag(root, tag, key)
         verify_checksum_signature(key, sums, signature)
         verify_bundle_checksum(bundle, sums)
         release_root = extracted_release(bundle, workspace)
@@ -1225,7 +1374,7 @@ def main(argv: list[str] | None = None) -> int:
             ],
             timeout=180,
         )
-        say(f"signature and release identity verified: {args.tag} -> {commit}")
+        say(f"signature and release identity verified: {tag} -> {commit}")
         say("installing the root-controlled supervisor")
         stage = FULL_RUN_STAGE_INSTALL
         installation_state = FULL_RUN_INSTALL_STATE_UNKNOWN_OR_PARTIAL
@@ -1240,7 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
             workspace,
             workload_user,
             ai_workspace,
-            args.demo_delay_seconds,
+            demo_delay_seconds,
         )
         print(json.dumps(receipt_summary(receipt), indent=2, sort_keys=True))
         say("first-kill demonstration passed: the real workload was terminated and its canary survived")
