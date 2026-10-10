@@ -11,6 +11,35 @@ from unittest.mock import patch
 from lumi_eggcracker.cli import main
 
 
+def doctor_response(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "autonomous_discovery": True,
+        "backend": "root-supervisor",
+        "cgroup_v2": True,
+        "catalogue": {"secret": "catalogue-canary"},
+        "discovery": {
+            "healthy": True,
+            "receipt_persistence_healthy": True,
+            "path": "/private/discovery-canary",
+        },
+        "execution_boundary": {"supported": True, "argv": ["argv-canary"]},
+        "incidents": {"healthy": True, "lockdown": False, "secret": "incident-canary"},
+        "installation": {"state": "HEALTHY", "path": "/private/install-canary"},
+        "network": {
+            "cleanup_healthy": True,
+            "mode": "offline",
+            "primitives": {"supported": True, "uid": "uid-canary"},
+        },
+        "pidfd": True,
+        "result": "PASS",
+        "version": "1.0.10",
+        "workload_identity": {"healthy": True, "uid": 4242},
+        "workload_uid": 4242,
+    }
+    value.update(overrides)
+    return value
+
+
 class CliTests(unittest.TestCase):
     def test_version(self) -> None:
         output = io.StringIO()
@@ -40,6 +69,128 @@ class CliTests(unittest.TestCase):
         self.assertIn("exec-policy", help_text)
         self.assertNotIn("_supervisor", help_text)
         self.assertNotIn("network" + "-deny", help_text)
+
+    def test_doctor_summary_ready_is_fixed_and_nonidentifying(self) -> None:
+        response = doctor_response()
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch("lumi_eggcracker.cli.request", return_value=response) as request, redirect_stdout(output), redirect_stderr(error):
+            self.assertEqual(0, main(["doctor", "--summary"]))
+        self.assertEqual(
+            {
+                "failed_checks": [],
+                "next_action": "NONE",
+                "result": "READY",
+                "schema": "lumi-eggcracker.doctor-summary.v1",
+            },
+            json.loads(output.getvalue()),
+        )
+        self.assertEqual("", error.getvalue())
+        self.assertNotIn("canary", output.getvalue())
+        request.assert_called_once_with("doctor")
+
+    def test_doctor_summary_mixed_failures_are_sorted_and_deduplicated(self) -> None:
+        response = doctor_response(
+            autonomous_discovery=False,
+            cgroup_v2=False,
+            execution_boundary={"supported": False},
+            discovery={"healthy": False, "receipt_persistence_healthy": False},
+            incidents={"healthy": False, "lockdown": True},
+            installation={"state": "DRIFT"},
+            network={
+                "cleanup_healthy": False,
+                "mode": "unsupported",
+                "primitives": {"supported": False},
+            },
+            pidfd=False,
+            result="UNSUPPORTED",
+            workload_identity={"healthy": False},
+        )
+        output = io.StringIO()
+        with patch("lumi_eggcracker.cli.request", return_value=response), redirect_stdout(output):
+            self.assertEqual(6, main(["doctor", "--summary"]))
+        summary = json.loads(output.getvalue())
+        self.assertEqual(
+            [
+                "cgroup_v2",
+                "discovery",
+                "execution_boundary",
+                "incidents",
+                "installation",
+                "network_cleanup",
+                "network_mode",
+                "network_primitives",
+                "pidfd",
+                "receipt_persistence",
+                "workload_identity",
+            ],
+            summary["failed_checks"],
+        )
+        self.assertEqual(len(summary["failed_checks"]), len(set(summary["failed_checks"])))
+        self.assertEqual("NOT_READY", summary["result"])
+        self.assertEqual("REVIEW_SUPERVISOR_READINESS", summary["next_action"])
+        self.assertEqual(
+            {"failed_checks", "next_action", "result", "schema"},
+            set(summary),
+        )
+        self.assertNotIn("canary", output.getvalue())
+
+    def test_doctor_summary_unsupported_without_visible_failure_is_honest(self) -> None:
+        response = doctor_response(autonomous_discovery=False, result="UNSUPPORTED")
+        output = io.StringIO()
+        with patch("lumi_eggcracker.cli.request", return_value=response), redirect_stdout(output):
+            self.assertEqual(6, main(["doctor", "--summary"]))
+        self.assertEqual(
+            {
+                "failed_checks": ["supervisor_readiness"],
+                "next_action": "REVIEW_SUPERVISOR_READINESS",
+                "result": "NOT_READY",
+                "schema": "lumi-eggcracker.doctor-summary.v1",
+            },
+            json.loads(output.getvalue()),
+        )
+
+    def test_doctor_summary_malformed_or_contradictory_response_is_constant_error(self) -> None:
+        malformed = [
+            {},
+            doctor_response(result=True),
+            doctor_response(cgroup_v2="true"),
+            doctor_response(network={"mode": "secret-path-canary"}),
+            doctor_response(autonomous_discovery=False),
+            doctor_response(autonomous_discovery=True, result="UNSUPPORTED"),
+            doctor_response(incidents={"healthy": False, "lockdown": False}),
+            doctor_response(installation={"state": "PRIVATE-CANARY"}),
+        ]
+        for response in malformed:
+            with self.subTest(response=response):
+                output = io.StringIO()
+                error = io.StringIO()
+                with patch("lumi_eggcracker.cli.request", return_value=response), redirect_stdout(output), redirect_stderr(error):
+                    self.assertEqual(6, main(["doctor", "--summary"]))
+                self.assertEqual("", output.getvalue())
+                self.assertEqual("eggcracker: doctor summary unavailable\n", error.getvalue())
+                self.assertNotIn("canary", error.getvalue())
+
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch("lumi_eggcracker.cli.request", side_effect=OSError("/private/CANARY")), redirect_stdout(output), redirect_stderr(error):
+            self.assertEqual(6, main(["doctor", "--summary"]))
+        self.assertEqual("", output.getvalue())
+        self.assertEqual("eggcracker: doctor summary unavailable\n", error.getvalue())
+        self.assertNotIn("CANARY", error.getvalue())
+
+    def test_default_doctor_output_and_exit_remain_unchanged(self) -> None:
+        for result, expected_exit in (("PASS", 0), ("UNSUPPORTED", 6)):
+            with self.subTest(result=result):
+                response = doctor_response(
+                    autonomous_discovery=result == "PASS", result=result
+                )
+                output = io.StringIO()
+                error = io.StringIO()
+                with patch("lumi_eggcracker.cli.request", return_value=response), redirect_stdout(output), redirect_stderr(error):
+                    self.assertEqual(expected_exit, main(["doctor"]))
+                self.assertEqual(json.dumps(response, sort_keys=True) + "\n", output.getvalue())
+                self.assertEqual("", error.getvalue())
 
     def test_compare_detection_receipts_help_uses_installed_command(self) -> None:
         output = io.StringIO()

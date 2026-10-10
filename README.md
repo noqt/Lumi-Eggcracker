@@ -527,6 +527,20 @@ exports only; it does not authenticate them or verify a live workload. See
 [the export and comparison guide](docs/DETECTION_RECEIPT_EXPORT.md) for input,
 output, redaction and filesystem behavior.
 
+## Check installed health
+
+For an installed source/build containing this change, record its version and
+then request the bounded health snapshot:
+
+```sh
+eggcracker version
+eggcracker doctor --summary
+```
+
+The snapshot is not containment proof. `doctor --summary` is available only in
+the source/build that contains this change; its presence is not a claim that
+the published v1.0.10 release includes this option.
+
 ## Install and remove
 
 The first-kill command is the recommended campaign path. A release is complete
