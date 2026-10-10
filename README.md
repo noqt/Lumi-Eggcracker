@@ -455,7 +455,7 @@ if [ "$SOURCE_COMMIT" = "<exact integrated commit containing check-start>" ]; th
   echo "replace SOURCE_COMMIT with the exact integrated commit first" >&2
   exit 1
 fi
-git clone https://github.com/noqt/Lumi-Eggcracker.git
+git clone --no-checkout https://github.com/noqt/Lumi-Eggcracker.git Lumi-Eggcracker
 cd Lumi-Eggcracker
 git fetch --tags https://github.com/noqt/Lumi-Eggcracker.git "$SOURCE_COMMIT"
 git checkout --detach "$SOURCE_COMMIT"

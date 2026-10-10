@@ -165,7 +165,7 @@ class StrictAndLegacyTests(unittest.TestCase):
             "doctor": "query", "list": "query", "status": "query", "incidents": "query",
             "approve": "admin", "exec_policy_create": "admin", "exec_policy_revoke": "admin",
             "incident_show": "admin", "incident_acknowledge": "admin", "incident_clear": "admin",
-            "revoke": "admin", "kill": "operator", "start": "operator",
+            "revoke": "admin", "kill": "operator", "start": "operator", "check_start": "operator",
         }
         self.assertEqual(client.SOCKETS, {action: f"/run/lumi-eggcracker/{role}.sock" for action, role in roles.items()})
         for action in roles:
