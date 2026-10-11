@@ -249,6 +249,59 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(len(source_blocks), 1)
         self.assertNotIn("eggcracker check-start", source_blocks[0])
 
+    def test_first_kill_guide_has_one_exact_canonical_source_pin(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        current = "1c2c9013ed4fc6bbff906d44b2428f5e3939f9c4"
+        retired = "a6452bc55907bedf2f2997592ed5c12b36069461"
+
+        self.assertEqual(readme.count(f'SOURCE_COMMIT="{current}"'), 1)
+        self.assertNotIn(retired, readme)
+
+    def test_first_kill_result_command_is_full_run_with_one_explicit_choice(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        heading = "### Publish the opt-in first-kill success result"
+        section_start = readme.index(heading)
+        section_end = readme.index("\nIf a handled full-run failure occurs", section_start)
+        section = readme[section_start:section_end]
+        command_start = section.index("```sh\n") + len("```sh\n")
+        command_end = section.index("\n```", command_start)
+        command = section[command_start:command_end]
+
+        self.assertIn("--accept-third-party-downloads", command)
+        self.assertIn("--result-output /root/lumi-eggcracker-first-kill-success.json", command)
+        self.assertEqual(command.count("--result-output"), 1)
+        self.assertEqual(command.count("--keep"), 1)
+        self.assertEqual(command.count("--remove"), 0)
+        self.assertIn("--third-party-download-plan", section)
+        self.assertIn("--preflight-only", section)
+
+    def test_first_kill_result_guide_covers_dispositions_publication_and_review(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        heading = "### Publish the opt-in first-kill success result"
+        section_start = readme.index(heading)
+        section_end = readme.index("\nIf a handled full-run failure occurs", section_start)
+        section = " ".join(readme[section_start:section_end].split()).lower()
+
+        for phrase in (
+            "lumi-eggcracker.first-kill-success.v1",
+            "first_kill_succeeded",
+            "retained_by_operator",
+            "removed_and_verified",
+            "read-only checks",
+            "fixed, nonidentifying",
+            "authenticated: false",
+            "independent_containment_proof: false",
+            "published atomically as a new file",
+            "mode `0600`",
+            "never overwritten",
+            "publishes no success file",
+            "does not warrant an automatic retry or removal",
+            "review the result and terminal outcome before sharing it",
+            "does not revise or expand the published v1.0.10 release",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+
     def test_allowlist_and_unknown(self):
         value = dict(HEALTHY, workload_uid=123, catalogue={"secret": "private"})
         rendered = monitoring.render_metrics(monitoring.selected_health(value), 42)

@@ -196,7 +196,7 @@ Fetch an immutable source snapshot and run the read-only preflight:
 cd "${TMPDIR:-/tmp}"
 git clone https://github.com/noqt/Lumi-Eggcracker.git
 cd Lumi-Eggcracker
-SOURCE_COMMIT="a6452bc55907bedf2f2997592ed5c12b36069461"
+SOURCE_COMMIT="1c2c9013ed4fc6bbff906d44b2428f5e3939f9c4"
 git fetch --tags https://github.com/noqt/Lumi-Eggcracker.git "$SOURCE_COMMIT"
 git checkout --detach "$SOURCE_COMMIT"
 test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
@@ -407,6 +407,47 @@ explicit acceptance flag, launches the real model, prints the kill receipt,
 and offers clean removal after a successful demonstration. On that success
 path, use `--remove` for a non-interactive removal or `--keep` to inspect the
 installation after the demonstration.
+
+### Publish the opt-in first-kill success result
+
+The delivered success-result projection is an opt-in full-run route. After
+reviewing the plan and passing the read-only preflight above, run it from the
+detached checkout at the exact `SOURCE_COMMIT` shown above:
+
+```sh
+sudo /usr/bin/python3 -I -S scripts/first_kill.py \
+  --operator "$USER" \
+  --accept-third-party-downloads \
+  --result-output /root/lumi-eggcracker-first-kill-success.json \
+  --keep
+```
+
+The absolute destination is an example of a new file: choose a private,
+non-world-writable parent and make sure the destination does not already exist.
+This route is the full demonstration only; do not combine `--result-output` with
+`--third-party-download-plan` or `--preflight-only`. The command above makes the
+canonical first-use choice explicit with `--keep`, which retains the installed
+supervisor, release workspace, and newly downloaded smoke assets and publishes
+`disposition: RETAINED_BY_OPERATOR`. If cleanup is required, replace `--keep`
+with exactly one `--remove` choice (never pass both): it publishes
+`disposition: REMOVED_AND_VERIFIED` only after the managed installation,
+workspace, and newly created smoke assets have been removed and their absence
+verified with read-only checks. Pre-existing AI assets are excluded and left
+untouched.
+
+The success file uses schema `lumi-eggcracker.first-kill-success.v1` and is a
+fixed, nonidentifying `FIRST_KILL_SUCCEEDED` projection. Its fixed allowlist
+excludes paths, process IDs, operator/host identities, and raw arguments; it
+records `authenticated: false` and `independent_containment_proof: false`. It
+is published atomically as a new file with mode `0600`; an existing destination
+is rejected and never overwritten. It is not a second receipt and does not add
+release authenticity, independent containment, native qualification, adoption,
+privacy, or safety evidence. A refusal or any full-run, cleanup, or publication
+failure publishes no success file and does not warrant an automatic retry or
+removal; stop and review before taking any further action. The operator must
+review the result and terminal outcome before sharing it. This guide does not
+revise or expand the published v1.0.10 release: the opt-in result flag belongs
+to the exact source-wrapper commit above, not to the v1.0.10 artifact.
 
 If a handled full-run failure occurs, the command exits `2` and prints one
 bounded object to standard error instead of raw exception text. For example:
