@@ -11,6 +11,7 @@ import unittest
 import warnings
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +40,141 @@ if SPEC is None or SPEC.loader is None:
     raise RuntimeError("cannot load first-kill script")
 first_kill = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(first_kill)
+
+
+def success_receipt(**overrides: object) -> dict[str, object]:
+    value: dict[str, object] = {
+        "result": "TERMINATED",
+        "detector": {"profile": "content.gguf-llama", "path": "PRIVATE"},
+        "trigger": {"kind": "UNAPPROVED_AI_MATCH", "pid": 424242},
+        "capture": {"captured_processes": 1, "path": "PRIVATE"},
+        "containment": {
+            "primitive": "pidfd-stop+cgroup.kill",
+            "root_populated": 0,
+            "surviving_pids": [],
+            "trigger_to_empty_ms": 42.5,
+        },
+    }
+    value.update(overrides)
+    return value
+
+
+@contextlib.contextmanager
+def publication_mocks(
+    *,
+    destination_exists: bool = False,
+    link_race: bool = False,
+    parent_race: bool = False,
+    write_side_effect=None,
+    fsync_side_effect=None,
+):
+    """Exercise publish_success_result through mocked POSIX descriptor calls."""
+    destination = Path(os.path.abspath(os.path.join(os.sep, "synthetic-result", "result.json")))
+    parent_fd = 101
+    temporary_fd = 102
+    parent_info = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o700,
+        st_uid=0,
+        st_dev=11,
+        st_ino=22,
+        st_file_attributes=0,
+    )
+    temporary_info = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_uid=0,
+        st_dev=11,
+        st_ino=33,
+        st_file_attributes=0,
+    )
+    existing_info = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_uid=0,
+        st_dev=11,
+        st_ino=44,
+        st_file_attributes=0,
+    )
+    temporary_name: list[str | None] = [None]
+    temporary_stats = 0
+    destination_checked = False
+    destination_unlinked = False
+    stat_calls: list[tuple[object, object]] = []
+
+    def fake_open(name, _flags, _mode=0o777, **kwargs):
+        if kwargs.get("dir_fd") == parent_fd:
+            temporary_name[0] = name
+            return temporary_fd
+        return parent_fd
+
+    def fake_stat(name, **kwargs):
+        nonlocal destination_checked, temporary_stats
+        stat_calls.append((name, kwargs.get("dir_fd")))
+        if name == destination.name:
+            if destination_unlinked:
+                raise FileNotFoundError(name)
+            if destination_exists:
+                return existing_info
+            if not destination_checked:
+                destination_checked = True
+                raise FileNotFoundError(name)
+            return temporary_info
+        temporary_stats += 1
+        if temporary_stats <= 2:
+            return temporary_info
+        raise FileNotFoundError(name)
+
+    def fake_link(*_args, **_kwargs):
+        if link_race:
+            raise FileExistsError(destination.name)
+
+    def fake_unlink(name, **_kwargs):
+        nonlocal destination_unlinked
+        if name == destination.name:
+            destination_unlinked = True
+
+    if write_side_effect is None:
+        write_side_effect = lambda _fd, view: len(view)
+    write = mock.Mock(side_effect=write_side_effect)
+    open_call = mock.Mock(side_effect=fake_open)
+    stat_call = mock.Mock(side_effect=fake_stat)
+    link = mock.Mock(side_effect=fake_link)
+    unlink = mock.Mock(side_effect=fake_unlink)
+    close = mock.Mock()
+    fsync = mock.Mock(side_effect=fsync_side_effect)
+
+    class SupportsAll:
+        def __contains__(self, _value):
+            return True
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(first_kill, "validate_result_output", return_value=destination))
+        stack.enter_context(mock.patch.object(first_kill, "_result_output_effective_uid", return_value=0))
+        stack.enter_context(mock.patch.object(first_kill, "_result_output_parent_matches", return_value=not parent_race))
+        stack.enter_context(mock.patch.object(first_kill, "_result_output_parent_path_matches", return_value=True))
+        stack.enter_context(mock.patch.object(first_kill.os, "O_DIRECTORY", 0x10000, create=True))
+        stack.enter_context(mock.patch.object(first_kill.os, "O_NOFOLLOW", 0x20000, create=True))
+        stack.enter_context(mock.patch.object(first_kill.os, "supports_dir_fd", SupportsAll(), create=True))
+        stack.enter_context(mock.patch.object(first_kill.os, "lstat", return_value=parent_info))
+        stack.enter_context(mock.patch.object(first_kill.os, "open", open_call))
+        stack.enter_context(mock.patch.object(first_kill.os, "fchmod", mock.Mock(), create=True))
+        stack.enter_context(mock.patch.object(first_kill.os, "fstat", return_value=temporary_info))
+        stack.enter_context(mock.patch.object(first_kill.os, "write", write))
+        stack.enter_context(mock.patch.object(first_kill.os, "fsync", fsync))
+        stack.enter_context(mock.patch.object(first_kill.os, "close", close))
+        stack.enter_context(mock.patch.object(first_kill.os, "stat", stat_call))
+        stack.enter_context(mock.patch.object(first_kill.os, "link", link))
+        stack.enter_context(mock.patch.object(first_kill.os, "unlink", unlink))
+        stack.enter_context(mock.patch.object(first_kill.secrets, "token_hex", return_value="fixed"))
+        yield {
+            "destination": destination,
+            "fsync": fsync,
+            "link": link,
+            "open": open_call,
+            "stat": stat_call,
+            "stat_calls": stat_calls,
+            "temporary_name": temporary_name,
+            "unlink": unlink,
+            "write": write,
+        }
 
 
 class FirstKillTests(unittest.TestCase):
@@ -604,6 +740,406 @@ class FirstKillTests(unittest.TestCase):
         ):
             first_kill.main(["--operator", "tester"])
         self.assertEqual(2, raised.exception.code)
+
+    def _run_result_mode(
+        self,
+        choice: str,
+        *,
+        receipt: dict[str, object] | None = None,
+        remove_failure: BaseException | None = None,
+        publish_failure: BaseException | None = None,
+        ai_preexisting: bool = False,
+    ) -> tuple[int, mock.Mock, mock.Mock, mock.Mock, str, str]:
+        release = {
+            "artifact": "lumi-eggcracker-1.0.0.pyz",
+            "sha256": "a" * 64,
+            "source_archive": "lumi-eggcracker-1.0.0-source.zip",
+            "source_commit": TAG_COMMIT,
+            "version": "1.0.0",
+        }
+        workspace = Path("/private-workspace")
+        output_path = Path("/private-result.json")
+        published = mock.Mock(side_effect=publish_failure)
+        removed = mock.Mock(side_effect=remove_failure)
+        verified = mock.Mock()
+        output = io.StringIO()
+        errors = io.StringIO()
+        root_directory_patcher = mock.patch.object(first_kill, "require_root_directory")
+        root_directory_patcher.start()
+        self.addCleanup(root_directory_patcher.stop)
+        with tempfile.TemporaryDirectory() if ai_preexisting else contextlib.nullcontext() as ai_workspace_raw:
+            ai_workspace_arg = Path(ai_workspace_raw) if ai_workspace_raw is not None else None
+            argv = [
+                "--operator",
+                "tester",
+                "--workspace",
+                str(workspace),
+                "--accept-third-party-downloads",
+                "--result-output",
+                str(output_path),
+                choice,
+            ]
+            if ai_workspace_arg is not None:
+                argv.extend(["--ai-workspace", str(ai_workspace_arg)])
+            with (
+                mock.patch.object(first_kill, "operator_name", return_value="tester"),
+                mock.patch.object(first_kill, "compatibility"),
+                mock.patch.object(first_kill, "repository_root", return_value=Path("/checkout")),
+                mock.patch.object(first_kill, "prepare_workspace", return_value=workspace),
+                mock.patch.object(
+                    first_kill,
+                    "release_files",
+                    return_value=(Path("/bundle.zip"), Path("/key.asc"), Path("/SHA256SUMS"), Path("/SHA256SUMS.asc")),
+                ),
+                mock.patch.object(first_kill, "verify_tag", return_value=TAG_COMMIT),
+                mock.patch.object(first_kill, "verify_checksum_signature"),
+                mock.patch.object(first_kill, "verify_bundle_checksum"),
+                mock.patch.object(first_kill, "extracted_release", return_value=Path("/release")),
+                mock.patch.object(first_kill, "manifest", return_value=release),
+                mock.patch.object(first_kill, "run"),
+                mock.patch.object(first_kill, "install_release"),
+                mock.patch.object(first_kill, "installed_workload_user", return_value="workload"),
+                mock.patch.object(first_kill, "run_real_smoke", return_value=receipt or success_receipt()),
+                mock.patch.object(first_kill, "remove_installation", removed),
+                mock.patch.object(first_kill, "verify_removed_targets", verified),
+                mock.patch.object(first_kill, "validate_result_output", return_value=output_path),
+                mock.patch.object(first_kill, "publish_success_result", published),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                result = first_kill.main(argv)
+        return result, published, verified, removed, output.getvalue(), errors.getvalue()
+
+    def test_result_output_requires_one_explicit_cleanup_choice(self) -> None:
+        output = Path("/private-result.json")
+        with (
+            mock.patch.object(first_kill, "validate_result_output") as validate,
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            first_kill.main(
+                ["--accept-third-party-downloads", "--result-output", str(output)]
+            )
+        self.assertEqual(2, raised.exception.code)
+        validate.assert_not_called()
+
+    def test_result_destination_is_validated_before_download_or_install(self) -> None:
+        release_files = mock.Mock()
+        with (
+            mock.patch.object(
+                first_kill,
+                "validate_result_output",
+                side_effect=first_kill.FirstKillError("PRIVATE destination"),
+            ),
+            mock.patch.object(first_kill, "release_files", release_files),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            first_kill.main(
+                [
+                    "--accept-third-party-downloads",
+                    "--keep",
+                    "--result-output",
+                    "/private-result.json",
+                ]
+            )
+        self.assertEqual(2, raised.exception.code)
+        release_files.assert_not_called()
+
+    def test_result_output_rejects_plan_and_preflight_before_effects(self) -> None:
+        for flags in (
+            ["--third-party-download-plan", "--result-output", "/private-result.json", "--keep"],
+            ["--preflight-only", "--result-output", "/private-result.json", "--keep"],
+        ):
+            with self.subTest(flags=flags), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                first_kill.main(flags)
+
+    def test_result_output_keep_publishes_fixed_projection_without_sensitive_fields(self) -> None:
+        result, published, verified, removed, output, errors = self._run_result_mode("--keep")
+        self.assertEqual(0, result)
+        document = published.call_args.args[1]
+        self.assertEqual(first_kill.SUCCESS_RESULT_FIELDS, set(document))
+        self.assertEqual(first_kill.SUCCESS_DISPOSITION_RETAINED, document["disposition"])
+        self.assertEqual(first_kill.SUCCESS_AI_ASSETS_NEW_RETAINED, document["ai_assets_disposition"])
+        self.assertEqual(first_kill.SUCCESS_RUN_SCOPE, document["run_scope"])
+        self.assertFalse(document["authenticated"])
+        self.assertFalse(document["independent_containment_proof"])
+        self.assertEqual(first_kill.SUCCESS_SOURCE_COMMIT_ROLE, document["source_commit_role"])
+        self.assertEqual(TAG_COMMIT, document["source_commit"])
+        self.assertNotIn("PRIVATE", json.dumps(document))
+        self.assertNotIn("424242", output + errors)
+        removed.assert_not_called()
+        verified.assert_not_called()
+
+    def test_result_output_remove_requires_read_only_absence_verification(self) -> None:
+        result, published, verified, removed, _output, errors = self._run_result_mode("--remove")
+        self.assertEqual(0, result)
+        self.assertEqual(first_kill.SUCCESS_DISPOSITION_REMOVED, published.call_args.args[1]["disposition"])
+        self.assertEqual(first_kill.SUCCESS_AI_ASSETS_NEW_REMOVED, published.call_args.args[1]["ai_assets_disposition"])
+        removed.assert_called_once()
+        verified.assert_called_once_with(
+            Path("/private-workspace"),
+            first_kill.DEFAULT_AI_SMOKE_WORKSPACE.absolute(),
+            assets_preexisting=False,
+        )
+        self.assertEqual("", errors)
+
+    def test_result_output_remove_excludes_preexisting_ai_assets_from_claim(self) -> None:
+        result, published, verified, removed, _output, errors = self._run_result_mode(
+            "--remove", ai_preexisting=True
+        )
+        self.assertEqual(0, result)
+        document = published.call_args.args[1]
+        self.assertEqual(first_kill.SUCCESS_DISPOSITION_REMOVED, document["disposition"])
+        self.assertEqual(
+            first_kill.SUCCESS_AI_ASSETS_PREEXISTING_EXCLUDED,
+            document["ai_assets_disposition"],
+        )
+        removed.assert_called_once_with(Path("/release"), Path("/private-workspace"), None)
+        verified.assert_called_once_with(
+            Path("/private-workspace"), None, assets_preexisting=True
+        )
+        self.assertEqual("", errors)
+
+    def test_result_output_malformed_receipt_and_removal_failure_publish_nothing(self) -> None:
+        malformed = success_receipt()
+        malformed["containment"] = {"root_populated": 0, "surviving_pids": []}
+        result, published, verified, removed, _output, errors = self._run_result_mode(
+            "--remove", receipt=malformed
+        )
+        self.assertEqual(2, result)
+        published.assert_not_called()
+        removed.assert_not_called()
+        verified.assert_not_called()
+        self.assertNotIn("PRIVATE", errors)
+
+        failed_canary = success_receipt(canary_survived=False)
+        result, published, verified, removed, _output, errors = self._run_result_mode(
+            "--keep", receipt=failed_canary
+        )
+        self.assertEqual(2, result)
+        published.assert_not_called()
+        removed.assert_not_called()
+        verified.assert_not_called()
+        self.assertNotIn("PRIVATE", errors)
+
+        result, published, verified, removed, _output, errors = self._run_result_mode(
+            "--remove", remove_failure=first_kill.FirstKillError("PRIVATE removal failure")
+        )
+        self.assertEqual(2, result)
+        published.assert_not_called()
+        verified.assert_not_called()
+        self.assertNotIn("PRIVATE", errors)
+
+    def test_result_publication_parent_identity_race_fails_closed(self) -> None:
+        info = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_uid=0,
+            st_dev=1,
+            st_ino=2,
+            st_file_attributes=0,
+        )
+        replacement = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700,
+            st_uid=0,
+            st_dev=1,
+            st_ino=3,
+            st_file_attributes=0,
+        )
+        with mock.patch.object(first_kill, "_result_output_effective_uid", return_value=0):
+            with mock.patch.object(first_kill.os, "lstat", return_value=info):
+                self.assertTrue(first_kill._result_output_parent_path_matches(Path("/safe"), (1, 2)))
+            with mock.patch.object(first_kill.os, "lstat", return_value=replacement):
+                self.assertFalse(first_kill._result_output_parent_path_matches(Path("/safe"), (1, 2)))
+
+    def test_result_publication_posix_calls_complete_and_cleans_exact_temp(self) -> None:
+        with publication_mocks() as calls:
+            first_kill.publish_success_result(calls["destination"], {"result": "ok"})
+        self.assertEqual(1, calls["write"].call_count)
+        calls["link"].assert_called_once_with(
+            calls["temporary_name"][0],
+            calls["destination"].name,
+            src_dir_fd=101,
+            dst_dir_fd=101,
+            follow_symlinks=False,
+        )
+        calls["unlink"].assert_called_once_with(calls["temporary_name"][0], dir_fd=101)
+        self.assertEqual(2, calls["open"].call_count)
+
+    def test_result_publication_posix_calls_partial_write_loop(self) -> None:
+        first_write = True
+
+        def partial_write(_fd, view):
+            nonlocal first_write
+            if first_write:
+                first_write = False
+                return 1
+            return len(view)
+
+        with publication_mocks(write_side_effect=partial_write) as calls:
+            first_kill.publish_success_result(calls["destination"], {"result": "partial"})
+        self.assertEqual(2, calls["write"].call_count)
+        calls["unlink"].assert_called_once_with(calls["temporary_name"][0], dir_fd=101)
+
+    def test_result_publication_posix_calls_write_failure_is_safe(self) -> None:
+        with (
+            publication_mocks(write_side_effect=OSError("private write failure")) as calls,
+            self.assertRaisesRegex(first_kill.FirstKillError, first_kill.RESULT_OUTPUT_FAILURE),
+        ):
+            first_kill.publish_success_result(calls["destination"], {"result": "write-failure"})
+        calls["link"].assert_not_called()
+        calls["unlink"].assert_called_once_with(calls["temporary_name"][0], dir_fd=101)
+
+    def test_result_publication_posix_calls_existing_or_raced_destination_never_overwrites(self) -> None:
+        with (
+            publication_mocks(destination_exists=True) as existing,
+            self.assertRaisesRegex(first_kill.FirstKillError, first_kill.RESULT_OUTPUT_FAILURE),
+        ):
+            first_kill.publish_success_result(existing["destination"], {"result": "existing"})
+        existing["link"].assert_not_called()
+        existing["unlink"].assert_called_once_with(existing["temporary_name"][0], dir_fd=101)
+
+        with (
+            publication_mocks(link_race=True) as raced,
+            self.assertRaisesRegex(first_kill.FirstKillError, first_kill.RESULT_OUTPUT_FAILURE),
+        ):
+            first_kill.publish_success_result(raced["destination"], {"result": "raced"})
+        raced["link"].assert_called_once()
+        raced["unlink"].assert_called_once_with(raced["temporary_name"][0], dir_fd=101)
+
+    def test_result_publication_posix_calls_parent_identity_race_before_link(self) -> None:
+        with (
+            publication_mocks(parent_race=True) as calls,
+            self.assertRaisesRegex(first_kill.FirstKillError, first_kill.RESULT_OUTPUT_FAILURE),
+        ):
+            first_kill.publish_success_result(calls["destination"], {"result": "parent-race"})
+        calls["link"].assert_not_called()
+        calls["unlink"].assert_not_called()
+
+    def test_result_publication_post_link_failure_removes_only_our_destination(self) -> None:
+        with (
+            publication_mocks(
+                fsync_side_effect=[None, OSError("private parent fsync"), None]
+            ) as calls,
+            self.assertRaisesRegex(first_kill.FirstKillError, first_kill.RESULT_OUTPUT_FAILURE),
+        ):
+            first_kill.publish_success_result(calls["destination"], {"result": "post-link"})
+        self.assertEqual(
+            [
+                mock.call(calls["temporary_name"][0], dir_fd=101),
+                mock.call(calls["destination"].name, dir_fd=101),
+            ],
+            calls["unlink"].call_args_list,
+        )
+        self.assertTrue(any(name == calls["destination"].name for name, _fd in calls["stat_calls"]))
+
+    def test_result_publication_cleanup_never_unlinks_foreign_temp(self) -> None:
+        foreign = SimpleNamespace(
+            st_mode=stat.S_IFREG | 0o600,
+            st_uid=0,
+            st_dev=11,
+            st_ino=99,
+            st_file_attributes=0,
+        )
+        with (
+            mock.patch.object(first_kill, "_result_output_effective_uid", return_value=0),
+            mock.patch.object(first_kill, "_result_output_parent_matches", return_value=True),
+            mock.patch.object(first_kill, "_result_output_parent_path_matches", return_value=True),
+            mock.patch.object(first_kill.os, "stat", return_value=foreign),
+            mock.patch.object(first_kill.os, "unlink") as unlink,
+        ):
+            first_kill._result_output_unlink_owned(
+                101,
+                ".result.tmp",
+                (11, 33),
+                (11, 22),
+                Path("/synthetic-result"),
+            )
+        unlink.assert_not_called()
+
+    def test_result_output_publication_failure_reports_known_kept_state(self) -> None:
+        result, published, verified, removed, _output, errors = self._run_result_mode(
+            "--keep", publish_failure=first_kill.FirstKillError("PRIVATE write failure")
+        )
+        self.assertEqual(2, result)
+        published.assert_called_once()
+        removed.assert_not_called()
+        verified.assert_not_called()
+        summary = json.loads(errors)
+        self.assertEqual(first_kill.FULL_RUN_INSTALL_STATE_INSTALLED, summary["installation_state"])
+        self.assertEqual(first_kill.FULL_RUN_STAGE_RESULT_PUBLICATION, summary["stage"])
+        self.assertEqual("RESULT_PUBLICATION_FAILURE", summary["reason_code"])
+        self.assertEqual(first_kill.FULL_RUN_REMOVAL_MANUAL_REVIEW_REQUIRED, summary["removal_guidance"])
+        self.assertNotIn("PRIVATE", errors)
+
+    def test_result_output_publication_failure_reports_verified_removed_state(self) -> None:
+        result, published, verified, removed, _output, errors = self._run_result_mode(
+            "--remove", publish_failure=first_kill.FirstKillError("PRIVATE write failure")
+        )
+        self.assertEqual(2, result)
+        published.assert_called_once()
+        removed.assert_called_once()
+        verified.assert_called_once()
+        summary = json.loads(errors)
+        self.assertEqual(first_kill.FULL_RUN_INSTALL_STATE_NOT_INSTALLED, summary["installation_state"])
+        self.assertEqual(first_kill.FULL_RUN_STAGE_RESULT_PUBLICATION, summary["stage"])
+        self.assertEqual("RESULT_PUBLICATION_FAILURE", summary["reason_code"])
+        self.assertEqual(first_kill.FULL_RUN_REMOVAL_NOT_REQUIRED, summary["removal_guidance"])
+        self.assertNotIn("PRIVATE", errors)
+
+    def test_result_destination_rejects_relative_existing_nonregular_and_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            root.chmod(0o700)
+            existing = root / "existing.json"
+            existing.write_text("preserve", encoding="utf-8")
+            directory = root / "directory.json"
+            directory.mkdir()
+            with mock.patch.object(first_kill, "_result_output_effective_uid", return_value=0):
+                with self.assertRaises(first_kill.FirstKillError):
+                    first_kill.validate_result_output(Path("relative-result.json"))
+                with self.assertRaises(first_kill.FirstKillError):
+                    first_kill.validate_result_output(existing)
+                with self.assertRaises(first_kill.FirstKillError):
+                    first_kill.validate_result_output(directory)
+                try:
+                    link = root / "link.json"
+                    os.symlink(existing, link)
+                except (NotImplementedError, OSError):
+                    link = None
+                if link is not None:
+                    with self.assertRaises(first_kill.FirstKillError):
+                        first_kill.validate_result_output(link)
+            self.assertEqual("preserve", existing.read_text(encoding="utf-8"))
+
+    def test_result_removal_verification_rejects_residue_dangling_link_and_keeps_unrelated(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            assets = root / "assets"
+            workspace.mkdir()
+            assets.mkdir()
+            unrelated = root / "unrelated.txt"
+            unrelated.write_text("preserve", encoding="utf-8")
+            original_targets = first_kill.INSTALL_TARGETS
+            first_kill.INSTALL_TARGETS = (root / "managed",)
+            try:
+                with self.assertRaises(first_kill.FirstKillError):
+                    first_kill.verify_removed_targets(workspace, assets, assets_preexisting=False)
+                workspace.rmdir()
+                assets.rmdir()
+                first_kill.verify_removed_targets(workspace, assets, assets_preexisting=False)
+                self.assertEqual("preserve", unrelated.read_text(encoding="utf-8"))
+                dangling = root / "managed"
+                try:
+                    os.symlink(root / "gone", dangling, target_is_directory=True)
+                except (NotImplementedError, OSError):
+                    pass
+                else:
+                    with self.assertRaises(first_kill.FirstKillError):
+                        first_kill.verify_removed_targets(workspace, assets, assets_preexisting=False)
+            finally:
+                first_kill.INSTALL_TARGETS = original_targets
 
     def test_normal_run_authenticates_checksums_before_extraction_or_install(self) -> None:
         events: list[str] = []
