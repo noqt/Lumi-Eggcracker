@@ -282,6 +282,17 @@ def _parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show one protected workload")
     status.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     commands.add_parser("list", help="list protected workloads")
+    history = commands.add_parser(
+        "history",
+        help="list retained terminal records in recorded monotonic order",
+    )
+    history.add_argument(
+        "--limit",
+        default=20,
+        type=_history_limit,
+        action=_RejectDuplicateIdentifier,
+        help="number of retained terminal records to return (1-20; default: 20)",
+    )
     approve = commands.add_parser("approve", help="approve one exact AI runtime invocation")
     approve.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     approve.add_argument("--uid", required=True, type=int)
@@ -361,6 +372,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def _command(argv: list[str]) -> list[str]:
     return argv[1:] if argv[:1] == ["--"] else argv
+
+
+def _history_limit(value: str) -> int:
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+        raise argparse.ArgumentTypeError("history limit must be an integer from 1 to 20")
+    result = int(value)
+    if not 1 <= result <= 20:
+        raise argparse.ArgumentTypeError("history limit must be an integer from 1 to 20")
+    return result
 
 
 def _check_start_main(values: list[str]) -> int:
@@ -454,6 +474,8 @@ def main(argv: list[str] | None = None) -> int:
             value = request("status", name=args.name)
         elif args.command == "list":
             value = request("list")
+        elif args.command == "history":
+            value = request("history", limit=args.limit)
         elif args.command == "approve":
             if os.geteuid() != 0:
                 raise JsonInputError("approve requires root administrative authority; use sudo")

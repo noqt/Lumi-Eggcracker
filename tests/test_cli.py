@@ -56,6 +56,7 @@ class CliTests(unittest.TestCase):
             "kill",
             "status",
             "list",
+            "history",
             "approve",
             "revoke",
             "approvals",
@@ -70,6 +71,44 @@ class CliTests(unittest.TestCase):
         self.assertIn("exec-policy", help_text)
         self.assertNotIn("_supervisor", help_text)
         self.assertNotIn("network" + "-deny", help_text)
+        self.assertIn(
+            "retained terminal records in recorded monotonic order",
+            " ".join(help_text.split()),
+        )
+        self.assertNotIn("recent", help_text)
+        self.assertNotIn("chronological", help_text)
+
+    def test_history_defaults_to_twenty_and_forwards_explicit_limit(self) -> None:
+        with patch("lumi_eggcracker.cli.request", return_value={"runs": []}) as request:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(0, main(["history"]))
+            request.assert_called_once_with("history", limit=20)
+            output.seek(0)
+            self.assertEqual({"runs": []}, json.loads(output.read()))
+
+        with patch("lumi_eggcracker.cli.request", return_value={"runs": []}) as request:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main(["history", "--limit", "7"]))
+            request.assert_called_once_with("history", limit=7)
+
+    def test_history_limit_rejects_invalid_duplicate_and_extra_arguments(self) -> None:
+        cases = (
+            ["history", "--limit", "0"],
+            ["history", "--limit", "21"],
+            ["history", "--limit", "true"],
+            ["history", "--limit", "1.0"],
+            ["history", "--limit", "1", "--limit", "2"],
+            ["history", "--limit", "1", "unexpected"],
+        )
+        for values in cases:
+            with self.subTest(values=values), patch(
+                "lumi_eggcracker.cli.request"
+            ) as request, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    main(values)
+                self.assertEqual(2, raised.exception.code)
+                request.assert_not_called()
 
     def test_doctor_summary_ready_is_fixed_and_nonidentifying(self) -> None:
         response = doctor_response()

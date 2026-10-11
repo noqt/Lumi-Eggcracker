@@ -27,6 +27,7 @@ SOCKETS = {
     "exec_policy_create": ADMIN_SOCKET,
     "exec_policy_revoke": ADMIN_SOCKET,
     "incidents": QUERY_SOCKET,
+    "history": QUERY_SOCKET,
     "incident_show": ADMIN_SOCKET,
     "incident_acknowledge": ADMIN_SOCKET,
     "incident_clear": ADMIN_SOCKET,
