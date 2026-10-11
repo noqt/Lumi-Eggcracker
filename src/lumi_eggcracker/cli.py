@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
 from .brokered.compare_detection_receipts import main as compare_detection_receipts_main
-from .client import request
+from .client import RequestDeadlineExceeded, request, request_before
 from .gate import main as gate_main
 from .jsonio import JsonInputError, write_new_json
 from .kill_receipt import main as validate_kill_receipt_main
@@ -55,6 +58,36 @@ _DOCTOR_SUMMARY_INSTALLATION_STATES = frozenset(
     {"HEALTHY", "DRIFT", "RECOVERY_REQUIRED", "NOT_INSTALLED"}
 )
 _DOCTOR_SUMMARY_NETWORK_MODES = frozenset({"offline", "unsupported"})
+_WAIT_PUBLIC_STATUS_KEYS = frozenset(
+    {
+        "exec_policy_digest",
+        "exec_policy_id",
+        "incident_lockdown",
+        "name",
+        "network_mode",
+        "run_id",
+        "state",
+        "unit",
+        "workload_uid",
+    }
+)
+_WAIT_ACTIVE_STATES = frozenset({"STARTING", "RUNNING"})
+_WAIT_TERMINAL_STATES = frozenset(
+    {
+        "COMPLETED_ALLOWED",
+        "CONTAINED_RECEIPT_FAILED",
+        "CONTAINMENT_FAILED",
+        "TERMINATED",
+    }
+)
+_WAIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_WAIT_RUN_ID = re.compile(r"[0-9a-f]{24}\Z")
+_WAIT_UNIT_PREFIX = "lumi-eggcracker-workload-"
+_WAIT_HEX = re.compile(r"[0-9a-f]{64}\Z")
+_WAIT_POLL_CADENCE_SECONDS = 0.1
+_WAIT_ERROR = "ERROR"
+_WAIT_TERMINAL = "TERMINAL"
+_WAIT_TIMED_OUT = "TIMED_OUT"
 
 
 class _DoctorSummaryInvalid(ValueError):
@@ -199,6 +232,134 @@ def _check_start_projection(value: object) -> dict[str, str]:
     }
 
 
+def _wait_status_projection(value: object, *, name: str) -> dict[str, object]:
+    """Validate and close the supervisor's public run projection."""
+
+    if type(value) is not dict or set(value) != _WAIT_PUBLIC_STATUS_KEYS:
+        raise ValueError
+    if (
+        type(value["name"]) is not str
+        or value["name"] != name
+        or _WAIT_NAME.fullmatch(value["name"]) is None
+    ):
+        raise ValueError
+    run_id = value["run_id"]
+    if type(run_id) is not str or _WAIT_RUN_ID.fullmatch(run_id) is None:
+        raise ValueError
+    state = value["state"]
+    if type(state) is not str or state not in _WAIT_ACTIVE_STATES | _WAIT_TERMINAL_STATES:
+        raise ValueError
+    unit = value["unit"]
+    if type(unit) is not str or unit != f"{_WAIT_UNIT_PREFIX}{run_id}.service":
+        raise ValueError
+    network_mode = value["network_mode"]
+    if type(network_mode) is not str or network_mode not in {"offline", "none"}:
+        raise ValueError
+    exec_policy_id = value["exec_policy_id"]
+    if type(exec_policy_id) is not str or _WAIT_NAME.fullmatch(exec_policy_id) is None:
+        raise ValueError
+    exec_policy_digest = value["exec_policy_digest"]
+    if type(exec_policy_digest) is not str or _WAIT_HEX.fullmatch(exec_policy_digest) is None:
+        raise ValueError
+    if type(value["incident_lockdown"]) is not bool:
+        raise ValueError
+    workload_uid = value["workload_uid"]
+    if type(workload_uid) is not int or workload_uid < 0:
+        raise ValueError
+    return {
+        "exec_policy_digest": exec_policy_digest,
+        "exec_policy_id": exec_policy_id,
+        "incident_lockdown": value["incident_lockdown"],
+        "name": value["name"],
+        "network_mode": network_mode,
+        "run_id": run_id,
+        "state": state,
+        "unit": unit,
+        "workload_uid": workload_uid,
+    }
+
+
+class _WaitClock:
+    """Read one monotonic clock and reject non-monotonic or invalid samples."""
+
+    def __init__(self) -> None:
+        self._last: float | None = None
+
+    def now(self) -> float:
+        value = time.monotonic()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or self._last is not None
+            and value < self._last
+        ):
+            raise ValueError
+        self._last = float(value)
+        return self._last
+
+
+def _wait_output(marker: str, state: dict[str, object] | None = None) -> None:
+    print(marker)
+    if state is not None:
+        print(json.dumps(state, sort_keys=True))
+
+
+def _wait_error() -> int:
+    print(_WAIT_ERROR, file=sys.stderr)
+    return 4
+
+
+def _wait_main(*, name: str, timeout_seconds: int) -> int:
+    clock = _WaitClock()
+    try:
+        started = clock.now()
+        deadline = started + timeout_seconds
+        if not math.isfinite(deadline):
+            raise ValueError
+        last_state: dict[str, object] | None = None
+        pinned_run_id: str | None = None
+        while True:
+            remaining = deadline - clock.now()
+            if remaining <= 0:
+                _wait_output(_WAIT_TIMED_OUT, last_state)
+                return 6
+            try:
+                value = request_before(
+                    "status", deadline_monotonic=deadline, name=name
+                )
+            except (RequestDeadlineExceeded, TimeoutError):
+                _wait_output(_WAIT_TIMED_OUT, last_state)
+                return 6
+            except Exception:  # noqa: BLE001 - wait failures are constant and closed
+                return _wait_error()
+            # A response completing at or after the absolute deadline cannot be
+            # treated as a validated observation for this bounded wait.
+            if clock.now() >= deadline:
+                _wait_output(_WAIT_TIMED_OUT, last_state)
+                return 6
+            try:
+                state = _wait_status_projection(value, name=name)
+            except Exception:  # noqa: BLE001 - malformed status is constant
+                return _wait_error()
+            run_id = state["run_id"]
+            if pinned_run_id is None:
+                pinned_run_id = run_id
+            elif run_id != pinned_run_id:
+                return _wait_error()
+            last_state = state
+            if state["state"] in _WAIT_TERMINAL_STATES:
+                _wait_output(_WAIT_TERMINAL, state)
+                return 0
+            remaining = deadline - clock.now()
+            if remaining <= 0:
+                _wait_output(_WAIT_TIMED_OUT, last_state)
+                return 6
+            time.sleep(min(_WAIT_POLL_CADENCE_SECONDS, remaining))
+    except Exception:  # noqa: BLE001 - clock and sleep failures are constant
+        return _wait_error()
+
+
 class _RejectDuplicateIdentifier(argparse.Action):
     """Accept one identifier option and fail closed on a repeated spelling."""
 
@@ -281,6 +442,17 @@ def _parser() -> argparse.ArgumentParser:
     kill.add_argument("--receipt", required=True, type=Path)
     status = commands.add_parser("status", help="show one protected workload")
     status.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
+    wait = commands.add_parser(
+        "wait", help="wait for one protected workload to reach a terminal state"
+    )
+    wait.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
+    wait.add_argument(
+        "--timeout-seconds",
+        required=True,
+        type=_wait_timeout,
+        action=_RejectDuplicateIdentifier,
+        help="maximum wait duration in seconds (1-300)",
+    )
     commands.add_parser("list", help="list protected workloads")
     history = commands.add_parser(
         "history",
@@ -383,6 +555,15 @@ def _history_limit(value: str) -> int:
     return result
 
 
+def _wait_timeout(value: str) -> int:
+    if not isinstance(value, str) or not value.isascii() or not value.isdecimal():
+        raise argparse.ArgumentTypeError("wait timeout must be an integer from 1 to 300")
+    result = int(value)
+    if not 1 <= result <= 300:
+        raise argparse.ArgumentTypeError("wait timeout must be an integer from 1 to 300")
+    return result
+
+
 def _check_start_main(values: list[str]) -> int:
     parser = _CheckStartParser(prog="eggcracker check-start")
     _add_check_start_arguments(parser)
@@ -442,6 +623,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "support-bundle":
         return support_bundle_main(args.output)
+    if args.command == "wait":
+        return _wait_main(name=args.name, timeout_seconds=args.timeout_seconds)
     try:
         if args.command == "doctor":
             if args.summary:
