@@ -781,32 +781,43 @@ class FirstKillTests(unittest.TestCase):
             ]
             if ai_workspace_arg is not None:
                 argv.extend(["--ai-workspace", str(ai_workspace_arg)])
-            with (
-                mock.patch.object(first_kill, "operator_name", return_value="tester"),
-                mock.patch.object(first_kill, "compatibility"),
-                mock.patch.object(first_kill, "repository_root", return_value=Path("/checkout")),
-                mock.patch.object(first_kill, "prepare_workspace", return_value=workspace),
-                mock.patch.object(
-                    first_kill,
-                    "release_files",
-                    return_value=(Path("/bundle.zip"), Path("/key.asc"), Path("/SHA256SUMS"), Path("/SHA256SUMS.asc")),
-                ),
-                mock.patch.object(first_kill, "verify_tag", return_value=TAG_COMMIT),
-                mock.patch.object(first_kill, "verify_checksum_signature"),
-                mock.patch.object(first_kill, "verify_bundle_checksum"),
-                mock.patch.object(first_kill, "extracted_release", return_value=Path("/release")),
-                mock.patch.object(first_kill, "manifest", return_value=release),
-                mock.patch.object(first_kill, "run"),
-                mock.patch.object(first_kill, "install_release"),
-                mock.patch.object(first_kill, "installed_workload_user", return_value="workload"),
-                mock.patch.object(first_kill, "run_real_smoke", return_value=receipt or success_receipt()),
-                mock.patch.object(first_kill, "remove_installation", removed),
-                mock.patch.object(first_kill, "verify_removed_targets", verified),
-                mock.patch.object(first_kill, "validate_result_output", return_value=output_path),
-                mock.patch.object(first_kill, "publish_success_result", published),
-                contextlib.redirect_stdout(output),
-                contextlib.redirect_stderr(errors),
-            ):
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(first_kill, "operator_name", return_value="tester"))
+                stack.enter_context(mock.patch.object(first_kill, "compatibility"))
+                stack.enter_context(
+                    mock.patch.object(first_kill, "repository_root", return_value=Path("/checkout"))
+                )
+                stack.enter_context(mock.patch.object(first_kill, "prepare_workspace", return_value=workspace))
+                stack.enter_context(
+                    mock.patch.object(
+                        first_kill,
+                        "release_files",
+                        return_value=(Path("/bundle.zip"), Path("/key.asc"), Path("/SHA256SUMS"), Path("/SHA256SUMS.asc")),
+                    )
+                )
+                stack.enter_context(mock.patch.object(first_kill, "verify_tag", return_value=TAG_COMMIT))
+                stack.enter_context(mock.patch.object(first_kill, "verify_checksum_signature"))
+                stack.enter_context(mock.patch.object(first_kill, "verify_bundle_checksum"))
+                stack.enter_context(
+                    mock.patch.object(first_kill, "extracted_release", return_value=Path("/release"))
+                )
+                stack.enter_context(mock.patch.object(first_kill, "manifest", return_value=release))
+                stack.enter_context(mock.patch.object(first_kill, "run"))
+                stack.enter_context(mock.patch.object(first_kill, "install_release"))
+                stack.enter_context(
+                    mock.patch.object(first_kill, "installed_workload_user", return_value="workload")
+                )
+                stack.enter_context(
+                    mock.patch.object(first_kill, "run_real_smoke", return_value=receipt or success_receipt())
+                )
+                stack.enter_context(mock.patch.object(first_kill, "remove_installation", removed))
+                stack.enter_context(mock.patch.object(first_kill, "verify_removed_targets", verified))
+                stack.enter_context(
+                    mock.patch.object(first_kill, "validate_result_output", return_value=output_path)
+                )
+                stack.enter_context(mock.patch.object(first_kill, "publish_success_result", published))
+                stack.enter_context(contextlib.redirect_stdout(output))
+                stack.enter_context(contextlib.redirect_stderr(errors))
                 result = first_kill.main(argv)
         return result, published, verified, removed, output.getvalue(), errors.getvalue()
 
