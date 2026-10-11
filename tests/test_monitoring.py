@@ -162,7 +162,7 @@ class StrictAndLegacyTests(unittest.TestCase):
     def test_legacy_roles_framing_timeout_and_arguments(self):
         roles = {
             "approvals": "query", "detections": "query", "exec_policies": "query",
-            "doctor": "query", "list": "query", "status": "query", "incidents": "query",
+            "doctor": "query", "list": "query", "status": "query", "incidents": "query", "history": "query",
             "approve": "admin", "exec_policy_create": "admin", "exec_policy_revoke": "admin",
             "incident_show": "admin", "incident_acknowledge": "admin", "incident_clear": "admin",
             "revoke": "admin", "kill": "operator", "start": "operator", "check_start": "operator",

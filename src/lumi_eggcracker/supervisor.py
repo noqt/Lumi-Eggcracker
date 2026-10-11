@@ -150,7 +150,7 @@ OPERATOR_SOCKET = Path("/run/lumi-eggcracker/operator.sock")
 ADMIN_SOCKET = Path("/run/lumi-eggcracker/admin.sock")
 LEGACY_SOCKET = Path("/run/lumi-eggcracker/control.sock")
 SOCKET_ACTIONS = {
-    QUERY_SOCKET: frozenset({"approvals", "detections", "doctor", "exec_policies", "incidents", "list", "status"}),
+    QUERY_SOCKET: frozenset({"approvals", "detections", "doctor", "exec_policies", "history", "incidents", "list", "status"}),
     OPERATOR_SOCKET: frozenset({"check_start", "kill", "start"}),
     ADMIN_SOCKET: frozenset({
         "approve",
@@ -171,6 +171,7 @@ EXEC_DIR = Path("/run/lumi-eggcracker/exec")
 DISCOVERY_PROGRESS_SCHEMA = "lumi-eggcracker.discovery-progress.v1"
 DISCOVERY_PROGRESS = STATE_DIR / "discovery-progress.json"
 MAX_TERMINAL_RECORDS = 128
+MAX_HISTORY_LIMIT = 20
 DETECTION_LIMIT = 1000
 RECENT_DISCOVERY_NS = 5_000_000_000
 CONTENT_SCAN_INTERVAL = 2
@@ -330,6 +331,12 @@ def _bounded_query_items(
             break
         selected.append(value)
     return {key: selected}
+
+
+def _history_limit(value: Any) -> int:
+    if type(value) is not int or not 1 <= value <= MAX_HISTORY_LIMIT:
+        raise JsonInputError("history limit must be an integer from 1 to 20")
+    return value
 
 
 class Supervisor:
@@ -614,6 +621,35 @@ class Supervisor:
         if not candidates:
             raise JsonInputError("workload name is unavailable")
         return max(candidates, key=lambda item: int(item["created_monotonic_ns"]))
+
+    def _history_records(self, limit: int) -> list[dict[str, Any]]:
+        """Load retained terminal records, rejecting malformed retention state."""
+        records: list[dict[str, Any]] = []
+        try:
+            paths = sorted(self.runs.glob("*.json"))
+            for path in paths:
+                record = load_run(self.runs, path.stem)
+                if record["state"] not in ACTIVE_STATES:
+                    records.append(record)
+            records.sort(
+                key=lambda item: (
+                    int(item["created_monotonic_ns"]),
+                    str(item["run_id"]),
+                ),
+                reverse=True,
+            )
+        except (
+            JsonInputError,
+            KeyError,
+            OSError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ) as error:
+            # Silently dropping one retained record could make an incomplete
+            # result look like proof that no terminal history exists.
+            raise JsonInputError("retained workload history is unavailable") from error
+        return records[:limit]
 
     def _backfill_name_tombstones(self) -> None:
         """Reserve names created by releases that removed terminal pointers."""
@@ -3707,7 +3743,11 @@ class Supervisor:
             return self._check_start(args)
         if action == "start":
             return self._start(args)
-        def public_run(record: dict[str, Any]) -> dict[str, Any]:
+        def public_run(
+            record: dict[str, Any], *, incident_lockdown: bool | None = None
+        ) -> dict[str, Any]:
+            if incident_lockdown is None:
+                incident_lockdown = self._incident_status()["lockdown"]
             return {
                 "name": record["name"],
                 "run_id": record["run_id"],
@@ -3720,7 +3760,7 @@ class Supervisor:
                 ),
                 "exec_policy_id": record.get("exec_policy_id", "legacy"),
                 "exec_policy_digest": record.get("exec_policy_digest", "0" * 64),
-                "incident_lockdown": self._incident_status()["lockdown"],
+                "incident_lockdown": incident_lockdown,
                 "workload_uid": record["workload_uid"],
             }
 
@@ -3738,6 +3778,19 @@ class Supervisor:
                 except JsonInputError:
                     continue
             return {"runs": runs}
+        if action == "history" and set(args) == {"limit"}:
+            limit = _history_limit(args["limit"])
+            incident_root = getattr(self, "incidents", None)
+            if incident_root is None:
+                incident_lockdown = False
+            else:
+                incident_lockdown = self._read_only_incident_status()["lockdown"]
+            return {
+                "runs": [
+                    public_run(record, incident_lockdown=incident_lockdown)
+                    for record in self._history_records(limit)
+                ]
+            }
         if action in {"approve", "revoke", "exec_policy_create", "exec_policy_revoke"} and not self._incident_status()["healthy"]:
             raise JsonInputError("local lockdown state is unavailable; root recovery is required")
         approval_arguments = {

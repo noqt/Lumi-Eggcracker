@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from lumi_eggcracker import incidents
 from lumi_eggcracker.artifacts import ArtifactEvidence
 from lumi_eggcracker.client import OPERATOR_SOCKET as CLIENT_OPERATOR_SOCKET
+from lumi_eggcracker.client import QUERY_SOCKET as CLIENT_QUERY_SOCKET
 from lumi_eggcracker.client import SOCKETS as CLIENT_SOCKETS
 from lumi_eggcracker.containment import EmptyProof
 from lumi_eggcracker.detectors import DetectionMatch, load_bundled, match
@@ -48,6 +49,18 @@ from lumi_eggcracker.supervisor import (
 def record() -> dict[str, object]:
     run_id = "a" * 24
     return {**command_summary(["/bin/true"]), "boot_id": "b" * 36, "boundary": None, "cgroup": f"/system.slice/lumi-eggcracker-workload-{run_id}.service", "cgroup_device": 1, "cgroup_inode": 2, "cpu_quota_percent": 400, "created_monotonic_ns": 3, "max_memory_mib": 2048, "max_pids": 8, "name": "demo", "network_mode": "none", "operator_uid": 1001, "run_id": run_id, "schema_version": RUN_SCHEMA, "state": "RUNNING", "unit": f"lumi-eggcracker-workload-{run_id}.service", "workload_gid": 2001, "workload_uid": 2001}
+
+
+def retained_record(run_id: str, state: str, created_monotonic_ns: int) -> dict[str, object]:
+    return {
+        **record(),
+        "cgroup": f"/system.slice/lumi-eggcracker-workload-{run_id}.service",
+        "created_monotonic_ns": created_monotonic_ns,
+        "name": f"workload-{run_id[:8]}",
+        "run_id": run_id,
+        "state": state,
+        "unit": f"lumi-eggcracker-workload-{run_id}.service",
+    }
 
 
 class SupervisorTests(unittest.TestCase):
@@ -618,6 +631,41 @@ class SupervisorTests(unittest.TestCase):
             SOCKET_ACTIONS[Path("/run/lumi-eggcracker/admin.sock")],
         )
         self.assertEqual(CLIENT_OPERATOR_SOCKET, CLIENT_SOCKETS["check_start"])
+
+    def test_history_is_allowlisted_on_the_query_socket_only(self) -> None:
+        self.assertIn("history", SOCKET_ACTIONS[QUERY_SOCKET])
+        self.assertNotIn("history", SOCKET_ACTIONS[OPERATOR_SOCKET])
+        self.assertNotIn("history", SOCKET_ACTIONS[Path("/run/lumi-eggcracker/admin.sock")])
+        self.assertEqual(CLIENT_QUERY_SOCKET, CLIENT_SOCKETS["history"])
+
+    def test_history_query_uses_existing_query_authorization(self) -> None:
+        supervisor = self._instance()
+        supervisor.policy["operator_uid"] = 1001
+        connection = MagicMock()
+        connection.getsockopt.return_value = struct.pack("3i", 42, 1001, 1001)
+        with (
+            patch(
+                "lumi_eggcracker.supervisor._receive",
+                return_value={"action": "history", "args": {"limit": 1}},
+            ),
+            patch.object(supervisor, "handle", return_value={"runs": []}) as handle,
+            patch("lumi_eggcracker.supervisor._send") as send,
+            patch("lumi_eggcracker.supervisor.socket.SO_PEERCRED", 17, create=True),
+        ):
+            supervisor._serve_connection(connection, QUERY_SOCKET)
+        handle.assert_called_once_with({"action": "history", "args": {"limit": 1}})
+        send.assert_called_once_with(connection, {"ok": True, "value": {"runs": []}})
+
+        connection.getsockopt.return_value = struct.pack("3i", 42, 2002, 1001)
+        with (
+            patch("lumi_eggcracker.supervisor._send") as send,
+            patch("lumi_eggcracker.supervisor.socket.SO_PEERCRED", 17, create=True),
+        ):
+            supervisor._serve_connection(connection, QUERY_SOCKET)
+        send.assert_called_once_with(
+            connection,
+            {"ok": False, "value": "peer uid is not authorized"},
+        )
 
     def test_oversized_valid_json_integer_is_rejected_without_escaping(self) -> None:
         server, client = socket.socketpair()
@@ -1601,6 +1649,123 @@ class SupervisorTests(unittest.TestCase):
             value = supervisor.handle({"action": "status", "args": {"name": "demo"}})
         self.assertEqual("COMPLETED_ALLOWED", value["state"])
         stored.assert_not_called()
+
+    def test_history_empty_result_is_explicitly_read_only(self) -> None:
+        supervisor = self._instance()
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = []
+        with (
+            patch.object(supervisor, "_incident_status", side_effect=AssertionError),
+            patch.object(supervisor, "_store") as stored,
+            patch.object(supervisor, "_prune_terminal_records") as pruned,
+            patch.object(supervisor, "_teardown_boundary") as teardown,
+        ):
+            self.assertEqual(
+                {"runs": []},
+                supervisor.handle({"action": "history", "args": {"limit": 20}}),
+            )
+        stored.assert_not_called()
+        pruned.assert_not_called()
+        teardown.assert_not_called()
+
+    def test_history_returns_only_terminal_records_in_deterministic_order(self) -> None:
+        supervisor = self._instance()
+        active = retained_record("a" * 24, "RUNNING", 900)
+        completed = retained_record("b" * 24, "COMPLETED_ALLOWED", 20)
+        terminated_low_id = retained_record("c" * 24, "TERMINATED", 20)
+        terminated_high_id = retained_record("d" * 24, "TERMINATED", 20)
+        values = {
+            item["run_id"]: item
+            for item in (active, completed, terminated_low_id, terminated_high_id)
+        }
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [
+            Path(f"{run_id}.json") for run_id in values
+        ]
+
+        def load(_runs: Path, run_id: str) -> dict[str, object]:
+            return values[run_id]
+
+        with (
+            patch("lumi_eggcracker.supervisor.load_run", side_effect=load),
+            patch.object(supervisor, "_incident_status", side_effect=AssertionError),
+        ):
+            response = supervisor.handle({"action": "history", "args": {"limit": 3}})
+
+        self.assertEqual(
+            ["d" * 24, "c" * 24, "b" * 24],
+            [item["run_id"] for item in response["runs"]],
+        )
+        self.assertEqual(
+            ["TERMINATED", "TERMINATED", "COMPLETED_ALLOWED"],
+            [item["state"] for item in response["runs"]],
+        )
+        for item in response["runs"]:
+            self.assertEqual(
+                {
+                    "exec_policy_digest",
+                    "exec_policy_id",
+                    "incident_lockdown",
+                    "name",
+                    "network_mode",
+                    "run_id",
+                    "state",
+                    "unit",
+                    "workload_uid",
+                },
+                set(item),
+            )
+            self.assertNotIn("created_monotonic_ns", item)
+
+    def test_history_rejects_invalid_limit_types_ranges_and_extra_arguments(self) -> None:
+        supervisor = self._instance()
+        cases = (
+            {},
+            {"limit": 0},
+            {"limit": 21},
+            {"limit": True},
+            {"limit": False},
+            {"limit": 1.0},
+            {"limit": "1"},
+            {"limit": 1, "extra": None},
+        )
+        for args in cases:
+            with self.subTest(args=args), self.assertRaises(JsonInputError):
+                supervisor.handle({"action": "history", "args": args})
+
+    def test_history_rejects_malformed_retained_record_instead_of_proving_empty(self) -> None:
+        supervisor = self._instance()
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [Path(f"{'a' * 24}.json")]
+        with patch(
+            "lumi_eggcracker.supervisor.load_run",
+            side_effect=JsonInputError("private malformed record"),
+        ), self.assertRaisesRegex(
+            JsonInputError, "retained workload history is unavailable"
+        ):
+            supervisor.handle({"action": "history", "args": {"limit": 20}})
+
+    def test_history_does_not_read_receipts_or_run_mutation_paths(self) -> None:
+        supervisor = self._instance()
+        item = retained_record("a" * 24, "TERMINATED", 1)
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [Path(f"{'a' * 24}.json")]
+        supervisor.receipts = MagicMock()
+        supervisor.receipts.glob.side_effect = AssertionError("receipt read")
+        with (
+            patch("lumi_eggcracker.supervisor.load_run", return_value=item),
+            patch("lumi_eggcracker.supervisor.load_regular_json", side_effect=AssertionError),
+            patch.object(supervisor, "_store") as stored,
+            patch.object(supervisor, "_prune_terminal_records") as pruned,
+            patch.object(supervisor, "_teardown_boundary") as teardown,
+            patch.object(supervisor, "_contain") as contain,
+        ):
+            response = supervisor.handle({"action": "history", "args": {"limit": 20}})
+        self.assertEqual(["a" * 24], [value["run_id"] for value in response["runs"]])
+        stored.assert_not_called()
+        pruned.assert_not_called()
+        teardown.assert_not_called()
+        contain.assert_not_called()
 
     def test_terminal_run_keeps_name_tombstone(self) -> None:
         supervisor = self._instance()
