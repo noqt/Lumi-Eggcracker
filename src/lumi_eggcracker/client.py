@@ -6,6 +6,7 @@ import json
 import math
 import socket
 import struct
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -38,13 +39,71 @@ SOCKETS = {
 }
 
 
+class RequestDeadlineExceeded(TimeoutError):
+    """The absolute request deadline expired before or during an I/O step."""
+
+
+class _DeadlineClock:
+    """Track one request's monotonic samples and remaining deadline."""
+
+    def __init__(self, deadline_monotonic: float) -> None:
+        if (
+            isinstance(deadline_monotonic, bool)
+            or not isinstance(deadline_monotonic, (int, float))
+            or not math.isfinite(deadline_monotonic)
+        ):
+            raise JsonInputError("invalid request deadline")
+        self.deadline = float(deadline_monotonic)
+        self._last: float | None = None
+
+    def remaining(self) -> float:
+        now = time.monotonic()
+        if (
+            isinstance(now, bool)
+            or not isinstance(now, (int, float))
+            or not math.isfinite(now)
+            or self._last is not None
+            and now < self._last
+        ):
+            raise JsonInputError("request clock is not monotonic")
+        self._last = float(now)
+        remaining = self.deadline - self._last
+        if remaining <= 0:
+            raise RequestDeadlineExceeded("request deadline expired")
+        return remaining
+
+    def set_timeout(self, connection: socket.socket) -> None:
+        connection.settimeout(self.remaining())
+
+
 def _receive(
-    connection: socket.socket, *, decode: Callable[[str], Any] | None = None
+    connection: socket.socket,
+    *,
+    decode: Callable[[str], Any] | None = None,
+    deadline_monotonic: float | None = None,
+    _deadline_clock: _DeadlineClock | None = None,
 ) -> dict[str, Any]:
+    deadline_clock = _deadline_clock
+    if deadline_monotonic is not None:
+        if deadline_clock is None:
+            deadline_clock = _DeadlineClock(deadline_monotonic)
+        elif deadline_clock.deadline != deadline_monotonic:
+            raise JsonInputError("request deadlines do not match")
+
+    def receive(size: int) -> bytes:
+        if deadline_clock is not None:
+            deadline_clock.set_timeout(connection)
+        try:
+            return connection.recv(size)
+        except TimeoutError as error:
+            if deadline_clock is not None:
+                raise RequestDeadlineExceeded("request deadline expired") from error
+            raise
+
     header_chunks: list[bytes] = []
     remaining = 4
     while remaining:
-        chunk = connection.recv(remaining)
+        chunk = receive(remaining)
         if not chunk:
             raise JsonInputError("truncated supervisor response")
         header_chunks.append(chunk)
@@ -55,7 +114,7 @@ def _receive(
         raise JsonInputError("invalid supervisor response frame")
     chunks: list[bytes] = []
     while length:
-        chunk = connection.recv(length)
+        chunk = receive(length)
         if not chunk:
             raise JsonInputError("truncated supervisor response")
         chunks.append(chunk)
@@ -85,6 +144,49 @@ def request(action: str, **args: Any) -> dict[str, Any]:
         connection.connect(socket_path)
         connection.sendall(struct.pack("!I", len(payload)) + payload)
         response = _receive(connection)
+    if set(response) != {"ok", "value"} or not isinstance(response["ok"], bool):
+        raise JsonInputError("supervisor response contract is invalid")
+    if not response["ok"]:
+        raise JsonInputError(str(response["value"]))
+    if not isinstance(response["value"], dict):
+        raise JsonInputError("supervisor value is invalid")
+    return response["value"]
+
+
+def request_before(action: str, *, deadline_monotonic: float, **args: Any) -> dict[str, Any]:
+    """Request one action, bounded by one absolute monotonic deadline.
+
+    This path is intentionally separate from :func:`request`: existing callers
+    retain their fixed thirty-second socket timeout, while bounded workflows
+    receive a timeout that shrinks before every potentially blocking step.
+    """
+
+    try:
+        socket_path = SOCKETS[action]
+    except KeyError as error:
+        raise JsonInputError("unsupported client action") from error
+    payload = json.dumps(
+        {"action": action, "args": args}, sort_keys=True, separators=(",", ":")
+    ).encode()
+    if not 1 <= len(payload) <= MAX_FRAME:
+        raise JsonInputError("supervisor request is too large")
+    deadline_clock = _DeadlineClock(deadline_monotonic)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        deadline_clock.set_timeout(connection)
+        try:
+            connection.connect(socket_path)
+        except TimeoutError as error:
+            raise RequestDeadlineExceeded("request deadline expired") from error
+        deadline_clock.set_timeout(connection)
+        try:
+            connection.sendall(struct.pack("!I", len(payload)) + payload)
+        except TimeoutError as error:
+            raise RequestDeadlineExceeded("request deadline expired") from error
+        response = _receive(
+            connection,
+            deadline_monotonic=deadline_monotonic,
+            _deadline_clock=deadline_clock,
+        )
     if set(response) != {"ok", "value"} or not isinstance(response["ok"], bool):
         raise JsonInputError("supervisor response contract is invalid")
     if not response["ok"]:

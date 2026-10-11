@@ -40,6 +40,20 @@ def doctor_response(**overrides: object) -> dict[str, object]:
     return value
 
 
+def wait_status(*, state: str = "RUNNING", run_id: str = "a" * 24) -> dict[str, object]:
+    return {
+        "exec_policy_digest": "0" * 64,
+        "exec_policy_id": "legacy",
+        "incident_lockdown": False,
+        "name": "demo",
+        "network_mode": "offline",
+        "run_id": run_id,
+        "state": state,
+        "unit": f"lumi-eggcracker-workload-{run_id}.service",
+        "workload_uid": 4242,
+    }
+
+
 class CliTests(unittest.TestCase):
     def test_version(self) -> None:
         output = io.StringIO()
@@ -55,6 +69,7 @@ class CliTests(unittest.TestCase):
             "check-start",
             "kill",
             "status",
+            "wait",
             "list",
             "history",
             "approve",
@@ -574,6 +589,160 @@ class CliTests(unittest.TestCase):
                 ),
             )
         self.assertEqual(response, json.loads(output.getvalue()))
+
+    def test_wait_immediate_terminal_emits_fixed_marker_and_validated_state(self) -> None:
+        response = wait_status(state="TERMINATED")
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch("lumi_eggcracker.cli.time.monotonic", return_value=10.0), patch(
+            "lumi_eggcracker.cli.request_before", return_value=response
+        ) as request_before, patch("lumi_eggcracker.cli.time.sleep") as sleep, redirect_stdout(
+            output
+        ), redirect_stderr(error):
+            self.assertEqual(0, main(["wait", "--name", "demo", "--timeout-seconds", "1"]))
+        self.assertEqual("TERMINAL\n", output.getvalue().splitlines()[0] + "\n")
+        self.assertEqual(response, json.loads(output.getvalue().splitlines()[1]))
+        self.assertEqual("", error.getvalue())
+        request_before.assert_called_once_with(
+            "status", deadline_monotonic=11.0, name="demo"
+        )
+        sleep.assert_not_called()
+
+    def test_wait_active_to_terminal_pins_run_id_and_uses_bounded_sleep(self) -> None:
+        active = wait_status()
+        terminal = wait_status(state="CONTAINMENT_FAILED")
+        output = io.StringIO()
+        with patch(
+            "lumi_eggcracker.cli.time.monotonic",
+            side_effect=[10.0, 10.0, 10.1, 10.1, 10.2, 10.2],
+        ), patch(
+            "lumi_eggcracker.cli.request_before", side_effect=[active, terminal]
+        ) as request_before, patch("lumi_eggcracker.cli.time.sleep") as sleep, redirect_stdout(
+            output
+        ):
+            self.assertEqual(0, main(["wait", "--name", "demo", "--timeout-seconds", "1"]))
+        self.assertEqual("TERMINAL", output.getvalue().splitlines()[0])
+        self.assertEqual(terminal, json.loads(output.getvalue().splitlines()[1]))
+        self.assertEqual(2, request_before.call_count)
+        self.assertEqual([((0.1,), {})], sleep.call_args_list)
+        for call in request_before.call_args_list:
+            self.assertEqual("status", call.args[0])
+            self.assertEqual(11.0, call.kwargs["deadline_monotonic"])
+            self.assertEqual("demo", call.kwargs["name"])
+
+    def test_wait_timeout_emits_last_validated_state_without_postdeadline_request(self) -> None:
+        active = wait_status()
+        output = io.StringIO()
+        with patch(
+            "lumi_eggcracker.cli.time.monotonic",
+            side_effect=[0.0, 0.0, 0.1, 0.1, 1.0],
+        ), patch("lumi_eggcracker.cli.request_before", return_value=active) as request_before, patch(
+            "lumi_eggcracker.cli.time.sleep"
+        ) as sleep, redirect_stdout(output):
+            self.assertEqual(6, main(["wait", "--name", "demo", "--timeout-seconds", "1"]))
+        self.assertEqual("TIMED_OUT", output.getvalue().splitlines()[0])
+        self.assertEqual(active, json.loads(output.getvalue().splitlines()[1]))
+        request_before.assert_called_once()
+        sleep.assert_called_once_with(0.1)
+
+    def test_wait_inflight_deadline_is_timeout_without_inventing_state(self) -> None:
+        output = io.StringIO()
+        with patch("lumi_eggcracker.cli.time.monotonic", return_value=10.0), patch(
+            "lumi_eggcracker.cli.request_before", side_effect=TimeoutError
+        ) as request_before, redirect_stdout(output), redirect_stderr(io.StringIO()):
+            self.assertEqual(6, main(["wait", "--name", "demo", "--timeout-seconds", "1"]))
+        self.assertEqual("TIMED_OUT\n", output.getvalue())
+        request_before.assert_called_once()
+
+    def test_wait_fails_closed_for_drift_malformed_unknown_and_nonmonotonic_results(self) -> None:
+        cases = (
+            ({**wait_status(), "extra": True}, "extra field"),
+            ({**wait_status(), "state": "UNKNOWN"}, "unknown state"),
+            ({**wait_status(), "name": "other"}, "name drift"),
+        )
+        for response, label in cases:
+            with self.subTest(label=label):
+                output = io.StringIO()
+                error = io.StringIO()
+                with patch("lumi_eggcracker.cli.time.monotonic", return_value=10.0), patch(
+                    "lumi_eggcracker.cli.request_before", return_value=response
+                ), redirect_stdout(output), redirect_stderr(error):
+                    self.assertEqual(
+                        4, main(["wait", "--name", "demo", "--timeout-seconds", "1"])
+                    )
+                self.assertEqual("", output.getvalue())
+                self.assertEqual("ERROR\n", error.getvalue())
+
+        first = wait_status()
+        second = wait_status(state="TERMINATED", run_id="b" * 24)
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch(
+            "lumi_eggcracker.cli.time.monotonic",
+            side_effect=[10.0, 10.0, 10.0, 10.0, 10.1, 10.1],
+        ), patch(
+            "lumi_eggcracker.cli.request_before", side_effect=[first, second]
+        ) as request_before, patch("lumi_eggcracker.cli.time.sleep"), redirect_stdout(
+            output
+        ), redirect_stderr(error):
+            self.assertEqual(4, main(["wait", "--name", "demo", "--timeout-seconds", "1"]))
+        self.assertEqual(2, request_before.call_count)
+        self.assertEqual("", output.getvalue())
+        self.assertEqual("ERROR\n", error.getvalue())
+
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch(
+            "lumi_eggcracker.cli.time.monotonic", side_effect=[10.0, 9.0]
+        ), patch("lumi_eggcracker.cli.request_before") as request_before, redirect_stdout(
+            output
+        ), redirect_stderr(error):
+            self.assertEqual(4, main(["wait", "--name", "demo", "--timeout-seconds", "1"]))
+        request_before.assert_not_called()
+        self.assertEqual("", output.getvalue())
+        self.assertEqual("ERROR\n", error.getvalue())
+
+    def test_wait_timeout_argument_is_bounded_and_does_not_request(self) -> None:
+        for timeout in ("0", "301", "1.0", "true"):
+            with self.subTest(timeout=timeout), patch(
+                "lumi_eggcracker.cli.request_before"
+            ) as request_before, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    main(["wait", "--name", "demo", "--timeout-seconds", timeout])
+                self.assertEqual(2, raised.exception.code)
+                request_before.assert_not_called()
+        with patch("lumi_eggcracker.cli.request_before") as request_before, redirect_stderr(
+            io.StringIO()
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                main(
+                    [
+                        "wait",
+                        "--name",
+                        "demo",
+                        "--timeout-seconds",
+                        "1",
+                        "--timeout-seconds",
+                        "2",
+                    ]
+                )
+            self.assertEqual(2, raised.exception.code)
+            request_before.assert_not_called()
+
+    def test_wait_uses_only_status_action_and_existing_status_still_uses_request(self) -> None:
+        terminal = wait_status(state="COMPLETED_ALLOWED")
+        with patch("lumi_eggcracker.cli.time.monotonic", return_value=10.0), patch(
+            "lumi_eggcracker.cli.request_before", return_value=terminal
+        ) as request_before, patch(
+            "lumi_eggcracker.cli.request", return_value={"state": "RUNNING"}
+        ) as request:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main(["wait", "--name", "demo", "--timeout-seconds", "1"]))
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main(["status", "--name", "demo"]))
+        request_before.assert_called_once()
+        self.assertEqual("status", request_before.call_args.args[0])
+        request.assert_called_once_with("status", name="demo")
 
     def test_execution_policy_create_requires_root(self) -> None:
         with patch("lumi_eggcracker.cli.os.geteuid", return_value=1001, create=True):
