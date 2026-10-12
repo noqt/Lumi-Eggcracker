@@ -408,6 +408,25 @@ and offers clean removal after a successful demonstration. On that success
 path, use `--remove` for a non-interactive removal or `--keep` to inspect the
 installation after the demonstration.
 
+### Inspect the installation retained with `--keep`
+
+If the demonstration succeeds and you choose `--keep`, use the same non-root
+operator passed to `first_kill.py` to inspect the installed signed v1.0.10
+client directly:
+
+```sh
+/usr/local/bin/eggcracker version
+/usr/local/bin/eggcracker doctor
+/usr/local/bin/eggcracker list
+```
+
+These commands report the installed version, health checks and known runs.
+Their output is inspection evidence only: it does not prove containment or
+that a kill succeeded. Keep using the pinned release and source identity above;
+commands in a newer source checkout may not exist in v1.0.10. When inspection
+is complete, choose whether to retain the installation or follow
+[Install and remove](#install-and-remove) for the explicit uninstall command.
+
 ### Publish the opt-in first-kill success result
 
 The delivered success-result projection is an opt-in full-run route. After
