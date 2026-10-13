@@ -345,6 +345,38 @@ writes nothing without the explicit opt-in flag.
 Review the local JSON before deciding whether to share it; `permission_to_quote`
 records permission, but does not send or publish anything.
 
+#### Verify a final receipt offline
+
+After a receipt has been written, verify that one final local file still has
+the closed v1 shape and the expected source identities without writing, using
+root, or making a network request:
+
+```sh
+python3 scripts/collect_supported_path_receipt.py \
+  --verify-receipt ./supported-path-receipt.json \
+  --expect-source-commit <exact-40-lowercase-hex-source-commit> \
+  --expect-source-tree-sha256 <exact-64-lowercase-hex-source-tree-sha256>
+```
+
+Verification reads at most the receipt size bound from one local regular file,
+rejects links, duplicate members, invalid UTF-8, and closed-schema,
+timestamp, privacy or outcome drift, and compares the observed source IDs with
+the two expected IDs. On success it emits only a bounded `outcome` and the
+`receipt_sha256` of the exact bounded bytes that were validated:
+
+```json
+{"outcome":"supported-success","receipt_sha256":"<64-lowercase-hex-digest>"}
+```
+
+Any verification failure emits a fixed, non-echoing diagnostic and exits with
+status 2.
+
+This establishes schema and source-ID consistency and identifies the validated
+bytes. It is not receipt authenticity or tamper resistance without a trusted
+reference, does not prove the run or containment, and does not grant
+permission to quote; the receipt's `permission_to_quote` field still requires
+separate review.
+
 ### Qualify the offline boundary
 
 On the disposable native Ubuntu host, qualify the offline network primitive
