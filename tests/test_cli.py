@@ -112,6 +112,19 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(0, main(["history", "--limit", "7"]))
             request.assert_called_once_with("history", limit=7)
 
+    def test_history_forwards_each_supported_state(self) -> None:
+        for state in (
+            "COMPLETED_ALLOWED",
+            "TERMINATED",
+            "CONTAINMENT_FAILED",
+            "CONTAINED_RECEIPT_FAILED",
+        ):
+            with self.subTest(state=state), patch(
+                "lumi_eggcracker.cli.request", return_value={"runs": []}
+            ) as request, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main(["history", "--limit", "7", "--state", state]))
+            request.assert_called_once_with("history", limit=7, state=state)
+
     def test_history_limit_rejects_invalid_duplicate_and_extra_arguments(self) -> None:
         cases = (
             ["history", "--limit", "0"],
@@ -120,6 +133,11 @@ class CliTests(unittest.TestCase):
             ["history", "--limit", "1.0"],
             ["history", "--limit", "1", "--limit", "2"],
             ["history", "--limit", "1", "unexpected"],
+            ["history", "--state", "RUNNING"],
+            ["history", "--state", "terminated"],
+            ["history", "--state"],
+            ["history", "--state", "TERMINATED", "--state", "CONTAINMENT_FAILED"],
+            ["history", "--state", "TERMINATED", "unexpected"],
         )
         for values in cases:
             with self.subTest(values=values), patch(
