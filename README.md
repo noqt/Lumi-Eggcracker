@@ -727,6 +727,27 @@ The snapshot is not containment proof. `doctor --summary` is available only in
 the source/build that contains this change; its presence is not a claim that
 the published v1.0.10 release includes this option.
 
+### Get a bounded manual recovery plan from a source build
+
+The published signed v1.0.10 package does not include `--recovery-plan`.
+After building and installing a source revision that contains this option,
+record its version and request the plan:
+
+```sh
+eggcracker version
+eggcracker doctor --recovery-plan
+```
+
+The command emits bounded JSON with `schema`, `result`, `installation_state`,
+`failed_checks` and `actions`. Actions are fixed manual-review categories; they
+contain no executable recovery commands. A `READY` result has an empty
+`actions` list and exits 0. `NOT_READY`, an unavailable supervisor response or
+an invalid response exits 6; unavailable or invalid input does not produce a
+successful plan. `--summary` and `--recovery-plan` are mutually exclusive.
+
+The plan is read-only guidance. It does not repair or mutate host state and is
+not independent proof of readiness or containment.
+
 ## Validate a manual kill receipt
 
 After building and installing a source revision that contains this change,
