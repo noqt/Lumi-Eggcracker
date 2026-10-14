@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.util
 import json
 import os
@@ -122,6 +123,7 @@ class SupportedPathReceiptTests(unittest.TestCase):
                 "collections",
                 "datetime",
                 "json",
+                "hashlib",
                 "os",
                 "pathlib",
                 "re",
@@ -359,6 +361,257 @@ class SupportedPathReceiptTests(unittest.TestCase):
                 self.assertIn("not the required value", stderr.getvalue())
                 self.assertNotIn(str(invalid_value), stderr.getvalue())
                 self.assertFalse(output.exists())
+
+    def write_final_receipt(
+        self,
+        directory: str,
+        *,
+        observed: dict[str, object] | None = None,
+        quote: bool = False,
+        suffix: bytes = b"\n",
+    ) -> tuple[Path, bytes]:
+        receipt = collector._build_receipt(
+            submission(quote=quote, observed=observed or success_observed())
+        )
+        encoded = (
+            json.dumps(receipt, indent=2, sort_keys=True).encode("utf-8") + suffix
+        )
+        path = Path(directory) / "final-receipt.json"
+        path.write_bytes(encoded)
+        return path, encoded
+
+    def run_verifier(
+        self,
+        receipt: Path,
+        *,
+        source_commit: str = SOURCE_COMMIT,
+        source_tree_sha256: str = SOURCE_TREE_SHA256,
+        extra: list[str] | None = None,
+    ) -> tuple[int, StringIO, StringIO]:
+        arguments = [
+            "--verify-receipt",
+            str(receipt),
+            "--expect-source-commit",
+            source_commit,
+            "--expect-source-tree-sha256",
+            source_tree_sha256,
+        ]
+        if extra:
+            arguments.extend(extra)
+        stdout = StringIO()
+        stderr = StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            status = collector.main(arguments)
+        return status, stdout, stderr
+
+    def test_verify_receipt_emits_only_outcome_and_digest_of_exact_bytes(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, encoded = self.write_final_receipt(directory, suffix=b" \n")
+            status, stdout, stderr = self.run_verifier(receipt)
+        self.assertEqual(0, status)
+        self.assertEqual(
+            {
+                "outcome": "supported-success",
+                "receipt_sha256": hashlib.sha256(encoded).hexdigest(),
+            },
+            json.loads(stdout.getvalue()),
+        )
+        self.assertEqual("", stderr.getvalue())
+
+    def test_verify_receipt_accepts_reproducible_blocker_outcome(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, _encoded = self.write_final_receipt(
+                directory, observed=blocker_observed(), quote=True
+            )
+            status, stdout, stderr = self.run_verifier(receipt)
+        self.assertEqual(0, status)
+        self.assertEqual("reproducible-blocker", json.loads(stdout.getvalue())["outcome"])
+        self.assertEqual("", stderr.getvalue())
+
+    def test_verify_receipt_rejects_schema_timestamp_privacy_and_outcome_drift(self) -> None:
+        cases = (
+            ("schema_version", "other-schema"),
+            ("recorded_at_utc", "2026-13-14T00:00:00Z"),
+            ("permission_to_quote", "yes"),
+            ("privacy", {**collector.PRIVACY, "raw_output_collected": True}),
+            ("observed_result", success_observed(outcome="unsupported")),
+        )
+        for field, invalid_value in cases:
+            with self.subTest(field=field), TemporaryDirectory() as directory:
+                receipt_value = collector._build_receipt(
+                    submission(quote=False, observed=success_observed())
+                )
+                receipt_value[field] = invalid_value
+                encoded = (json.dumps(receipt_value, sort_keys=True) + "\n").encode("utf-8")
+                receipt = Path(directory) / "receipt.json"
+                receipt.write_bytes(encoded)
+                status, stdout, stderr = self.run_verifier(receipt)
+            self.assertEqual(2, status)
+            self.assertEqual("", stdout.getvalue())
+            self.assertTrue(stderr.getvalue().startswith("NOT VERIFIED:"))
+            self.assertNotIn(str(invalid_value), stderr.getvalue())
+
+    def test_verify_receipt_rejects_duplicate_members_invalid_utf8_and_oversize(self) -> None:
+        cases = (
+            b'{"schema_version":"one","schema_version":"two"}',
+            b"\xffprivate-marker",
+            b" " * (collector.MAX_RECEIPT_BYTES + 1),
+        )
+        for encoded in cases:
+            with self.subTest(encoded=encoded[:10]), TemporaryDirectory() as directory:
+                receipt = Path(directory) / "receipt.json"
+                receipt.write_bytes(encoded)
+                status, stdout, stderr = self.run_verifier(receipt)
+            self.assertEqual(2, status)
+            self.assertEqual("", stdout.getvalue())
+            self.assertTrue(stderr.getvalue().startswith("NOT VERIFIED:"))
+            self.assertNotIn("private-marker", stderr.getvalue())
+
+    def test_verify_receipt_rejects_integer_digit_limit_without_file_changes(self) -> None:
+        private_marker = "private-integer-limit-marker"
+        digits = "9" * 4_301
+        encoded = b'{"integer": ' + digits.encode("ascii") + b"}\n"
+        self.assertLess(len(encoded), collector.MAX_RECEIPT_BYTES)
+        with TemporaryDirectory() as directory:
+            receipt = Path(directory) / f"{private_marker}.json"
+            sibling = Path(directory) / "sibling.json"
+            sibling_bytes = b"stable sibling\n"
+            receipt.write_bytes(encoded)
+            sibling.write_bytes(sibling_bytes)
+            before_entries = sorted(path.name for path in Path(directory).iterdir())
+            before_receipt_mtime = receipt.stat().st_mtime_ns
+            before_sibling_mtime = sibling.stat().st_mtime_ns
+
+            status, stdout, stderr = self.run_verifier(receipt)
+
+            after_entries = sorted(path.name for path in Path(directory).iterdir())
+            after_receipt_mtime = receipt.stat().st_mtime_ns
+            after_sibling_mtime = sibling.stat().st_mtime_ns
+            after_receipt_bytes = receipt.read_bytes()
+            after_sibling_bytes = sibling.read_bytes()
+        self.assertEqual(2, status)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual("NOT VERIFIED: receipt is not bounded UTF-8 JSON\n", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertNotIn(private_marker, stderr.getvalue())
+        self.assertNotIn(digits, stderr.getvalue())
+        self.assertEqual(before_entries, after_entries)
+        self.assertEqual(encoded, after_receipt_bytes)
+        self.assertEqual(before_receipt_mtime, after_receipt_mtime)
+        self.assertEqual(sibling_bytes, after_sibling_bytes)
+        self.assertEqual(before_sibling_mtime, after_sibling_mtime)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")
+    def test_verify_receipt_rejects_symlink_without_reading_target(self) -> None:
+        with TemporaryDirectory() as directory:
+            target, _encoded = self.write_final_receipt(directory)
+            receipt = Path(directory) / "receipt-link.json"
+            try:
+                receipt.symlink_to(target)
+            except OSError:
+                self.skipTest("symlink creation is not permitted")
+            status, stdout, stderr = self.run_verifier(receipt)
+        self.assertEqual(2, status)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("regular file", stderr.getvalue())
+
+    def test_verify_receipt_requires_matching_source_ids_and_read_only_mode(self) -> None:
+        private_marker = "private-source-marker"
+        with TemporaryDirectory() as directory:
+            receipt, _encoded = self.write_final_receipt(directory)
+            status, stdout, stderr = self.run_verifier(
+                receipt, source_commit=private_marker
+            )
+            self.assertEqual(2, status)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("exact lowercase source identity", stderr.getvalue())
+            self.assertNotIn(private_marker, stderr.getvalue())
+
+            status, stdout, stderr = self.run_verifier(
+                receipt,
+                extra=["--i-opt-in-to-write-local-receipt"],
+            )
+        self.assertEqual(2, status)
+        self.assertEqual("", stdout.getvalue())
+        self.assertEqual("NOT VERIFIED: invalid command-line arguments\n", stderr.getvalue())
+
+    def test_verify_receipt_rejects_independent_valid_but_mismatched_source_ids(self) -> None:
+        cases = (
+            ("commit", "c" * 40, SOURCE_TREE_SHA256),
+            ("tree", SOURCE_COMMIT, "d" * 64),
+        )
+        for label, expected_commit, expected_tree in cases:
+            with self.subTest(identity=label), TemporaryDirectory() as directory:
+                receipt, _encoded = self.write_final_receipt(directory)
+                status, stdout, stderr = self.run_verifier(
+                    receipt,
+                    source_commit=expected_commit,
+                    source_tree_sha256=expected_tree,
+                )
+            self.assertEqual(2, status)
+            self.assertEqual("", stdout.getvalue())
+            self.assertTrue(stderr.getvalue().startswith("NOT VERIFIED:"))
+            self.assertIn("does not match", stderr.getvalue())
+            self.assertNotIn(expected_commit, stderr.getvalue())
+            self.assertNotIn(expected_tree, stderr.getvalue())
+
+    def test_verify_receipt_rejects_missing_and_additional_top_level_members(self) -> None:
+        private_marker = "private-top-level-marker"
+        cases = ("missing", "additional")
+        for case in cases:
+            with self.subTest(case=case), TemporaryDirectory() as directory:
+                receipt_value = collector._build_receipt(
+                    submission(quote=False, observed=success_observed())
+                )
+                if case == "missing":
+                    receipt_value.pop("privacy")
+                else:
+                    receipt_value[private_marker] = "private-top-level-value"
+                receipt = Path(directory) / "receipt.json"
+                receipt.write_text(json.dumps(receipt_value), encoding="utf-8")
+                status, stdout, stderr = self.run_verifier(receipt)
+            self.assertEqual(2, status)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("closed schema", stderr.getvalue())
+            self.assertNotIn(private_marker, stderr.getvalue())
+            self.assertNotIn("private-top-level-value", stderr.getvalue())
+
+    def test_verify_receipt_rejects_non_regular_directory_path_without_echoing_it(self) -> None:
+        private_marker = "private-receipt-directory"
+        with TemporaryDirectory() as directory:
+            receipt = Path(directory) / private_marker
+            receipt.mkdir()
+            status, stdout, stderr = self.run_verifier(receipt)
+        self.assertEqual(2, status)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("regular file", stderr.getvalue())
+        self.assertNotIn(private_marker, stderr.getvalue())
+
+    def test_verify_receipt_does_not_create_or_modify_sibling_or_receipt_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, encoded = self.write_final_receipt(directory)
+            sibling = Path(directory) / "sibling.json"
+            sibling_bytes = b"stable sibling\n"
+            sibling.write_bytes(sibling_bytes)
+            before_entries = sorted(path.name for path in Path(directory).iterdir())
+            before_receipt_mtime = receipt.stat().st_mtime_ns
+            before_sibling_mtime = sibling.stat().st_mtime_ns
+
+            status, stdout, stderr = self.run_verifier(receipt)
+
+            after_entries = sorted(path.name for path in Path(directory).iterdir())
+            after_receipt_mtime = receipt.stat().st_mtime_ns
+            after_sibling_mtime = sibling.stat().st_mtime_ns
+            after_receipt_bytes = receipt.read_bytes()
+            after_sibling_bytes = sibling.read_bytes()
+        self.assertEqual(0, status)
+        self.assertNotEqual("", stdout.getvalue())
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual(before_entries, after_entries)
+        self.assertEqual(encoded, after_receipt_bytes)
+        self.assertEqual(before_receipt_mtime, after_receipt_mtime)
+        self.assertEqual(sibling_bytes, after_sibling_bytes)
+        self.assertEqual(before_sibling_mtime, after_sibling_mtime)
 
 
 if __name__ == "__main__":
