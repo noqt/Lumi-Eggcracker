@@ -58,6 +58,26 @@ _DOCTOR_SUMMARY_INSTALLATION_STATES = frozenset(
     {"HEALTHY", "DRIFT", "RECOVERY_REQUIRED", "NOT_INSTALLED"}
 )
 _DOCTOR_SUMMARY_NETWORK_MODES = frozenset({"offline", "unsupported"})
+_DOCTOR_RECOVERY_PLAN_SCHEMA = "lumi-eggcracker.doctor-recovery-plan.v1"
+_DOCTOR_RECOVERY_PLAN_ERROR = "eggcracker: doctor recovery plan unavailable"
+_DOCTOR_RECOVERY_PLAN_ACTIONS = {
+    "cgroup_v2": "MANUAL_HOST_REVIEW",
+    "discovery": "MANUAL_SUPERVISOR_REVIEW",
+    "execution_boundary": "MANUAL_POLICY_REVIEW",
+    "incidents": "MANUAL_INCIDENT_REVIEW",
+    "network_cleanup": "MANUAL_SUPERVISOR_REVIEW",
+    "network_mode": "MANUAL_POLICY_REVIEW",
+    "network_primitives": "MANUAL_HOST_REVIEW",
+    "pidfd": "MANUAL_HOST_REVIEW",
+    "receipt_persistence": "MANUAL_SUPERVISOR_REVIEW",
+    "supervisor_readiness": "MANUAL_SUPERVISOR_REVIEW",
+    "workload_identity": "MANUAL_IDENTITY_REVIEW",
+}
+_DOCTOR_RECOVERY_PLAN_INSTALLATION_ACTIONS = {
+    "NOT_INSTALLED": "MANUAL_INSTALLATION_REQUIRED",
+    "DRIFT": "MANUAL_INSTALLATION_REPAIR",
+    "RECOVERY_REQUIRED": "MANUAL_INSTALLATION_RECOVERY",
+}
 _WAIT_PUBLIC_STATUS_KEYS = frozenset(
     {
         "exec_policy_digest",
@@ -196,6 +216,31 @@ def _doctor_summary(value: object) -> dict[str, object]:
         ),
         "result": summary_result,
         "schema": _DOCTOR_SUMMARY_SCHEMA,
+    }
+
+
+def _doctor_recovery_plan(value: object) -> dict[str, object]:
+    """Reduce a doctor response to a fixed, nonidentifying recovery plan."""
+
+    summary = _doctor_summary(value)
+    installation = value["installation"]
+    installation_state = installation["state"]
+    failed_checks = summary["failed_checks"]
+
+    actions = {
+        _DOCTOR_RECOVERY_PLAN_ACTIONS[check]
+        for check in failed_checks
+        if check != "installation"
+    }
+    if installation_state != "HEALTHY":
+        actions.add(_DOCTOR_RECOVERY_PLAN_INSTALLATION_ACTIONS[installation_state])
+
+    return {
+        "actions": sorted(actions),
+        "failed_checks": failed_checks,
+        "installation_state": installation_state,
+        "result": summary["result"],
+        "schema": _DOCTOR_RECOVERY_PLAN_SCHEMA,
     }
 
 
@@ -504,10 +549,16 @@ def _parser() -> argparse.ArgumentParser:
         command = incident_commands.add_parser(action, help=help_text)
         command.add_argument("incident_id")
     doctor = commands.add_parser("doctor", help="check the installed protected supervisor")
-    doctor.add_argument(
+    doctor_projection = doctor.add_mutually_exclusive_group()
+    doctor_projection.add_argument(
         "--summary",
         action="store_true",
         help="emit a bounded readiness summary instead of the full doctor response",
+    )
+    doctor_projection.add_argument(
+        "--recovery-plan",
+        action="store_true",
+        help="emit a bounded manual recovery plan instead of the full doctor response",
     )
     support = commands.add_parser(
         "support-bundle", help="write a local redacted health and receipt bundle"
@@ -635,6 +686,14 @@ def main(argv: list[str] | None = None) -> int:
                     return 6
                 print(json.dumps(summary, sort_keys=True))
                 return 0 if summary["result"] == "READY" else 6
+            if args.recovery_plan:
+                try:
+                    recovery_plan = _doctor_recovery_plan(request("doctor"))
+                except Exception:  # noqa: BLE001 - plan failures are intentionally constant
+                    print(_DOCTOR_RECOVERY_PLAN_ERROR, file=sys.stderr)
+                    return 6
+                print(json.dumps(recovery_plan, sort_keys=True))
+                return 0 if recovery_plan["result"] == "READY" else 6
             value = request("doctor")
             print(json.dumps(value, sort_keys=True))
             return 0 if value.get("result") == "PASS" else 6
