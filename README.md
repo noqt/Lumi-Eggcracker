@@ -695,6 +695,24 @@ exports only; it does not authenticate them or verify a live workload. See
 [the export and comparison guide](docs/DETECTION_RECEIPT_EXPORT.md) for input,
 output, redaction and filesystem behavior.
 
+## Filter retained terminal history from a source build
+
+The published signed v1.0.10 package does not include the history state filter.
+After building and installing a source revision that contains this change, a
+non-root operator can query retained terminal records for one exact state:
+
+```sh
+eggcracker history --state CONTAINMENT_FAILED --limit 20
+```
+
+The accepted terminal states are `COMPLETED_ALLOWED`, `TERMINATED`,
+`CONTAINMENT_FAILED` and `CONTAINED_RECEIPT_FAILED`. Omitting `--state`
+preserves the existing history behavior and applies only `--limit`. Filtering
+uses the read-only query socket and returns the existing bounded public JSON
+projection; it does not alter, approve, retry or delete a run. History output
+is inspection evidence only, not authentication or independent containment
+proof.
+
 ## Check installed health
 
 For an installed source/build containing this change, record its version and
