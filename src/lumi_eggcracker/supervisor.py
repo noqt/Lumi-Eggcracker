@@ -96,6 +96,7 @@ from .records import (
     ACTIVE_STATES,
     RUN_ID,
     RUN_SCHEMA,
+    TERMINAL_STATES,
     command_summary,
     identity_from_run,
     load_run,
@@ -336,6 +337,12 @@ def _bounded_query_items(
 def _history_limit(value: Any) -> int:
     if type(value) is not int or not 1 <= value <= MAX_HISTORY_LIMIT:
         raise JsonInputError("history limit must be an integer from 1 to 20")
+    return value
+
+
+def _history_state(value: Any) -> str:
+    if type(value) is not str or value not in TERMINAL_STATES:
+        raise JsonInputError("history state is invalid")
     return value
 
 
@@ -622,15 +629,19 @@ class Supervisor:
             raise JsonInputError("workload name is unavailable")
         return max(candidates, key=lambda item: int(item["created_monotonic_ns"]))
 
-    def _history_records(self, limit: int) -> list[dict[str, Any]]:
-        """Load retained terminal records, rejecting malformed retention state."""
-        records: list[dict[str, Any]] = []
+    def _history_records(
+        self, limit: int, state: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Load and validate retention state before filtering and bounding it."""
         try:
             paths = sorted(self.runs.glob("*.json"))
-            for path in paths:
-                record = load_run(self.runs, path.stem)
-                if record["state"] not in ACTIVE_STATES:
-                    records.append(record)
+            retained = [load_run(self.runs, path.stem) for path in paths]
+            records = [
+                record
+                for record in retained
+                if record["state"] not in ACTIVE_STATES
+                and (state is None or record["state"] == state)
+            ]
             records.sort(
                 key=lambda item: (
                     int(item["created_monotonic_ns"]),
@@ -3778,8 +3789,9 @@ class Supervisor:
                 except JsonInputError:
                     continue
             return {"runs": runs}
-        if action == "history" and set(args) == {"limit"}:
+        if action == "history" and set(args) in ({"limit"}, {"limit", "state"}):
             limit = _history_limit(args["limit"])
+            state = _history_state(args["state"]) if "state" in args else None
             incident_root = getattr(self, "incidents", None)
             if incident_root is None:
                 incident_lockdown = False
@@ -3788,7 +3800,7 @@ class Supervisor:
             return {
                 "runs": [
                     public_run(record, incident_lockdown=incident_lockdown)
-                    for record in self._history_records(limit)
+                    for record in self._history_records(limit, state)
                 ]
             }
         if action in {"approve", "revoke", "exec_policy_create", "exec_policy_revoke"} and not self._incident_status()["healthy"]:

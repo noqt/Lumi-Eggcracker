@@ -510,6 +510,12 @@ def _parser() -> argparse.ArgumentParser:
         action=_RejectDuplicateIdentifier,
         help="number of retained terminal records to return (1-20; default: 20)",
     )
+    history.add_argument(
+        "--state",
+        choices=sorted(_WAIT_TERMINAL_STATES),
+        action=_RejectDuplicateIdentifier,
+        help="show only records in the selected terminal state",
+    )
     approve = commands.add_parser("approve", help="approve one exact AI runtime invocation")
     approve.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     approve.add_argument("--uid", required=True, type=int)
@@ -717,7 +723,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "list":
             value = request("list")
         elif args.command == "history":
-            value = request("history", limit=args.limit)
+            history_args: dict[str, object] = {"limit": args.limit}
+            if args.state is not None:
+                history_args["state"] = args.state
+            value = request("history", **history_args)
         elif args.command == "approve":
             if os.geteuid() != 0:
                 raise JsonInputError("approve requires root administrative authority; use sudo")

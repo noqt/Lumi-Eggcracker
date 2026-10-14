@@ -1717,6 +1717,67 @@ class SupervisorTests(unittest.TestCase):
             )
             self.assertNotIn("created_monotonic_ns", item)
 
+    def test_history_filters_each_supported_state(self) -> None:
+        supervisor = self._instance()
+        states = (
+            "COMPLETED_ALLOWED",
+            "TERMINATED",
+            "CONTAINMENT_FAILED",
+            "CONTAINED_RECEIPT_FAILED",
+        )
+        values = {
+            f"{index:024x}": retained_record(f"{index:024x}", state, index)
+            for index, state in enumerate(states, start=1)
+        }
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [
+            Path(f"{run_id}.json") for run_id in values
+        ]
+
+        def load(_runs: Path, run_id: str) -> dict[str, object]:
+            return values[run_id]
+
+        for index, state in enumerate(states, start=1):
+            with self.subTest(state=state), patch(
+                "lumi_eggcracker.supervisor.load_run", side_effect=load
+            ):
+                response = supervisor.handle(
+                    {"action": "history", "args": {"limit": 20, "state": state}}
+                )
+            self.assertEqual([f"{index:024x}"], [item["run_id"] for item in response["runs"]])
+            self.assertEqual([state], [item["state"] for item in response["runs"]])
+
+    def test_history_filters_before_sort_and_limit(self) -> None:
+        supervisor = self._instance()
+        older_id = "a" * 24
+        older_abnormal = retained_record(older_id, "CONTAINMENT_FAILED", 1)
+        newer_successes = [
+            retained_record(f"{index:024x}", "COMPLETED_ALLOWED", index + 100)
+            for index in range(1, 23)
+        ]
+        values = {
+            item["run_id"]: item for item in [older_abnormal, *newer_successes]
+        }
+        supervisor.runs = MagicMock()
+        supervisor.runs.glob.return_value = [
+            Path(f"{run_id}.json") for run_id in values
+        ]
+
+        def load(_runs: Path, run_id: str) -> dict[str, object]:
+            return values[run_id]
+
+        with patch("lumi_eggcracker.supervisor.load_run", side_effect=load) as load_run:
+            response = supervisor.handle(
+                {
+                    "action": "history",
+                    "args": {"limit": 1, "state": "CONTAINMENT_FAILED"},
+                }
+            )
+
+        self.assertEqual([older_id], [item["run_id"] for item in response["runs"]])
+        self.assertEqual("CONTAINMENT_FAILED", response["runs"][0]["state"])
+        self.assertEqual(len(values), load_run.call_count)
+
     def test_history_rejects_invalid_limit_types_ranges_and_extra_arguments(self) -> None:
         supervisor = self._instance()
         cases = (
@@ -1728,6 +1789,11 @@ class SupervisorTests(unittest.TestCase):
             {"limit": 1.0},
             {"limit": "1"},
             {"limit": 1, "extra": None},
+            {"limit": 1, "state": "RUNNING"},
+            {"limit": 1, "state": "terminated"},
+            {"limit": 1, "state": None},
+            {"limit": 1, "state": True},
+            {"limit": 1, "state": "TERMINATED", "extra": None},
         )
         for args in cases:
             with self.subTest(args=args), self.assertRaises(JsonInputError):
@@ -1736,14 +1802,28 @@ class SupervisorTests(unittest.TestCase):
     def test_history_rejects_malformed_retained_record_instead_of_proving_empty(self) -> None:
         supervisor = self._instance()
         supervisor.runs = MagicMock()
-        supervisor.runs.glob.return_value = [Path(f"{'a' * 24}.json")]
-        with patch(
-            "lumi_eggcracker.supervisor.load_run",
-            side_effect=JsonInputError("private malformed record"),
-        ), self.assertRaisesRegex(
-            JsonInputError, "retained workload history is unavailable"
+        valid_id = "a" * 24
+        malformed_id = "b" * 24
+        supervisor.runs.glob.return_value = [
+            Path(f"{valid_id}.json"),
+            Path(f"{malformed_id}.json"),
+        ]
+
+        def load(_runs: Path, run_id: str) -> dict[str, object]:
+            if run_id == valid_id:
+                return retained_record(valid_id, "COMPLETED_ALLOWED", 1)
+            raise JsonInputError("private malformed record")
+
+        for args in (
+            {"limit": 20},
+            {"limit": 20, "state": "TERMINATED"},
         ):
-            supervisor.handle({"action": "history", "args": {"limit": 20}})
+            with self.subTest(args=args), patch(
+                "lumi_eggcracker.supervisor.load_run", side_effect=load
+            ), self.assertRaisesRegex(
+                JsonInputError, "retained workload history is unavailable"
+            ):
+                supervisor.handle({"action": "history", "args": args})
 
     def test_history_does_not_read_receipts_or_run_mutation_paths(self) -> None:
         supervisor = self._instance()
