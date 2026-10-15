@@ -5,11 +5,14 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from jsonschema.validators import validator_for
 
@@ -369,6 +372,7 @@ class SupportedPathReceiptTests(unittest.TestCase):
         observed: dict[str, object] | None = None,
         quote: bool = False,
         suffix: bytes = b"\n",
+        name: str = "final-receipt.json",
     ) -> tuple[Path, bytes]:
         receipt = collector._build_receipt(
             submission(quote=quote, observed=observed or success_observed())
@@ -376,9 +380,47 @@ class SupportedPathReceiptTests(unittest.TestCase):
         encoded = (
             json.dumps(receipt, indent=2, sort_keys=True).encode("utf-8") + suffix
         )
-        path = Path(directory) / "final-receipt.json"
+        path = Path(directory) / name
         path.write_bytes(encoded)
         return path, encoded
+
+    def run_compare_cli(
+        self,
+        before: Path,
+        after: Path,
+        *,
+        before_source_commit: str = SOURCE_COMMIT,
+        before_source_tree_sha256: str = SOURCE_TREE_SHA256,
+        after_source_commit: str = SOURCE_COMMIT,
+        after_source_tree_sha256: str = SOURCE_TREE_SHA256,
+        extra: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        arguments = [
+            sys.executable,
+            str(SCRIPT),
+            "--compare-receipts",
+            "--before",
+            str(before),
+            "--after",
+            str(after),
+            "--before-source-commit",
+            before_source_commit,
+            "--before-source-tree-sha256",
+            before_source_tree_sha256,
+            "--after-source-commit",
+            after_source_commit,
+            "--after-source-tree-sha256",
+            after_source_tree_sha256,
+        ]
+        if extra:
+            arguments.extend(extra)
+        return subprocess.run(
+            arguments,
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
 
     def run_verifier(
         self,
@@ -515,6 +557,37 @@ class SupportedPathReceiptTests(unittest.TestCase):
         self.assertEqual("", stdout.getvalue())
         self.assertIn("regular file", stderr.getvalue())
 
+    def test_final_receipt_mocked_fifo_replacement_uses_nonblocking_open(self) -> None:
+        """Use a deterministic mock replacement, not an actual POSIX FIFO."""
+        sentinel_nonblock = 0x4000
+        with TemporaryDirectory() as directory:
+            receipt, _encoded = self.write_final_receipt(directory)
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            seen_flags: list[int] = []
+
+            def mocked_open(_path: Path, flags: int) -> int:
+                seen_flags.append(flags)
+                if not flags & sentinel_nonblock:
+                    raise AssertionError("mocked FIFO replacement would block")
+                return read_fd
+
+            try:
+                with (
+                    patch.object(collector.os, "O_NONBLOCK", sentinel_nonblock, create=True),
+                    patch.object(collector.os, "open", side_effect=mocked_open),
+                    self.assertRaisesRegex(collector.ReceiptInputError, "regular file, not a link"),
+                ):
+                    collector._read_final_receipt(receipt)
+            finally:
+                try:
+                    os.close(read_fd)
+                except OSError:
+                    pass
+
+        self.assertEqual(1, len(seen_flags))
+        self.assertTrue(seen_flags[0] & sentinel_nonblock)
+
     def test_verify_receipt_requires_matching_source_ids_and_read_only_mode(self) -> None:
         private_marker = "private-source-marker"
         with TemporaryDirectory() as directory:
@@ -612,6 +685,154 @@ class SupportedPathReceiptTests(unittest.TestCase):
         self.assertEqual(before_receipt_mtime, after_receipt_mtime)
         self.assertEqual(sibling_bytes, after_sibling_bytes)
         self.assertEqual(before_sibling_mtime, after_sibling_mtime)
+
+    def test_compare_cli_reports_source_transition_and_allowlisted_changes(self) -> None:
+        after_commit = "c" * 40
+        after_tree = "d" * 64
+        with TemporaryDirectory() as directory:
+            before, before_encoded = self.write_final_receipt(directory, name="before.json")
+            after, _after_encoded = self.write_final_receipt(
+                directory,
+                observed=blocker_observed(
+                    source_commit=after_commit,
+                    source_tree_sha256=after_tree,
+                ),
+                name="after.json",
+            )
+            result = self.run_compare_cli(
+                before,
+                after,
+                after_source_commit=after_commit,
+                after_source_tree_sha256=after_tree,
+            )
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+        comparison = json.loads(result.stdout)
+        self.assertTrue(comparison["changed"])
+        self.assertEqual(hashlib.sha256(before_encoded).hexdigest(), comparison["before_receipt_sha256"])
+        self.assertEqual(
+            {
+                "before": {
+                    "source_commit": SOURCE_COMMIT,
+                    "source_tree_sha256": SOURCE_TREE_SHA256,
+                },
+                "after": {
+                    "source_commit": after_commit,
+                    "source_tree_sha256": after_tree,
+                },
+            },
+            comparison["source_transition"],
+        )
+        self.assertEqual(
+            {
+                "outcome": {"before": "supported-success", "after": "reproducible-blocker"},
+                "result": {"before": "TERMINATED", "after": None},
+                "target_survivors": {"before": 0, "after": None},
+                "canary_survived": {"before": True, "after": None},
+                "root_populated": {"before": 0, "after": None},
+                "cleanup_complete": {"before": True, "after": None},
+                "blocker_stage": {"before": None, "after": "host-preflight"},
+                "blocker_code": {"before": None, "after": "CGROUP_V2_REQUIRED"},
+            },
+            comparison["observed_result_changes"],
+        )
+        self.assertNotIn("permission_to_quote", result.stdout)
+
+    def test_compare_cli_identical_receipts_are_unchanged(self) -> None:
+        with TemporaryDirectory() as directory:
+            source, encoded = self.write_final_receipt(directory, name="source.json")
+            before = Path(directory) / "before.json"
+            after = Path(directory) / "after.json"
+            before.write_bytes(encoded)
+            after.write_bytes(encoded)
+            result = self.run_compare_cli(before, after)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+        comparison = json.loads(result.stdout)
+        self.assertFalse(comparison["changed"])
+        self.assertEqual(
+            hashlib.sha256(encoded).hexdigest(), comparison["before_receipt_sha256"]
+        )
+        self.assertEqual(comparison["before_receipt_sha256"], comparison["after_receipt_sha256"])
+        self.assertEqual({}, comparison["observed_result_changes"])
+        self.assertNotEqual(source, before)
+
+    def test_compare_cli_rejects_invalid_receipt_without_stdout_or_echo(self) -> None:
+        private_marker = "private-compare-receipt-marker"
+        with TemporaryDirectory() as directory:
+            before, _encoded = self.write_final_receipt(directory, name="before.json")
+            after = Path(directory) / f"{private_marker}.json"
+            after.write_bytes(b'{"schema_version":"one","schema_version":"two"}')
+            result = self.run_compare_cli(before, after)
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("NOT COMPARED:"))
+        self.assertNotIn(private_marker, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_compare_cli_rejects_bounded_file_failures(self) -> None:
+        invalid_contents = (
+            b'{"schema_version":"one","schema_version":"two"}',
+            b" " * (collector.MAX_RECEIPT_BYTES + 1),
+            b"\xffprivate-invalid-utf8",
+        )
+        for invalid_content in invalid_contents:
+            with self.subTest(invalid_content=invalid_content[:8]), TemporaryDirectory() as directory:
+                before, _before_encoded = self.write_final_receipt(directory, name="before.json")
+                after = Path(directory) / "after.json"
+                after.write_bytes(invalid_content)
+                result = self.run_compare_cli(before, after)
+            self.assertEqual(2, result.returncode)
+            self.assertEqual("", result.stdout)
+            self.assertTrue(result.stderr.startswith("NOT COMPARED:"))
+            self.assertNotIn("Traceback", result.stderr)
+
+        with TemporaryDirectory() as directory:
+            before, _before_encoded = self.write_final_receipt(directory, name="before.json")
+            after = Path(directory) / "after-directory"
+            after.mkdir()
+            result = self.run_compare_cli(before, after)
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("NOT COMPARED:"))
+        self.assertNotIn("Traceback", result.stderr)
+
+        if hasattr(os, "symlink"):
+            with TemporaryDirectory() as directory:
+                before, _before_encoded = self.write_final_receipt(directory, name="before.json")
+                target, _target_encoded = self.write_final_receipt(directory, name="target.json")
+                after = Path(directory) / "after-link"
+                try:
+                    after.symlink_to(target)
+                except OSError:
+                    pass
+                else:
+                    result = self.run_compare_cli(before, after)
+                    self.assertEqual(2, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertTrue(result.stderr.startswith("NOT COMPARED:"))
+                    self.assertNotIn("Traceback", result.stderr)
+
+    def test_compare_cli_rejects_source_mismatch_and_never_writes(self) -> None:
+        private_marker = "private-source-mismatch-marker"
+        with TemporaryDirectory() as directory:
+            before, _before_encoded = self.write_final_receipt(directory, name="before.json")
+            after, _after_encoded = self.write_final_receipt(
+                directory, name=f"{private_marker}.json"
+            )
+            result = self.run_compare_cli(
+                before,
+                after,
+                after_source_commit="e" * 40,
+            )
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("NOT COMPARED:"))
+        self.assertIn("source identity does not match", result.stderr)
+        self.assertNotIn("e" * 40, result.stderr)
+        self.assertNotIn(private_marker, result.stderr)
+        self.assertNotIn(str(after), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

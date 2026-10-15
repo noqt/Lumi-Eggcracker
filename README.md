@@ -377,6 +377,60 @@ reference, does not prove the run or containment, and does not grant
 permission to quote; the receipt's `permission_to_quote` field still requires
 separate review.
 
+#### Compare two final receipts offline
+
+Compare two local final receipts without writing either receipt or a comparison
+file. Each receipt has its own expected source commit and source-tree digest;
+the pairs may differ:
+
+```sh
+python3 scripts/collect_supported_path_receipt.py \
+  --compare-receipts \
+  --before ./before-receipt.json \
+  --after ./after-receipt.json \
+  --before-source-commit <before-40-lowercase-hex-commit> \
+  --before-source-tree-sha256 <before-64-lowercase-hex-tree-digest> \
+  --after-source-commit <after-40-lowercase-hex-commit> \
+  --after-source-tree-sha256 <after-64-lowercase-hex-tree-digest>
+```
+
+Both files are independently read through the same bounded UTF-8, duplicate-key,
+regular-file and closed-schema checks used by single-file verification. Success
+prints only deterministic bounded JSON containing whether the exact bytes
+changed, each receipt-byte SHA-256, the two source-identity pairs, and changes
+among the allowlisted redacted `observed_result` fields:
+
+```json
+{
+  "after_receipt_sha256": "<64-lowercase-hex-digest>",
+  "before_receipt_sha256": "<64-lowercase-hex-digest>",
+  "changed": true,
+  "observed_result_changes": {
+    "outcome": {
+      "after": "reproducible-blocker",
+      "before": "supported-success"
+    }
+  },
+  "source_transition": {
+    "after": {
+      "source_commit": "<after-40-lowercase-hex-commit>",
+      "source_tree_sha256": "<after-64-lowercase-hex-tree-digest>"
+    },
+    "before": {
+      "source_commit": "<before-40-lowercase-hex-commit>",
+      "source_tree_sha256": "<before-64-lowercase-hex-tree-digest>"
+    }
+  }
+}
+```
+
+Identical receipt bytes report `"changed": false` and an empty
+`observed_result_changes` object. Invalid input, including a duplicate member,
+oversized file, link or non-regular path, invalid UTF-8, or a source-identity
+mismatch, emits no stdout and exits with status 2. The comparison output does
+not include raw operator values, `permission_to_quote`, or claims about
+authenticity, execution or causality.
+
 ### Qualify the offline boundary
 
 On the disposable native Ubuntu host, qualify the offline network primitive
