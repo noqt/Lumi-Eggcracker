@@ -17,6 +17,7 @@ from pathlib import Path
 
 MAX_INPUT_BYTES = 4_096
 MAX_RECEIPT_BYTES = 8_192
+MAX_COMPARE_OUTPUT_BYTES = 4_096
 SCHEMA_VERSION = "lumi-eggcracker-supported-path-receipt-v1"
 RECEIPT_FIELDS = {
     "schema_version",
@@ -58,6 +59,16 @@ BLOCKER_CODES = {
     "SYSTEMD_REQUIRED",
     "UNSUPPORTED_HOST",
 }
+OBSERVED_RESULT_COMPARE_FIELDS = (
+    "outcome",
+    "result",
+    "target_survivors",
+    "canary_survived",
+    "root_populated",
+    "cleanup_complete",
+    "blocker_stage",
+    "blocker_code",
+)
 INPUT_FIELDS = {
     "supported_environment",
     "supported_path",
@@ -236,7 +247,12 @@ def _read_final_receipt(path: Path) -> tuple[object, str]:
         metadata = path.lstat()
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             raise ReceiptInputError("receipt must be a regular file, not a link")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
         descriptor = os.open(path, flags)
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
@@ -336,6 +352,89 @@ def _validate_final_receipt(
     return outcome
 
 
+def _read_validated_receipt(
+    path: Path,
+    *,
+    expected_source_commit: str,
+    expected_source_tree_sha256: str,
+) -> tuple[dict[str, object], str]:
+    value, receipt_sha256 = _read_final_receipt(path)
+    _validate_final_receipt(
+        value,
+        expected_source_commit=expected_source_commit,
+        expected_source_tree_sha256=expected_source_tree_sha256,
+    )
+    if not isinstance(value, dict) or not isinstance(value.get("observed_result"), dict):
+        raise ReceiptInputError("receipt observed_result is not a bounded object")
+    return dict(value["observed_result"]), receipt_sha256
+
+
+def compare_receipts(
+    before_path: str | os.PathLike[str],
+    after_path: str | os.PathLike[str],
+    *,
+    before_source_commit: str,
+    before_source_tree_sha256: str,
+    after_source_commit: str,
+    after_source_tree_sha256: str,
+) -> dict[str, object]:
+    """Validate and compare two final receipts without writing either one."""
+
+    before_observed, before_receipt_sha256 = _read_validated_receipt(
+        Path(before_path),
+        expected_source_commit=before_source_commit,
+        expected_source_tree_sha256=before_source_tree_sha256,
+    )
+    after_observed, after_receipt_sha256 = _read_validated_receipt(
+        Path(after_path),
+        expected_source_commit=after_source_commit,
+        expected_source_tree_sha256=after_source_tree_sha256,
+    )
+
+    missing = object()
+    observed_result_changes: dict[str, dict[str, object | None]] = {}
+    for field in OBSERVED_RESULT_COMPARE_FIELDS:
+        before_value = before_observed.get(field, missing)
+        after_value = after_observed.get(field, missing)
+        if before_value is missing and after_value is missing:
+            continue
+        if before_value == after_value:
+            continue
+        observed_result_changes[field] = {
+            "before": None if before_value is missing else before_value,
+            "after": None if after_value is missing else after_value,
+        }
+
+    return {
+        "changed": before_receipt_sha256 != after_receipt_sha256,
+        "before_receipt_sha256": before_receipt_sha256,
+        "after_receipt_sha256": after_receipt_sha256,
+        "source_transition": {
+            "before": {
+                "source_commit": before_observed["source_commit"],
+                "source_tree_sha256": before_observed["source_tree_sha256"],
+            },
+            "after": {
+                "source_commit": after_observed["source_commit"],
+                "source_tree_sha256": after_observed["source_tree_sha256"],
+            },
+        },
+        "observed_result_changes": observed_result_changes,
+    }
+
+
+def _encode_comparison(value: Mapping[str, object]) -> bytes:
+    try:
+        encoded = (
+            json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ReceiptInputError("comparison output is not bounded JSON") from error
+    if len(encoded) > MAX_COMPARE_OUTPUT_BYTES:
+        raise ReceiptInputError("comparison output exceeds its safe size bound")
+    return encoded
+
+
 def _safe_output_parent(destination: Path) -> Path:
     parent = Path(os.path.abspath(destination.parent))
     try:
@@ -404,9 +503,24 @@ def _build_receipt(value: Mapping[str, object]) -> dict[str, object]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = SafeArgumentParser(
-        description="write or verify one bounded local supported-path receipt"
+        description="write, verify or compare bounded local supported-path receipts"
     )
-    verification_requested = "--verify-receipt" in (sys.argv[1:] if argv is None else argv)
+    raw_arguments = list(sys.argv[1:] if argv is None else argv)
+    if raw_arguments[:1] in (["compare-receipts"], ["compare-receipt"], ["compare"]):
+        raw_arguments = ["--compare-receipts", *raw_arguments[1:]]
+    verification_requested = "--verify-receipt" in raw_arguments
+    comparison_requested = any(
+        argument
+        in {
+            "--compare-receipts",
+            "--compare-receipt",
+            "--compare",
+            "compare-receipts",
+            "compare-receipt",
+            "compare",
+        }
+        for argument in raw_arguments
+    )
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument(
         "--i-opt-in-to-write-local-receipt",
@@ -418,6 +532,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="read and verify one final local JSON receipt without writing",
     )
+    modes.add_argument(
+        "--compare-receipts",
+        "--compare-receipt",
+        "--compare",
+        nargs="*",
+        dest="compare_paths",
+        metavar="FILE",
+        help="compare two final local JSON receipts without writing",
+    )
     parser.add_argument(
         "--expect-source-commit",
         help="expected exact lowercase source commit identity for verification",
@@ -426,16 +549,78 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--expect-source-tree-sha256",
         help="expected exact lowercase source tree identity for verification",
     )
+    parser.add_argument(
+        "--before",
+        "--before-receipt",
+        dest="before_receipt",
+        type=Path,
+        help="first final local JSON receipt for comparison",
+    )
+    parser.add_argument(
+        "--after",
+        "--after-receipt",
+        dest="after_receipt",
+        type=Path,
+        help="second final local JSON receipt for comparison",
+    )
+    parser.add_argument(
+        "--before-source-commit",
+        "--expect-before-source-commit",
+        "--before-expect-source-commit",
+        "--before-expected-source-commit",
+        dest="before_source_commit",
+        help="expected source commit identity for the first receipt",
+    )
+    parser.add_argument(
+        "--before-source-tree-sha256",
+        "--expect-before-source-tree-sha256",
+        "--before-expect-source-tree-sha256",
+        "--before-expected-source-tree-sha256",
+        dest="before_source_tree_sha256",
+        help="expected source tree identity for the first receipt",
+    )
+    parser.add_argument(
+        "--after-source-commit",
+        "--expect-after-source-commit",
+        "--after-expect-source-commit",
+        "--after-expected-source-commit",
+        dest="after_source_commit",
+        help="expected source commit identity for the second receipt",
+    )
+    parser.add_argument(
+        "--after-source-tree-sha256",
+        "--expect-after-source-tree-sha256",
+        "--after-expect-source-tree-sha256",
+        "--after-expected-source-tree-sha256",
+        dest="after_source_tree_sha256",
+        help="expected source tree identity for the second receipt",
+    )
     parser.add_argument("--input", type=Path, help="bounded local JSON input")
     parser.add_argument("--output", type=Path, help="new local JSON receipt")
     try:
-        arguments = parser.parse_args(argv)
+        arguments = parser.parse_args(raw_arguments)
         verification_requested = arguments.verify_receipt is not None
+        comparison_requested = (
+            arguments.compare_paths is not None
+            or arguments.before_receipt is not None
+            or arguments.after_receipt is not None
+            or arguments.before_source_commit is not None
+            or arguments.before_source_tree_sha256 is not None
+            or arguments.after_source_commit is not None
+            or arguments.after_source_tree_sha256 is not None
+        )
         if arguments.verify_receipt is not None:
             if (
                 arguments.i_opt_in_to_write_local_receipt
                 or arguments.input is not None
                 or arguments.output is not None
+                or arguments.compare_paths is not None
+                or arguments.before_receipt is not None
+                or arguments.after_receipt is not None
+                or arguments.before_source_commit is not None
+                or arguments.before_source_tree_sha256 is not None
+                or arguments.after_source_commit is not None
+                or arguments.after_source_tree_sha256 is not None
             ):
                 raise ReceiptInputError("verification mode cannot be combined with write mode")
             if (
@@ -465,6 +650,69 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if comparison_requested:
+            if (
+                arguments.i_opt_in_to_write_local_receipt
+                or arguments.verify_receipt is not None
+                or arguments.input is not None
+                or arguments.output is not None
+                or arguments.expect_source_commit is not None
+                or arguments.expect_source_tree_sha256 is not None
+            ):
+                raise ReceiptInputError("comparison mode cannot be combined with write or verify mode")
+
+            positional_paths = arguments.compare_paths
+            if positional_paths:
+                if (
+                    len(positional_paths) != 2
+                    or arguments.before_receipt is not None
+                    or arguments.after_receipt is not None
+                ):
+                    raise ReceiptInputError("comparison requires exactly two receipt files")
+                before_receipt = Path(positional_paths[0])
+                after_receipt = Path(positional_paths[1])
+            else:
+                before_receipt = arguments.before_receipt
+                after_receipt = arguments.after_receipt
+            if before_receipt is None or after_receipt is None:
+                raise ReceiptInputError("comparison requires both receipt files")
+            if (
+                arguments.before_source_commit is None
+                or arguments.before_source_tree_sha256 is None
+                or arguments.after_source_commit is None
+                or arguments.after_source_tree_sha256 is None
+            ):
+                raise ReceiptInputError("comparison requires both expected source identity pairs")
+            _validate_expected_source_identity(
+                arguments.before_source_commit,
+                SOURCE_COMMIT_PATTERN,
+                "before source_commit",
+            )
+            _validate_expected_source_identity(
+                arguments.before_source_tree_sha256,
+                SOURCE_TREE_PATTERN,
+                "before source_tree_sha256",
+            )
+            _validate_expected_source_identity(
+                arguments.after_source_commit,
+                SOURCE_COMMIT_PATTERN,
+                "after source_commit",
+            )
+            _validate_expected_source_identity(
+                arguments.after_source_tree_sha256,
+                SOURCE_TREE_PATTERN,
+                "after source_tree_sha256",
+            )
+            comparison = compare_receipts(
+                before_receipt,
+                after_receipt,
+                before_source_commit=arguments.before_source_commit,
+                before_source_tree_sha256=arguments.before_source_tree_sha256,
+                after_source_commit=arguments.after_source_commit,
+                after_source_tree_sha256=arguments.after_source_tree_sha256,
+            )
+            sys.stdout.write(_encode_comparison(comparison).decode("utf-8"))
+            return 0
         if (
             arguments.expect_source_commit is not None
             or arguments.expect_source_tree_sha256 is not None
@@ -477,7 +725,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         value = _validate_input(_read_input(arguments.input))
         _write_new_receipt(arguments.output, _build_receipt(value))
     except ReceiptInputError as error:
-        prefix = "NOT VERIFIED" if verification_requested else "NOT WRITTEN"
+        if verification_requested:
+            prefix = "NOT VERIFIED"
+        elif comparison_requested:
+            prefix = "NOT COMPARED"
+        else:
+            prefix = "NOT WRITTEN"
         print(f"{prefix}: {error}", file=sys.stderr)
         return 2
     print("WROTE local redacted supported-path receipt")
