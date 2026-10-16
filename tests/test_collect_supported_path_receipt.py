@@ -446,6 +446,280 @@ class SupportedPathReceiptTests(unittest.TestCase):
             status = collector.main(arguments)
         return status, stdout, stderr
 
+    def run_summary_cli(
+        self,
+        manifest: Path,
+        *,
+        opt_in: bool = True,
+        extra: list[str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        arguments = [
+            sys.executable,
+            str(SCRIPT),
+            "--summary-receipts",
+            "--manifest",
+            str(manifest),
+        ]
+        if opt_in:
+            arguments.insert(3, "--i-opt-in-to-summarize-receipts")
+        if extra:
+            arguments.extend(extra)
+        return subprocess.run(
+            arguments,
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+
+    def write_summary_manifest(
+        self,
+        directory: str,
+        entries: list[dict[str, object]],
+        *,
+        name: str = "manifest.json",
+    ) -> Path:
+        path = Path(directory) / name
+        path.write_text(json.dumps({"receipts": entries}), encoding="utf-8")
+        return path
+
+    def summary_entry(self, path: Path, *, commit: str = SOURCE_COMMIT, tree: str = SOURCE_TREE_SHA256) -> dict[str, object]:
+        return {
+            "path": str(path),
+            "source_commit": commit,
+            "source_tree_sha256": tree,
+        }
+
+    def test_summary_cli_preserves_manifest_order_and_aggregates_stably(self) -> None:
+        with TemporaryDirectory() as directory:
+            first, _first_encoded = self.write_final_receipt(
+                directory, observed=success_observed(), name="first.json"
+            )
+            second_commit = "c" * 40
+            second_tree = "d" * 64
+            second, _second_encoded = self.write_final_receipt(
+                directory,
+                observed=blocker_observed(
+                    source_commit=second_commit,
+                    source_tree_sha256=second_tree,
+                ),
+                name="second.json",
+            )
+            manifest = self.write_summary_manifest(
+                directory,
+                [
+                    self.summary_entry(second, commit=second_commit, tree=second_tree),
+                    self.summary_entry(first),
+                ],
+            )
+            result = self.run_summary_cli(manifest)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual("supported-receipt-set-summary", summary["outcome"])
+        self.assertEqual(
+            ["reproducible-blocker", "supported-success"],
+            [row["outcome"] for row in summary["rows"]],
+        )
+        self.assertEqual(
+            {
+                "receipt_count": 2,
+                "outcome_counts": {
+                    "reproducible-blocker": 1,
+                    "supported-success": 1,
+                },
+            },
+            summary["aggregate"],
+        )
+        self.assertNotIn("first.json", result.stdout)
+        self.assertNotIn("second.json", result.stdout)
+        self.assertNotIn("permission_to_quote", result.stdout)
+        self.assertLessEqual(len(result.stdout.encode("utf-8")), collector.MAX_SUMMARY_OUTPUT_BYTES)
+
+    def test_summary_cli_accepts_eight_receipts_with_bounded_output(self) -> None:
+        with TemporaryDirectory() as directory:
+            entries: list[dict[str, object]] = []
+            for index in range(8):
+                commit = f"{index + 1:040x}"
+                tree = f"{index + 1:064x}"
+                receipt, _encoded = self.write_final_receipt(
+                    directory,
+                    observed=success_observed(
+                        source_commit=commit,
+                        source_tree_sha256=tree,
+                    ),
+                    name=f"receipt-{index}.json",
+                )
+                entries.append(self.summary_entry(receipt, commit=commit, tree=tree))
+            manifest = self.write_summary_manifest(directory, entries)
+            result = self.run_summary_cli(manifest)
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("", result.stderr)
+        summary = json.loads(result.stdout)
+        self.assertEqual(8, summary["aggregate"]["receipt_count"])
+        self.assertEqual(8, len(summary["rows"]))
+        self.assertEqual(8, summary["aggregate"]["outcome_counts"]["supported-success"])
+        self.assertLessEqual(len(result.stdout.encode("utf-8")), collector.MAX_SUMMARY_OUTPUT_BYTES)
+
+    def test_summary_cli_requires_distinct_opt_in(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, _encoded = self.write_final_receipt(directory)
+            manifest = self.write_summary_manifest(directory, [
+                self.summary_entry(receipt),
+                self.summary_entry(receipt.with_name("missing.json")),
+            ])
+            result = self.run_summary_cli(manifest, opt_in=False)
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("NOT SUMMARIZED:"))
+        self.assertFalse((Path(directory) / "summary.json").exists())
+
+    def test_summary_cli_rejects_manifest_shape_and_duplicate_paths_without_stdout(self) -> None:
+        private_marker = "private-summary-marker"
+        with TemporaryDirectory() as directory:
+            receipt, _encoded = self.write_final_receipt(directory)
+            cases = (
+                {
+                    "receipts": [
+                        self.summary_entry(receipt),
+                        {**self.summary_entry(receipt), private_marker: "private"},
+                    ],
+                },
+                {
+                    "receipts": [
+                        self.summary_entry(receipt),
+                        self.summary_entry(Path(directory) / "missing.json"),
+                    ],
+                    private_marker: True,
+                },
+                {
+                    "receipts": [
+                        self.summary_entry(receipt),
+                        self.summary_entry(Path(directory) / "nested" / ".." / receipt.name),
+                    ],
+                },
+            )
+            for index, value in enumerate(cases):
+                with self.subTest(index=index):
+                    manifest = Path(directory) / f"{private_marker}-{index}.json"
+                    manifest.write_text(json.dumps(value), encoding="utf-8")
+                    result = self.run_summary_cli(manifest)
+                    self.assertEqual(2, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertTrue(result.stderr.startswith("NOT SUMMARIZED:"))
+                    self.assertNotIn(private_marker, result.stderr)
+
+    def test_summary_cli_rejects_duplicate_member_digest_and_source_mismatch(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, encoded = self.write_final_receipt(directory, name="one.json")
+            duplicate = Path(directory) / "two.json"
+            duplicate.write_bytes(encoded)
+            cases: list[tuple[str, Path]] = []
+            cases.append(
+                (
+                    "duplicate-digest",
+                    self.write_summary_manifest(
+                        directory,
+                        [self.summary_entry(receipt), self.summary_entry(duplicate)],
+                        name="duplicate-digest.json",
+                    ),
+                )
+            )
+            mismatch = self.write_summary_manifest(
+                directory,
+                [
+                    self.summary_entry(receipt, commit="e" * 40),
+                    self.summary_entry(duplicate),
+                ],
+                name="source-mismatch.json",
+            )
+            cases.append(("source-mismatch", mismatch))
+            for label, manifest in cases:
+                with self.subTest(label=label):
+                    result = self.run_summary_cli(manifest)
+                    self.assertEqual(2, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertTrue(result.stderr.startswith("NOT SUMMARIZED:"))
+                    self.assertNotIn(str(manifest), result.stderr)
+
+    def test_summary_cli_rejects_invalid_manifest_and_receipt_files(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, _encoded = self.write_final_receipt(directory)
+            invalid_manifest = Path(directory) / "invalid-manifest.json"
+            invalid_manifest.write_bytes(b"\xffprivate-invalid-utf8")
+            oversized_manifest = Path(directory) / "oversized-manifest.json"
+            oversized_manifest.write_bytes(b" " * (collector.MAX_MANIFEST_BYTES + 1))
+            invalid_receipt = Path(directory) / "invalid-receipt.json"
+            invalid_receipt.write_bytes(b"\xffprivate-invalid-utf8")
+            invalid_receipt_manifest = self.write_summary_manifest(
+                directory,
+                [self.summary_entry(invalid_receipt), self.summary_entry(receipt)],
+                name="invalid-receipt-manifest.json",
+            )
+            missing_manifest = self.write_summary_manifest(
+                directory,
+                [
+                    self.summary_entry(Path(directory) / "missing-receipt.json"),
+                    self.summary_entry(receipt),
+                ],
+                name="missing-receipt-manifest.json",
+            )
+            receipt_directory = Path(directory) / "receipt-directory"
+            receipt_directory.mkdir()
+            directory_manifest = self.write_summary_manifest(
+                directory,
+                [self.summary_entry(receipt_directory), self.summary_entry(receipt)],
+                name="directory-receipt-manifest.json",
+            )
+            manifests = [
+                ("invalid-manifest", invalid_manifest),
+                ("oversized-manifest", oversized_manifest),
+                ("invalid-receipt", invalid_receipt_manifest),
+                ("missing-receipt", missing_manifest),
+                ("directory-receipt", directory_manifest),
+            ]
+            if hasattr(os, "symlink"):
+                linked = Path(directory) / "receipt-link.json"
+                try:
+                    linked.symlink_to(receipt)
+                except OSError:
+                    pass
+                else:
+                    manifests.append(
+                        (
+                            "linked-receipt",
+                            self.write_summary_manifest(
+                                directory,
+                                [self.summary_entry(linked), self.summary_entry(receipt)],
+                                name="linked-receipt-manifest.json",
+                            ),
+                        )
+                    )
+            for label, manifest in manifests:
+                with self.subTest(label=label):
+                    result = self.run_summary_cli(manifest)
+                    self.assertEqual(2, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertTrue(result.stderr.startswith("NOT SUMMARIZED:"))
+
+    def test_summary_cli_rejects_duplicate_manifest_members(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, _encoded = self.write_final_receipt(directory)
+            manifest = Path(directory) / "duplicate-member.json"
+            entry = json.dumps(self.summary_entry(receipt), separators=(",", ":"))
+            manifest.write_text(
+                '{"receipts":['
+                + entry.replace('"path":', '"path":"first","path":', 1)
+                + ","
+                + json.dumps(self.summary_entry(Path(directory) / "other.json"))
+                + "]}",
+                encoding="utf-8",
+            )
+            result = self.run_summary_cli(manifest)
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("NOT SUMMARIZED:"))
+
     def test_verify_receipt_emits_only_outcome_and_digest_of_exact_bytes(self) -> None:
         with TemporaryDirectory() as directory:
             receipt, encoded = self.write_final_receipt(directory, suffix=b" \n")

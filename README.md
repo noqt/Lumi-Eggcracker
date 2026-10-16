@@ -431,6 +431,87 @@ mismatch, emits no stdout and exits with status 2. The comparison output does
 not include raw operator values, `permission_to_quote`, or claims about
 authenticity, execution or causality.
 
+#### Summarize a bounded receipt set offline
+
+For a deterministic, read-only view of a small set of already-written local
+receipts, prepare a manifest with exactly two through eight entries. The
+manifest itself is capped at 16 KiB; each entry has only the receipt `path`,
+its expected lowercase `source_commit`, and its expected lowercase
+`source_tree_sha256`:
+
+```json
+{
+  "receipts": [
+    {
+      "path": "./supported-path-receipt-1.json",
+      "source_commit": "<exact-40-lowercase-hex-source-commit>",
+      "source_tree_sha256": "<exact-64-lowercase-hex-source-tree-digest>"
+    },
+    {
+      "path": "./supported-path-receipt-2.json",
+      "source_commit": "<exact-40-lowercase-hex-source-commit>",
+      "source_tree_sha256": "<exact-64-lowercase-hex-source-tree-digest>"
+    }
+  ]
+}
+```
+
+Then explicitly opt in to the summary; this mode never writes a receipt or a
+summary file:
+
+```sh
+python3 scripts/collect_supported_path_receipt.py \
+  --summary-receipts \
+  --i-opt-in-to-summarize-receipts \
+  --manifest receipt-set.json
+```
+
+Every manifest entry is checked through the same bounded final-receipt reader
+used by single-file verification. Each receipt is limited to 8 KiB and must be
+a regular, non-link file with valid UTF-8 JSON and the expected source IDs.
+Unknown or duplicate members, counts outside 2--8, missing/non-regular/link or
+FIFO files, an oversized or invalid-UTF-8 manifest or receipt, duplicate
+normalized paths, duplicate receipt-byte digests, and source mismatches fail
+with status 2, empty stdout, and no receipt writes. All entries are validated
+before any summary bytes are emitted.
+
+Success emits at most 4 KiB of deterministic JSON. `rows` retain manifest
+order and contain only each bounded outcome, receipt-byte `receipt_sha256`,
+and its two source identities. `aggregate` contains the receipt count and
+fixed-key outcome counts:
+
+```json
+{
+  "aggregate": {
+    "outcome_counts": {
+      "reproducible-blocker": 1,
+      "supported-success": 1
+    },
+    "receipt_count": 2
+  },
+  "outcome": "supported-receipt-set-summary",
+  "rows": [
+    {
+      "outcome": "supported-success",
+      "receipt_sha256": "<64-lowercase-hex-digest>",
+      "source_commit": "<exact-40-lowercase-hex-source-commit>",
+      "source_tree_sha256": "<exact-64-lowercase-hex-tree-digest>"
+    },
+    {
+      "outcome": "reproducible-blocker",
+      "receipt_sha256": "<64-lowercase-hex-digest>",
+      "source_commit": "<exact-40-lowercase-hex-source-commit>",
+      "source_tree_sha256": "<exact-64-lowercase-hex-tree-digest>"
+    }
+  ]
+}
+```
+
+The summary does not echo manifest paths or raw receipt values and excludes
+timestamps and `permission_to_quote`. It establishes bounded structural and
+source-ID consistency only; it is not receipt authenticity, proof of a run or
+containment, causal evidence, or permission to quote.
+
 ### Qualify the offline boundary
 
 On the disposable native Ubuntu host, qualify the offline network primitive
