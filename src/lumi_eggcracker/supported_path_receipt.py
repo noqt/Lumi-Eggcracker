@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Create, verify, compare or summarize bounded local supported-path receipts."""
 
 from __future__ import annotations
