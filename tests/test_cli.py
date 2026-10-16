@@ -80,6 +80,7 @@ class CliTests(unittest.TestCase):
             "support-bundle",
             "validate-support-bundle",
             "compare-detection-receipts",
+            "supported-receipt",
             "version",
         ):
             self.assertIn(command, help_text)
@@ -455,6 +456,31 @@ class CliTests(unittest.TestCase):
         self.assertIn("usage: eggcracker compare-detection-receipts", output.getvalue())
         self.assertIn("--before FILE", output.getvalue())
         self.assertIn("--after FILE", output.getvalue())
+
+    def test_supported_receipt_forwards_arguments_before_connected_commands(self) -> None:
+        forwarded = [
+            "--verify-receipt",
+            "receipt.json",
+            "--expect-source-commit",
+            "a" * 40,
+            "--expect-source-tree-sha256",
+            "b" * 64,
+        ]
+        with patch(
+            "lumi_eggcracker.cli.supported_receipt_main", return_value=2
+        ) as supported:
+            self.assertEqual(2, main(["supported-receipt", *forwarded]))
+        supported.assert_called_once_with(
+            forwarded, prog="eggcracker supported-receipt"
+        )
+
+    def test_supported_receipt_help_uses_installed_command(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            main(["supported-receipt", "--help"])
+        self.assertEqual(0, raised.exception.code)
+        self.assertIn("usage: eggcracker supported-receipt", output.getvalue())
+        self.assertIn("--verify-receipt", output.getvalue())
 
     def test_compare_detection_receipts_forwards_arguments_before_connected_commands(
         self,

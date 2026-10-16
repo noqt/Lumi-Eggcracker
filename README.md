@@ -528,6 +528,36 @@ timestamps and `permission_to_quote`. It establishes bounded structural and
 source-ID consistency only; it is not receipt authenticity, proof of a run or
 containment, causal evidence, or permission to quote.
 
+### Use the receipt tooling from a source-built install
+
+The same bounded receipt workflow is also available through the installed
+`eggcracker` entry point when it is built from a source revision containing
+this change. Build and install that local artifact with the existing Python
+build tools:
+
+```sh
+python -m pip wheel . --no-build-isolation --no-index --wheel-dir ./dist
+python -m pip install --no-deps ./dist/lumi_eggcracker-<version>-py3-none-any.whl
+```
+
+The installed command exposes the same write, verify, compare, summary and
+`--require-all-supported` modes without requiring the source `scripts/`
+directory:
+
+```sh
+eggcracker supported-receipt --help
+eggcracker supported-receipt \
+  --verify-receipt ./supported-path-receipt.json \
+  --expect-source-commit <exact-40-lowercase-hex-source-commit> \
+  --expect-source-tree-sha256 <exact-64-lowercase-hex-source-tree-digest>
+```
+
+The compatibility script `scripts/collect_supported_path_receipt.py` retains
+the existing direct-script output, error and exit contracts while delegating
+to the packaged implementation. A source-built candidate is not the signed
+v1.0.10 release and does not add native qualification, receipt authenticity,
+or adoption evidence.
+
 ### Qualify the offline boundary
 
 On the disposable native Ubuntu host, qualify the offline network primitive

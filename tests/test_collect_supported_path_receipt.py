@@ -18,6 +18,7 @@ from jsonschema.validators import validator_for
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "collect_supported_path_receipt.py"
+IMPLEMENTATION = ROOT / "src" / "lumi_eggcracker" / "supported_path_receipt.py"
 SCHEMA = json.loads(
     (ROOT / "schemas" / "supported-path-receipt-v1.schema.json").read_text(encoding="utf-8")
 )
@@ -27,6 +28,7 @@ if spec is None or spec.loader is None:
     raise AssertionError("supported-path receipt collector is not importable")
 collector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(collector)
+installed_collector = collector._implementation
 SOURCE_COMMIT = "a" * 40
 SOURCE_TREE_SHA256 = "b" * 64
 
@@ -106,8 +108,38 @@ class SupportedPathReceiptTests(unittest.TestCase):
         self.assertEqual(collector.EXACT_COMMAND, receipt["exact_command"])
         self.assertEqual(success_observed(), receipt["observed_result"])
 
+    def test_source_wrapper_matches_installed_module_for_verification(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt = Path(directory) / "receipt.json"
+            receipt.write_text(
+                json.dumps(collector._build_receipt(submission(quote=False, observed=success_observed()))),
+                encoding="utf-8",
+            )
+            arguments = [
+                "--verify-receipt",
+                str(receipt),
+                "--expect-source-commit",
+                SOURCE_COMMIT,
+                "--expect-source-tree-sha256",
+                SOURCE_TREE_SHA256,
+            ]
+
+            def invoke(command: object) -> tuple[int, str, str]:
+                stdout = StringIO()
+                stderr = StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = command(arguments)
+                return status, stdout.getvalue(), stderr.getvalue()
+
+            wrapper_result = invoke(collector.main)
+            installed_result = invoke(installed_collector.main)
+
+        self.assertEqual(wrapper_result, installed_result)
+        self.assertEqual(0, installed_result[0])
+        self.assertEqual("", installed_result[2])
+
     def test_collector_has_only_local_standard_library_dependencies(self) -> None:
-        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+        tree = ast.parse(IMPLEMENTATION.read_text(encoding="utf-8"))
         imported_roots = {
             name.name.split(".")[0]
             for node in ast.walk(tree)
