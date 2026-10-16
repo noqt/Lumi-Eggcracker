@@ -561,6 +561,125 @@ class SupportedPathReceiptTests(unittest.TestCase):
         self.assertEqual(8, summary["aggregate"]["outcome_counts"]["supported-success"])
         self.assertLessEqual(len(result.stdout.encode("utf-8")), collector.MAX_SUMMARY_OUTPUT_BYTES)
 
+    def test_require_all_supported_keeps_all_success_summary_bytes_and_exits_zero(self) -> None:
+        with TemporaryDirectory() as directory:
+            entries: list[dict[str, object]] = []
+            for index in range(8):
+                commit = f"{index + 1:040x}"
+                tree = f"{index + 1:064x}"
+                receipt, _encoded = self.write_final_receipt(
+                    directory,
+                    observed=success_observed(
+                        source_commit=commit,
+                        source_tree_sha256=tree,
+                    ),
+                    name=f"success-{index}.json",
+                )
+                entries.append(self.summary_entry(receipt, commit=commit, tree=tree))
+            manifest = self.write_summary_manifest(directory, entries)
+            unflagged = self.run_summary_cli(manifest)
+            flagged = self.run_summary_cli(manifest, extra=["--require-all-supported"])
+        self.assertEqual(0, unflagged.returncode)
+        self.assertEqual(0, flagged.returncode)
+        self.assertEqual(unflagged.stdout, flagged.stdout)
+        self.assertEqual("", flagged.stderr)
+
+    def test_require_all_supported_returns_one_for_blocker_with_identical_summary_bytes(self) -> None:
+        with TemporaryDirectory() as directory:
+            first, _first_encoded = self.write_final_receipt(
+                directory, observed=success_observed(), name="success.json"
+            )
+            blocker_commit = "c" * 40
+            blocker_tree = "d" * 64
+            second, _second_encoded = self.write_final_receipt(
+                directory,
+                observed=blocker_observed(
+                    source_commit=blocker_commit,
+                    source_tree_sha256=blocker_tree,
+                ),
+                name="blocker.json",
+            )
+            manifest = self.write_summary_manifest(
+                directory,
+                [
+                    self.summary_entry(first),
+                    self.summary_entry(second, commit=blocker_commit, tree=blocker_tree),
+                ],
+            )
+            unflagged = self.run_summary_cli(manifest)
+            flagged = self.run_summary_cli(manifest, extra=["--require-all-supported"])
+        self.assertEqual(0, unflagged.returncode)
+        self.assertEqual(1, flagged.returncode)
+        self.assertEqual(unflagged.stdout, flagged.stdout)
+        self.assertEqual("", flagged.stderr)
+
+    def test_require_all_supported_rejects_non_summary_modes_without_partial_output(self) -> None:
+        private_marker = "private-require-all-input"
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "input.json"
+            source_bytes = json.dumps({"private": private_marker}).encode("utf-8")
+            source.write_bytes(source_bytes)
+            output = Path(directory) / "receipt.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--require-all-supported",
+                    "--i-opt-in-to-write-local-receipt",
+                    "--input",
+                    str(source),
+                    "--output",
+                    str(output),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(source_bytes, source.read_bytes())
+            self.assertFalse(output.exists())
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("NOT SUMMARIZED:"))
+        self.assertNotIn(private_marker, result.stderr)
+
+    def test_require_all_supported_requires_summary_opt_in_without_stdout_or_writes(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, receipt_bytes = self.write_final_receipt(directory, name="valid.json")
+            manifest = self.write_summary_manifest(
+                directory,
+                [self.summary_entry(receipt), self.summary_entry(receipt.with_name("missing.json"))],
+            )
+            manifest_bytes = manifest.read_bytes()
+            result = self.run_summary_cli(
+                manifest,
+                opt_in=False,
+                extra=["--require-all-supported"],
+            )
+            self.assertEqual(receipt_bytes, receipt.read_bytes())
+            self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertFalse((Path(directory) / "summary.json").exists())
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("NOT SUMMARIZED:"))
+
+    def test_require_all_supported_invalid_set_has_no_partial_output_or_input_changes(self) -> None:
+        with TemporaryDirectory() as directory:
+            receipt, receipt_bytes = self.write_final_receipt(directory, name="valid.json")
+            missing = Path(directory) / "missing.json"
+            manifest = self.write_summary_manifest(
+                directory,
+                [self.summary_entry(receipt), self.summary_entry(missing)],
+            )
+            manifest_bytes = manifest.read_bytes()
+            result = self.run_summary_cli(manifest, extra=["--require-all-supported"])
+            self.assertEqual(receipt_bytes, receipt.read_bytes())
+            self.assertEqual(manifest_bytes, manifest.read_bytes())
+            self.assertFalse((Path(directory) / "summary.json").exists())
+        self.assertEqual(2, result.returncode)
+        self.assertEqual("", result.stdout)
+        self.assertTrue(result.stderr.startswith("NOT SUMMARIZED:"))
+
     def test_summary_cli_requires_distinct_opt_in(self) -> None:
         with TemporaryDirectory() as directory:
             receipt, _encoded = self.write_final_receipt(directory)
