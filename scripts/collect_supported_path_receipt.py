@@ -701,6 +701,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--i-opt-in-to-summarize-receipts",
             "--i-opt-in-to-summarize-receipt-set",
             "--i-opt-in-to-summary",
+            "--require-all-supported",
         }
         for argument in raw_arguments
     )
@@ -741,6 +742,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         dest="i_opt_in_to_summarize_receipts",
         help="explicitly allow a bounded local receipt-set summary",
+    )
+    parser.add_argument(
+        "--require-all-supported",
+        action="store_true",
+        help="exit 1 when a valid receipt-set summary contains a reproducible blocker",
     )
     parser.add_argument(
         "--expect-source-commit",
@@ -822,11 +828,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.summary_receipts
             or arguments.summary_manifest is not None
             or arguments.i_opt_in_to_summarize_receipts
+            or arguments.require_all_supported
         )
         if arguments.verify_receipt is not None:
             if (
                 arguments.i_opt_in_to_write_local_receipt
                 or arguments.i_opt_in_to_summarize_receipts
+                or arguments.require_all_supported
                 or arguments.input is not None
                 or arguments.output is not None
                 or arguments.summary_manifest is not None
@@ -887,7 +895,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.summary_manifest is None:
                 raise ReceiptInputError("summary mode requires --manifest")
             summary = summarize_receipts(arguments.summary_manifest)
-            sys.stdout.write(_encode_summary(summary).decode("utf-8"))
+            encoded = _encode_summary(summary)
+            sys.stdout.write(encoded.decode("utf-8"))
+            if arguments.require_all_supported:
+                outcome_counts = summary["aggregate"]["outcome_counts"]
+                return 1 if outcome_counts["reproducible-blocker"] else 0
             return 0
         if comparison_requested:
             if (

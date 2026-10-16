@@ -466,6 +466,22 @@ python3 scripts/collect_supported_path_receipt.py \
   --manifest receipt-set.json
 ```
 
+For a shell or CI decision, add `--require-all-supported` to that exact
+summary-only command. This flag is accepted only when both the summary mode
+and its explicit summary opt-in are present; it is rejected for write, verify,
+compare, or any other mode before input is read or output is written. The JSON
+bytes are identical with or without the flag, and a valid summary keeps stderr
+empty: exit `0` means every entry is `supported-success`, exit `1` means at
+least one entry is a declared `reproducible-blocker`, and exit `2` means the
+manifest or a receipt is invalid with no stdout or writes. Without the flag,
+summary exit statuses and bytes remain unchanged.
+
+This optional gate is available only from a source checkout or source build
+containing this change; it is not a claim that the signed v1.0.10 package
+provides the flag. It remains a bounded structural/source-identity decision,
+not receipt trust or authenticity, proof of execution or containment, or an
+enforcement action.
+
 Every manifest entry is checked through the same bounded final-receipt reader
 used by single-file verification. Each receipt is limited to 8 KiB and must be
 a regular, non-link file with valid UTF-8 JSON and the expected source IDs.
