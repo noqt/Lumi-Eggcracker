@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create or verify one bounded, redacted local supported-path receipt."""
+"""Create, verify, compare or summarize bounded local supported-path receipts."""
 
 from __future__ import annotations
 
@@ -18,6 +18,8 @@ from pathlib import Path
 MAX_INPUT_BYTES = 4_096
 MAX_RECEIPT_BYTES = 8_192
 MAX_COMPARE_OUTPUT_BYTES = 4_096
+MAX_MANIFEST_BYTES = 16_384
+MAX_SUMMARY_OUTPUT_BYTES = 4_096
 SCHEMA_VERSION = "lumi-eggcracker-supported-path-receipt-v1"
 RECEIPT_FIELDS = {
     "schema_version",
@@ -77,6 +79,14 @@ INPUT_FIELDS = {
     "observed_result",
     "permission_to_quote",
 }
+SUMMARY_MANIFEST_FIELDS = {"receipts"}
+SUMMARY_ENTRY_FIELDS = {"path", "source_commit", "source_tree_sha256"}
+SUMMARY_ENTRY_EXPECTED_FIELDS = {
+    "path",
+    "expected_source_commit",
+    "expected_source_tree_sha256",
+}
+SUMMARY_OUTCOMES = ("reproducible-blocker", "supported-success")
 PRIVACY = {
     "redacted": True,
     "secrets_collected": False,
@@ -131,6 +141,52 @@ def _read_input(path: Path) -> object:
         raise
     except (UnicodeError, json.JSONDecodeError, RecursionError) as error:
         raise ReceiptInputError("input is not bounded UTF-8 JSON") from error
+
+
+def _read_manifest(path: Path) -> object:
+    """Read one bounded summary manifest without exposing its path or values."""
+
+    _safe_receipt_parent(path)
+    descriptor = -1
+    try:
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise ReceiptInputError("manifest must be a regular file, not a link")
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_BINARY", 0)
+        )
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            current = os.fstat(handle.fileno())
+            if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode):
+                raise ReceiptInputError("manifest must be a regular file, not a link")
+            encoded = handle.read(MAX_MANIFEST_BYTES + 1)
+    except ReceiptInputError:
+        raise
+    except (OSError, ValueError) as error:
+        raise ReceiptInputError("manifest could not be read") from error
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise ReceiptInputError("manifest exceeds its safe size bound")
+    try:
+        return json.loads(
+            encoded.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_nonstandard_number,
+        )
+    except ReceiptInputError:
+        raise
+    except (UnicodeError, json.JSONDecodeError, RecursionError, ValueError) as error:
+        raise ReceiptInputError("manifest is not bounded UTF-8 JSON") from error
 
 
 def _require_exact_fields(value: Mapping[str, object], expected: set[str], label: str) -> None:
@@ -369,6 +425,94 @@ def _read_validated_receipt(
     return dict(value["observed_result"]), receipt_sha256
 
 
+def _normalize_summary_path(raw_path: object) -> tuple[Path, str]:
+    if not isinstance(raw_path, str) or not raw_path or "\x00" in raw_path:
+        raise ReceiptInputError("manifest receipt path is not a usable text path")
+    try:
+        normalized_path = os.path.abspath(os.path.normpath(raw_path))
+        normalized_key = os.path.normcase(normalized_path)
+    except (OSError, TypeError, ValueError) as error:
+        raise ReceiptInputError("manifest receipt path is not a usable text path") from error
+    if not normalized_key:
+        raise ReceiptInputError("manifest receipt path is not a usable text path")
+    return Path(normalized_path), normalized_key
+
+
+def _validate_summary_manifest(value: object) -> list[tuple[Path, str, str]]:
+    if not isinstance(value, dict):
+        raise ReceiptInputError("summary manifest root must be an object")
+    _require_exact_fields(value, SUMMARY_MANIFEST_FIELDS, "summary manifest")
+    entries = value["receipts"]
+    if not isinstance(entries, list) or len(entries) < 2 or len(entries) > 8:
+        raise ReceiptInputError("summary manifest must contain between two and eight receipts")
+
+    validated: list[tuple[Path, str, str]] = []
+    normalized_paths: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ReceiptInputError("summary manifest receipt entry must be an object")
+        entry_fields = set(entry)
+        if entry_fields == SUMMARY_ENTRY_FIELDS:
+            source_commit_field = "source_commit"
+            source_tree_field = "source_tree_sha256"
+        elif entry_fields == SUMMARY_ENTRY_EXPECTED_FIELDS:
+            source_commit_field = "expected_source_commit"
+            source_tree_field = "expected_source_tree_sha256"
+        else:
+            raise ReceiptInputError("summary manifest receipt entry does not match the closed schema")
+        receipt_path, normalized_key = _normalize_summary_path(entry["path"])
+        if normalized_key in normalized_paths:
+            raise ReceiptInputError("summary manifest contains a duplicate normalized path")
+        normalized_paths.add(normalized_key)
+        source_commit = _validate_expected_source_identity(
+            entry[source_commit_field], SOURCE_COMMIT_PATTERN, "manifest source_commit"
+        )
+        source_tree_sha256 = _validate_expected_source_identity(
+            entry[source_tree_field], SOURCE_TREE_PATTERN, "manifest source_tree_sha256"
+        )
+        validated.append((receipt_path, source_commit, source_tree_sha256))
+    return validated
+
+
+def summarize_receipts(manifest_path: str | os.PathLike[str]) -> dict[str, object]:
+    """Validate and summarize two through eight source-bound receipts."""
+
+    entries = _validate_summary_manifest(_read_manifest(Path(manifest_path)))
+    rows: list[dict[str, str]] = []
+    receipt_digests: set[str] = set()
+    outcome_counts = dict.fromkeys(SUMMARY_OUTCOMES, 0)
+    for receipt_path, source_commit, source_tree_sha256 in entries:
+        observed, receipt_sha256 = _read_validated_receipt(
+            receipt_path,
+            expected_source_commit=source_commit,
+            expected_source_tree_sha256=source_tree_sha256,
+        )
+        if receipt_sha256 in receipt_digests:
+            raise ReceiptInputError("summary manifest contains a duplicate receipt digest")
+        receipt_digests.add(receipt_sha256)
+        outcome = observed["outcome"]
+        if not isinstance(outcome, str) or outcome not in outcome_counts:
+            raise ReceiptInputError("receipt outcome is not supported")
+        outcome_counts[outcome] += 1
+        rows.append(
+            {
+                "outcome": outcome,
+                "receipt_sha256": receipt_sha256,
+                "source_commit": source_commit,
+                "source_tree_sha256": source_tree_sha256,
+            }
+        )
+
+    return {
+        "outcome": "supported-receipt-set-summary",
+        "rows": rows,
+        "aggregate": {
+            "receipt_count": len(rows),
+            "outcome_counts": dict(outcome_counts),
+        },
+    }
+
+
 def compare_receipts(
     before_path: str | os.PathLike[str],
     after_path: str | os.PathLike[str],
@@ -432,6 +576,18 @@ def _encode_comparison(value: Mapping[str, object]) -> bytes:
         raise ReceiptInputError("comparison output is not bounded JSON") from error
     if len(encoded) > MAX_COMPARE_OUTPUT_BYTES:
         raise ReceiptInputError("comparison output exceeds its safe size bound")
+    return encoded
+
+
+def _encode_summary(value: Mapping[str, object]) -> bytes:
+    try:
+        encoded = (
+            json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ReceiptInputError("summary output is not bounded JSON") from error
+    if len(encoded) > MAX_SUMMARY_OUTPUT_BYTES:
+        raise ReceiptInputError("summary output exceeds its safe size bound")
     return encoded
 
 
@@ -503,11 +659,18 @@ def _build_receipt(value: Mapping[str, object]) -> dict[str, object]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = SafeArgumentParser(
-        description="write, verify or compare bounded local supported-path receipts"
+        description="write, verify, compare or summarize bounded local supported-path receipts"
     )
     raw_arguments = list(sys.argv[1:] if argv is None else argv)
     if raw_arguments[:1] in (["compare-receipts"], ["compare-receipt"], ["compare"]):
         raw_arguments = ["--compare-receipts", *raw_arguments[1:]]
+    if raw_arguments[:1] in (
+        ["summary"],
+        ["summary-receipts"],
+        ["summarize-receipts"],
+        ["receipt-set-summary"],
+    ):
+        raw_arguments = ["--summary-receipts", *raw_arguments[1:]]
     verification_requested = "--verify-receipt" in raw_arguments
     comparison_requested = any(
         argument
@@ -518,6 +681,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "compare-receipts",
             "compare-receipt",
             "compare",
+        }
+        for argument in raw_arguments
+    )
+    summary_requested = any(
+        argument
+        in {
+            "--summary-receipts",
+            "--summarize-receipts",
+            "--summarize-supported-path-receipts",
+            "--receipt-set-summary",
+            "--summary",
+            "summary",
+            "summary-receipts",
+            "summarize-receipts",
+            "receipt-set-summary",
+            "--receipt-manifest",
+            "--summary-manifest",
+            "--i-opt-in-to-summarize-receipts",
+            "--i-opt-in-to-summarize-receipt-set",
+            "--i-opt-in-to-summary",
         }
         for argument in raw_arguments
     )
@@ -540,6 +723,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="compare_paths",
         metavar="FILE",
         help="compare two final local JSON receipts without writing",
+    )
+    modes.add_argument(
+        "--summary-receipts",
+        "--summarize-receipts",
+        "--summarize-supported-path-receipts",
+        "--receipt-set-summary",
+        "--summary",
+        action="store_true",
+        dest="summary_receipts",
+        help="summarize two through eight final local JSON receipts without writing",
+    )
+    parser.add_argument(
+        "--i-opt-in-to-summarize-receipts",
+        "--i-opt-in-to-summarize-receipt-set",
+        "--i-opt-in-to-summary",
+        action="store_true",
+        dest="i_opt_in_to_summarize_receipts",
+        help="explicitly allow a bounded local receipt-set summary",
     )
     parser.add_argument(
         "--expect-source-commit",
@@ -597,6 +798,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--input", type=Path, help="bounded local JSON input")
     parser.add_argument("--output", type=Path, help="new local JSON receipt")
+    parser.add_argument(
+        "--manifest",
+        "--receipt-manifest",
+        "--summary-manifest",
+        dest="summary_manifest",
+        type=Path,
+        help="bounded local JSON manifest for a receipt-set summary",
+    )
     try:
         arguments = parser.parse_args(raw_arguments)
         verification_requested = arguments.verify_receipt is not None
@@ -609,11 +818,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             or arguments.after_source_commit is not None
             or arguments.after_source_tree_sha256 is not None
         )
+        summary_requested = (
+            arguments.summary_receipts
+            or arguments.summary_manifest is not None
+            or arguments.i_opt_in_to_summarize_receipts
+        )
         if arguments.verify_receipt is not None:
             if (
                 arguments.i_opt_in_to_write_local_receipt
+                or arguments.i_opt_in_to_summarize_receipts
                 or arguments.input is not None
                 or arguments.output is not None
+                or arguments.summary_manifest is not None
                 or arguments.compare_paths is not None
                 or arguments.before_receipt is not None
                 or arguments.after_receipt is not None
@@ -650,12 +866,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if summary_requested:
+            if not arguments.summary_receipts:
+                raise ReceiptInputError("summary manifest or opt-in requires summary mode")
+            if (
+                not arguments.i_opt_in_to_summarize_receipts
+                or arguments.input is not None
+                or arguments.output is not None
+                or arguments.expect_source_commit is not None
+                or arguments.expect_source_tree_sha256 is not None
+                or arguments.compare_paths is not None
+                or arguments.before_receipt is not None
+                or arguments.after_receipt is not None
+                or arguments.before_source_commit is not None
+                or arguments.before_source_tree_sha256 is not None
+                or arguments.after_source_commit is not None
+                or arguments.after_source_tree_sha256 is not None
+            ):
+                raise ReceiptInputError("summary mode requires its opt-in and cannot be combined with other modes")
+            if arguments.summary_manifest is None:
+                raise ReceiptInputError("summary mode requires --manifest")
+            summary = summarize_receipts(arguments.summary_manifest)
+            sys.stdout.write(_encode_summary(summary).decode("utf-8"))
+            return 0
         if comparison_requested:
             if (
                 arguments.i_opt_in_to_write_local_receipt
+                or arguments.i_opt_in_to_summarize_receipts
                 or arguments.verify_receipt is not None
                 or arguments.input is not None
                 or arguments.output is not None
+                or arguments.summary_manifest is not None
                 or arguments.expect_source_commit is not None
                 or arguments.expect_source_tree_sha256 is not None
             ):
@@ -727,6 +968,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ReceiptInputError as error:
         if verification_requested:
             prefix = "NOT VERIFIED"
+        elif summary_requested:
+            prefix = "NOT SUMMARIZED"
         elif comparison_requested:
             prefix = "NOT COMPARED"
         else:
