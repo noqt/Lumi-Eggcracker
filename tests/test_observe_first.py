@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Self
 from unittest.mock import patch
 
-from lumi_eggcracker import observe_first
+from lumi_eggcracker import detectors, observe_first
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "examples" / "observe-first"
@@ -212,6 +212,153 @@ class ObserveFirstTests(unittest.TestCase):
         no_match = observe_first.evaluate(observe_first.parse_input(incomplete))
         self.assertEqual("NO_COMPLETE_MATCH", no_match["result"])
         self.assertIsNone(no_match["match"])
+
+    def test_partial_explanation_is_catalogue_ordered_and_faithful(self) -> None:
+        partial = _input()
+        partial["evidence"] = {
+            "MODEL_CONTENT": ["gguf-v3"],
+            "MODEL_RUNTIME": ["ollama-runner-pinned"],
+            "MODEL_TOPOLOGY": [],
+        }
+        result = observe_first.evaluate(observe_first.parse_input(partial))
+
+        self.assertEqual("NO_COMPLETE_MATCH", result["result"])
+        self.assertIsNone(result["match"])
+        explanation = result["explanation"]
+        profiles = explanation["profiles"]
+        catalogue = detectors.load_bundled()
+        catalogue_profiles = [
+            profile for profile in catalogue.profiles if profile.path == "CONTENT"
+        ]
+        self.assertEqual(
+            [profile.identifier for profile in catalogue_profiles],
+            [profile["profile"] for profile in profiles],
+        )
+        self.assertEqual(
+            [profile.path for profile in catalogue_profiles],
+            [profile["path"] for profile in profiles],
+        )
+        self.assertEqual(
+            [
+                [
+                    {"any": list(requirement["any"]), "group": requirement["group"]}
+                    for requirement in profile.groups
+                ]
+                for profile in catalogue_profiles
+            ],
+            [
+                [
+                    {"any": requirement["any"], "group": requirement["group"]}
+                    for requirement in profile["requirements"]
+                ]
+                for profile in profiles
+            ],
+        )
+        self.assertEqual(
+            [
+                {
+                    "any": ["gguf-v2", "gguf-v3"],
+                    "group": "MODEL_CONTENT",
+                    "missing": [],
+                    "satisfied": True,
+                    "supplied": ["gguf-v3"],
+                },
+                {
+                    "any": ["llama-build-id", "llama-elf"],
+                    "group": "MODEL_RUNTIME",
+                    "missing": ["llama-build-id", "llama-elf"],
+                    "satisfied": False,
+                    "supplied": [],
+                },
+            ],
+            profiles[0]["requirements"],
+        )
+        self.assertEqual(
+            {
+                "any": ["ollama-launcher-pinned"],
+                "group": "MODEL_TOPOLOGY",
+                "missing": ["ollama-launcher-pinned"],
+                "satisfied": False,
+                "supplied": [],
+            },
+            profiles[1]["requirements"][2],
+        )
+        self.assertEqual(
+            [
+                {
+                    "any": ["safetensors-v1"],
+                    "group": "MODEL_CONTENT",
+                    "missing": ["safetensors-v1"],
+                    "satisfied": False,
+                    "supplied": [],
+                },
+                {
+                    "any": ["pytorch-bridge-aten-pair-pinned-cpu"],
+                    "group": "MODEL_RUNTIME",
+                    "missing": ["pytorch-bridge-aten-pair-pinned-cpu"],
+                    "satisfied": False,
+                    "supplied": [],
+                },
+                {
+                    "any": ["vllm-python-extension-pair-pinned-cpu"],
+                    "group": "MODEL_TOPOLOGY",
+                    "missing": ["vllm-python-extension-pair-pinned-cpu"],
+                    "satisfied": False,
+                    "supplied": [],
+                },
+            ],
+            profiles[2]["requirements"],
+        )
+
+    def test_unselected_complete_profile_is_not_labelled_as_chosen(self) -> None:
+        complete = _input()
+        complete["evidence"] = {
+            "MODEL_CONTENT": ["gguf-v3", "safetensors-v1"],
+            "MODEL_RUNTIME": [
+                "llama-elf",
+                "pytorch-bridge-aten-pair-pinned-cpu",
+            ],
+            "MODEL_TOPOLOGY": [],
+        }
+        result = observe_first.evaluate(observe_first.parse_input(complete))
+
+        catalogue = detectors.load_bundled()
+        self.assertEqual("WOULD_ACT", result["result"])
+        self.assertEqual(catalogue.profiles[0].identifier, result["match"]["profile"])  # type: ignore[index]
+        explanation = result["explanation"]
+        self.assertTrue(
+            all("chosen" not in profile for profile in explanation["profiles"])
+        )
+        safetensors_pytorch = next(
+            profile
+            for profile in explanation["profiles"]
+            if profile["profile"] == catalogue.profiles[-1].identifier
+        )
+        self.assertTrue(
+            all(requirement["satisfied"] for requirement in safetensors_pytorch["requirements"])
+        )
+
+    def test_partial_fixture_cli_emits_only_the_new_explanation_run(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = "src"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "lumi_eggcracker.observe_first",
+                str(FIXTURE_DIR / "partial-match.json"),
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        output = json.loads(completed.stdout)
+        self.assertEqual("NO_COMPLETE_MATCH", output["result"])
+        self.assertEqual([], output["explanation"]["profiles"][1]["requirements"][2]["supplied"])
+        self.assertEqual("", completed.stderr)
 
     def test_fixture_commands_emit_expected_results_without_output_files(self) -> None:
         environment = os.environ.copy()

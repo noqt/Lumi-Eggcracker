@@ -17,6 +17,7 @@ and never writes an output file or performs actuation:
 ```sh
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/benign.json
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/complete-match.json
+PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/partial-match.json
 ```
 
 On Windows PowerShell, from the source checkout use:
@@ -25,9 +26,14 @@ On Windows PowerShell, from the source checkout use:
 $env:PYTHONPATH = "src"
 python -m lumi_eggcracker.observe_first examples/observe-first/benign.json
 python -m lumi_eggcracker.observe_first examples/observe-first/complete-match.json
+python -m lumi_eggcracker.observe_first examples/observe-first/partial-match.json
 ```
 
 This source-only preview is synthetic, quiescent and offline by construction.
+The partial fixture reports the catalogue requirements with supplied and missing
+evidence; an unknown or wrong-group identifier is rejected before any normal
+output. This preview is source-only, unmerged, not released and not
+native-qualified.
 The hosted proof below remains the supported disposable Linux demonstration of
 the native containment mechanism.
 

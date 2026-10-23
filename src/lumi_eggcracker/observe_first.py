@@ -238,6 +238,43 @@ def _validate_evidence(catalogue: detectors.Catalogue, evidence: dict[str, set[s
             )
 
 
+def _content_explanation(
+    catalogue: detectors.Catalogue, evidence: dict[str, set[str]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Describe catalogue requirements without deriving another verdict."""
+
+    profiles: list[dict[str, Any]] = []
+    for profile in catalogue.profiles:
+        if profile.path != "CONTENT":
+            continue
+        requirements: list[dict[str, Any]] = []
+        for requirement in profile.groups:
+            alternatives = tuple(requirement["any"])
+            supplied = tuple(
+                value
+                for value in alternatives
+                if value in evidence.get(requirement["group"], set())
+            )
+            satisfied = bool(supplied)
+            requirements.append(
+                {
+                    "any": list(alternatives),
+                    "group": requirement["group"],
+                    "missing": [] if satisfied else list(alternatives),
+                    "satisfied": satisfied,
+                    "supplied": list(supplied),
+                }
+            )
+        profiles.append(
+            {
+                "path": profile.path,
+                "profile": profile.identifier,
+                "requirements": requirements,
+            }
+        )
+    return {"profiles": profiles}
+
+
 def evaluate(observation: Observation) -> dict[str, Any]:
     """Return a deterministic inert result using the current detector APIs."""
 
@@ -257,6 +294,7 @@ def evaluate(observation: Observation) -> dict[str, Any]:
         "schema_version": SCHEMA,
         "simulation_only": True,
     }
+    result["explanation"] = _content_explanation(catalogue, observation.evidence)
     if detected is None:
         result["match"] = None
     else:
