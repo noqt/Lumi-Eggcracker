@@ -32,7 +32,7 @@ python -m lumi_eggcracker.observe_first examples/observe-first/partial-match.jso
 This source-only preview is synthetic, quiescent and offline by construction.
 The partial fixture reports the catalogue requirements with supplied and missing
 evidence; an unknown or wrong-group identifier is rejected before any normal
-output. This preview is source-only, unmerged, not released and not
+output. This preview is source-only, merged into main, not released and not
 native-qualified.
 The hosted proof below remains the supported disposable Linux demonstration of
 the native containment mechanism.
