@@ -18,6 +18,8 @@ and never writes an output file or performs actuation:
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/benign.json
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/complete-match.json
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/partial-match.json
+# Add --explain-selection only when you want the inert profile-selection explanation.
+PYTHONPATH=src python3 -m lumi_eggcracker.observe_first --explain-selection examples/observe-first/complete-match.json
 ```
 
 On Windows PowerShell, from the source checkout use:
@@ -27,13 +29,19 @@ $env:PYTHONPATH = "src"
 python -m lumi_eggcracker.observe_first examples/observe-first/benign.json
 python -m lumi_eggcracker.observe_first examples/observe-first/complete-match.json
 python -m lumi_eggcracker.observe_first examples/observe-first/partial-match.json
+# Add --explain-selection only when you want the inert profile-selection explanation.
+python -m lumi_eggcracker.observe_first --explain-selection examples/observe-first/complete-match.json
 ```
 
 This source-only preview is synthetic, quiescent and offline by construction.
 The partial fixture reports the catalogue requirements with supplied and missing
 evidence; an unknown or wrong-group identifier is rejected before any normal
-output. This preview is source-only, merged into main, not released and not
-native-qualified.
+output. This preview is source-only, merged into the maintained main source
+base, unreleased, not part of signed v1.0.10 and not native-qualified.
+The optional selection explanation names complete catalogue profiles and the
+maintained first-complete selection rule only; it does not claim true workload
+or framework identity, topology, provenance, safety, native qualification or
+authorization. Nothing in this source-preview usage claims publication.
 The hosted proof below remains the supported disposable Linux demonstration of
 the native containment mechanism.
 
