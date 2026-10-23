@@ -34,6 +34,15 @@ _LIMITATIONS = (
         "safety, qualification, or release claim is provided."
     ),
 )
+_SELECTION_RULE = (
+    "The detector selects the first complete CONTENT requirement profile in maintained "
+    "catalogue order."
+)
+_SELECTION_LIMITATION = (
+    "This explanation covers bounded synthetic evidence only; it does not establish "
+    "true workload or framework identity, topology, provenance, safety, native "
+    "qualification, or authorization."
+)
 
 
 class ObserveFirstInputError(ValueError):
@@ -275,7 +284,35 @@ def _content_explanation(
     return {"profiles": profiles}
 
 
-def evaluate(observation: Observation) -> dict[str, Any]:
+def _selection_explanation(
+    catalogue: detectors.Catalogue,
+    evidence: dict[str, set[str]],
+    detected: detectors.DetectionMatch | None,
+) -> dict[str, Any]:
+    complete_profiles: list[str] = []
+    for profile in catalogue.profiles:
+        if profile.path != "CONTENT":
+            continue
+        if all(
+            any(
+                evidence.get(requirement["group"], set()).intersection(requirement["any"])
+            )
+            for requirement in profile.groups
+        ):
+            complete_profiles.append(profile.identifier)
+    return {
+        "complete_content_profile_ids": complete_profiles,
+        "limitations": [_SELECTION_LIMITATION],
+        "selected_profile": None if detected is None else detected.profile,
+        "selection_rule": _SELECTION_RULE,
+    }
+
+
+def evaluate(
+    observation: Observation,
+    *,
+    explain_selection: bool = False,
+) -> dict[str, Any]:
     """Return a deterministic inert result using the current detector APIs."""
 
     catalogue = detectors.load_bundled()
@@ -295,6 +332,10 @@ def evaluate(observation: Observation) -> dict[str, Any]:
         "simulation_only": True,
     }
     result["explanation"] = _content_explanation(catalogue, observation.evidence)
+    if explain_selection:
+        result["selection_explanation"] = _selection_explanation(
+            catalogue, observation.evidence, detected
+        )
     if detected is None:
         result["match"] = None
     else:
@@ -314,11 +355,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Run the dedicated ``python -m lumi_eggcracker.observe_first`` command."""
 
     arguments = list(sys.argv[1:] if argv is None else argv)
+    explain_selection_flag = "--explain-selection"
+    selected_flags = [argument for argument in arguments if argument == explain_selection_flag]
+    if len(selected_flags) > 1:
+        print("usage: python -m lumi_eggcracker.observe_first FILE", file=sys.stderr)
+        return 2
+    explain_selection = bool(selected_flags)
+    if explain_selection:
+        arguments = [argument for argument in arguments if argument != explain_selection_flag]
     if len(arguments) != 1:
         print("usage: python -m lumi_eggcracker.observe_first FILE", file=sys.stderr)
         return 2
     try:
-        result = evaluate(load_input(Path(arguments[0])))
+        result = evaluate(
+            load_input(Path(arguments[0])), explain_selection=explain_selection
+        )
     except ObserveFirstInputError as error:
         print(f"observe-first input rejected: {error}", file=sys.stderr)
         return 2
