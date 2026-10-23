@@ -21,6 +21,7 @@ from .kill_receipt import prepare_handoff_main
 from .supervisor import main as supervisor_main
 from .support_bundle import main as support_bundle_main
 from .support_bundle import validate_main as validate_support_bundle_main
+from .supported_path_receipt import main as supported_receipt_main
 from .watchdog import main as watchdog_main
 
 _DOCTOR_SUMMARY_SCHEMA = "lumi-eggcracker.doctor-summary.v1"
@@ -595,6 +596,10 @@ def _parser() -> argparse.ArgumentParser:
         "compare-detection-receipts",
         help="compare two redacted detection receipt exports",
     )
+    commands.add_parser(
+        "supported-receipt",
+        help="write, verify, compare or summarize bounded local supported-path receipts",
+    )
     commands.add_parser("version", help="print the public version")
     return parser
 
@@ -647,6 +652,10 @@ def _check_start_main(values: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     values = sys.argv[1:] if argv is None else argv
+    if values[:1] == ["supported-receipt"]:
+        return supported_receipt_main(
+            values[1:], prog="eggcracker supported-receipt"
+        )
     if values[:1] == ["check-start"]:
         return _check_start_main(values[1:])
     if values[:1] == ["compare-detection-receipts"]:
