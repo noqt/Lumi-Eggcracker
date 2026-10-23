@@ -1,0 +1,1 @@
+{"evidence":{"MODEL_CONTENT":["gguf-v3"],"MODEL_RUNTIME":[],"MODEL_TOPOLOGY":[]},"offline":true,"quiescent":true,"schema_version":"lumi-eggcracker.observe-first.v1","snapshot":{"argv":["synthetic-runtime"],"exe_basename":"synthetic-runtime","fd_paths":[],"map_basenames":[]},"synthetic":true}

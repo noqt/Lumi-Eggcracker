@@ -5,6 +5,38 @@ don't need Linux, a GPU, a model download or a local installation.
 
 ![Four-step hosted-proof path: fork, run, see what survives, and share the public run](docs/hosted-proof-flow.svg)
 
+## Source-only observe-first preview (unreleased)
+
+The current source checkout also contains a small, read-only synthetic preview.
+It is not part of signed v1.0.10 and makes no live-observation, approval,
+identity, topology, provenance, containment, safety, qualification, or release
+claim. It reads one bounded JSON fixture, delegates to the bundled detector
+catalogue, prints a deterministic `WOULD_ACT` or `NO_COMPLETE_MATCH` result,
+and never writes an output file or performs actuation:
+
+```sh
+PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/benign.json
+PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/complete-match.json
+PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/partial-match.json
+```
+
+On Windows PowerShell, from the source checkout use:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m lumi_eggcracker.observe_first examples/observe-first/benign.json
+python -m lumi_eggcracker.observe_first examples/observe-first/complete-match.json
+python -m lumi_eggcracker.observe_first examples/observe-first/partial-match.json
+```
+
+This source-only preview is synthetic, quiescent and offline by construction.
+The partial fixture reports the catalogue requirements with supplied and missing
+evidence; an unknown or wrong-group identifier is rejected before any normal
+output. This preview is source-only, unmerged, not released and not
+native-qualified.
+The hosted proof below remains the supported disposable Linux demonstration of
+the native containment mechanism.
+
 ## Start it with GitHub CLI
 
 If you already use the authenticated [GitHub CLI](https://cli.github.com/), a
