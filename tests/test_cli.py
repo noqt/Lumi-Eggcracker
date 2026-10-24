@@ -1025,9 +1025,8 @@ class CliTests(unittest.TestCase):
 
     def test_wait_help_describes_expectation_mismatch_and_completed_allowed(self) -> None:
         output = io.StringIO()
-        with redirect_stdout(output):
-            with self.assertRaises(SystemExit) as raised:
-                main(["wait", "--help"])
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            main(["wait", "--help"])
         self.assertEqual(0, raised.exception.code)
         help_text = " ".join(output.getvalue().split())
         self.assertIn("mismatch exits 7", help_text)
