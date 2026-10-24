@@ -108,6 +108,7 @@ _WAIT_POLL_CADENCE_SECONDS = 0.1
 _WAIT_ERROR = "ERROR"
 _WAIT_TERMINAL = "TERMINAL"
 _WAIT_TIMED_OUT = "TIMED_OUT"
+_WAIT_EXPECTATION_MISMATCH = 7
 
 
 class _DoctorSummaryInvalid(ValueError):
@@ -355,7 +356,9 @@ def _wait_error() -> int:
     return 4
 
 
-def _wait_main(*, name: str, timeout_seconds: int) -> int:
+def _wait_main(
+    *, name: str, timeout_seconds: int, expect_state: str | None = None
+) -> int:
     clock = _WaitClock()
     try:
         started = clock.now()
@@ -395,7 +398,9 @@ def _wait_main(*, name: str, timeout_seconds: int) -> int:
             last_state = state
             if state["state"] in _WAIT_TERMINAL_STATES:
                 _wait_output(_WAIT_TERMINAL, state)
-                return 0
+                if expect_state is None or state["state"] == expect_state:
+                    return 0
+                return _WAIT_EXPECTATION_MISMATCH
             remaining = deadline - clock.now()
             if remaining <= 0:
                 _wait_output(_WAIT_TIMED_OUT, last_state)
@@ -488,7 +493,14 @@ def _parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show one protected workload")
     status.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     wait = commands.add_parser(
-        "wait", help="wait for one protected workload to reach a terminal state"
+        "wait",
+        help="wait for one protected workload to reach a terminal state",
+        description=(
+            "Wait for one protected workload to reach a terminal state. With "
+            "--expect-state, a mismatch exits 7. COMPLETED_ALLOWED means an "
+            "observed terminal/cgroup-empty completion; it does not mean "
+            "application exit-code success or provide a safety guarantee."
+        ),
     )
     wait.add_argument("--name", required=True, action=_RejectDuplicateIdentifier)
     wait.add_argument(
@@ -497,6 +509,16 @@ def _parser() -> argparse.ArgumentParser:
         type=_wait_timeout,
         action=_RejectDuplicateIdentifier,
         help="maximum wait duration in seconds (1-300)",
+    )
+    wait.add_argument(
+        "--expect-state",
+        choices=sorted(_WAIT_TERMINAL_STATES),
+        action=_RejectDuplicateIdentifier,
+        help=(
+            "expected terminal state; mismatch exits 7 (COMPLETED_ALLOWED is "
+            "observed cgroup-empty completion, not application success or a "
+            "safety guarantee)"
+        ),
     )
     commands.add_parser("list", help="list protected workloads")
     history = commands.add_parser(
@@ -681,7 +703,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "support-bundle":
         return support_bundle_main(args.output)
     if args.command == "wait":
-        return _wait_main(name=args.name, timeout_seconds=args.timeout_seconds)
+        return _wait_main(
+            name=args.name,
+            timeout_seconds=args.timeout_seconds,
+            expect_state=args.expect_state,
+        )
     try:
         if args.command == "doctor":
             if args.summary:
