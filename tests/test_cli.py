@@ -808,6 +808,68 @@ class CliTests(unittest.TestCase):
         )
         sleep.assert_not_called()
 
+    def test_wait_expect_state_matches_and_mismatches_all_terminal_states(self) -> None:
+        terminal_states = (
+            "COMPLETED_ALLOWED",
+            "TERMINATED",
+            "CONTAINMENT_FAILED",
+            "CONTAINED_RECEIPT_FAILED",
+        )
+        for state in terminal_states:
+            with self.subTest(result="match", state=state):
+                response = wait_status(state=state)
+                output = io.StringIO()
+                with patch("lumi_eggcracker.cli.time.monotonic", return_value=10.0), patch(
+                    "lumi_eggcracker.cli.request_before", return_value=response
+                ) as request_before, redirect_stdout(output):
+                    self.assertEqual(
+                        0,
+                        main(
+                            [
+                                "wait",
+                                "--name",
+                                "demo",
+                                "--timeout-seconds",
+                                "1",
+                                "--expect-state",
+                                state,
+                            ]
+                        ),
+                    )
+                self.assertEqual("TERMINAL", output.getvalue().splitlines()[0])
+                self.assertEqual(response, json.loads(output.getvalue().splitlines()[1]))
+                request_before.assert_called_once_with(
+                    "status", deadline_monotonic=11.0, name="demo"
+                )
+
+        for index, state in enumerate(terminal_states):
+            expected = terminal_states[(index + 1) % len(terminal_states)]
+            with self.subTest(result="mismatch", state=state, expected=expected):
+                response = wait_status(state=state)
+                output = io.StringIO()
+                with patch("lumi_eggcracker.cli.time.monotonic", return_value=10.0), patch(
+                    "lumi_eggcracker.cli.request_before", return_value=response
+                ) as request_before, redirect_stdout(output):
+                    self.assertEqual(
+                        7,
+                        main(
+                            [
+                                "wait",
+                                "--name",
+                                "demo",
+                                "--timeout-seconds",
+                                "1",
+                                "--expect-state",
+                                expected,
+                            ]
+                        ),
+                    )
+                self.assertEqual("TERMINAL", output.getvalue().splitlines()[0])
+                self.assertEqual(response, json.loads(output.getvalue().splitlines()[1]))
+                request_before.assert_called_once_with(
+                    "status", deadline_monotonic=11.0, name="demo"
+                )
+
     def test_wait_active_to_terminal_pins_run_id_and_uses_bounded_sleep(self) -> None:
         active = wait_status()
         terminal = wait_status(state="CONTAINMENT_FAILED")
@@ -928,6 +990,49 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(2, raised.exception.code)
             request_before.assert_not_called()
+
+    def test_wait_expect_state_invalid_or_repeated_is_rejected_before_request(self) -> None:
+        cases = (
+            [
+                "wait",
+                "--name",
+                "demo",
+                "--timeout-seconds",
+                "1",
+                "--expect-state",
+                "RUNNING",
+            ],
+            [
+                "wait",
+                "--name",
+                "demo",
+                "--timeout-seconds",
+                "1",
+                "--expect-state",
+                "TERMINATED",
+                "--expect-state",
+                "TERMINATED",
+            ],
+        )
+        for values in cases:
+            with self.subTest(values=values), patch(
+                "lumi_eggcracker.cli.request_before"
+            ) as request_before, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    main(values)
+                self.assertEqual(2, raised.exception.code)
+                request_before.assert_not_called()
+
+    def test_wait_help_describes_expectation_mismatch_and_completed_allowed(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit) as raised:
+            main(["wait", "--help"])
+        self.assertEqual(0, raised.exception.code)
+        help_text = " ".join(output.getvalue().split())
+        self.assertIn("mismatch exits 7", help_text)
+        self.assertIn("cgroup-empty", help_text)
+        self.assertIn("application exit-code success", help_text)
+        self.assertIn("safety guarantee", help_text)
 
     def test_wait_uses_only_status_action_and_existing_status_still_uses_request(self) -> None:
         terminal = wait_status(state="COMPLETED_ALLOWED")
