@@ -129,6 +129,36 @@ does not establish true workload or framework identity, topology, provenance,
 safety, native qualification or authorization. Nothing in this source-preview
 usage claims publication.
 
+## Inspect one selected GGUF file from a source checkout
+
+With a current source checkout and Python 3.11 or newer, you can ask the
+content-only file observer to inspect one explicitly selected, bounded GGUF
+file. No package installation is required:
+
+```sh
+PYTHONPATH=src python3 -m lumi_eggcracker.gguf_file_observe path/to/model.gguf
+```
+
+On Windows PowerShell, from the source checkout use:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m lumi_eggcracker.gguf_file_observe path\to\model.gguf
+```
+
+Successful output reports only facts read from that selected file: the GGUF
+version and content evidence ID, a size bucket, the number of inspected prefix
+bytes, and a SHA-256 digest whose scope is explicitly `first_prefix_only`.
+Runtime and topology evidence remain empty, and `complete_profiles` remains
+empty because file content alone does not complete an Eggcracker profile. The
+observer does not actuate, identify a running workload, or prove provenance,
+safety, containment, native qualification, or full-file identity.
+
+This source-checkout utility is not included in the existing synthetic
+`lumi-eggcracker-observe-first.pyz` archive. That archive and its checksum,
+fixtures, commands, and hosted-proof guidance above remain a separate
+synthetic preview.
+
 ## Start it with GitHub CLI
 
 If you already use the authenticated [GitHub CLI](https://cli.github.com/), a
