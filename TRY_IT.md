@@ -19,7 +19,7 @@ directory. These links follow the current public `main` branch:
 - [Partial-match fixture](https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/partial-match.json)
 
 On macOS or Linux, download the files and verify the adjacent checksum with
-`sha256sum`:
+this small Python 3.11+ standard-library verifier:
 
 ```sh
 mkdir -p observe-first-preview && cd observe-first-preview
@@ -28,8 +28,37 @@ curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/
 curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/benign.json
 curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/complete-match.json
 curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/partial-match.json
-sha256sum -c lumi-eggcracker-observe-first.pyz.sha256
 python3 --version
+if ! python3 - <<'PY'
+from hashlib import file_digest
+from pathlib import Path
+import re
+import sys
+
+archive_name = "lumi-eggcracker-observe-first.pyz"
+checksum_name = "lumi-eggcracker-observe-first.pyz.sha256"
+checksum_text = Path(checksum_name).read_text(encoding="utf-8").strip()
+match = re.fullmatch(r"([0-9a-f]{64})  " + re.escape(archive_name), checksum_text)
+if match is None:
+    print("Checksum file format is invalid", file=sys.stderr)
+    raise SystemExit(1)
+
+with open(archive_name, "rb") as archive:
+    actual_hash = file_digest(archive, "sha256").hexdigest()
+if actual_hash != match.group(1):
+    print("Zipapp checksum mismatch", file=sys.stderr)
+    raise SystemExit(1)
+print("Zipapp checksum verified")
+PY
+then
+  echo "Checksum verification failed; stop before running the archive." >&2
+  exit 1
+fi
+```
+
+After verification succeeds, run the downloaded archive:
+
+```sh
 python3 lumi-eggcracker-observe-first.pyz benign.json
 python3 lumi-eggcracker-observe-first.pyz complete-match.json
 python3 lumi-eggcracker-observe-first.pyz partial-match.json
