@@ -307,4 +307,3 @@ is designed for GitHub's disposable Ubuntu 24.04 runner; don't adapt it to a
 self-hosted machine.
 
 [Read how Eggcracker works and where its current boundary sits](README.md).
-
