@@ -5,20 +5,80 @@ don't need Linux, a GPU, a model download or a local installation.
 
 ![Four-step hosted-proof path: fork, run, see what survives, and share the public run](docs/hosted-proof-flow.svg)
 
-## Source-only observe-first preview (unreleased)
+## Checkout-free source-only observe-first preview (unreleased)
 
-The current source checkout also contains a small, read-only synthetic preview.
-It is not part of signed v1.0.10 and makes no live-observation, approval,
-identity, topology, provenance, containment, safety, qualification, or release
-claim. It reads one bounded JSON fixture, delegates to the bundled detector
-catalogue, prints a deterministic `WOULD_ACT` or `NO_COMPLETE_MATCH` result,
-and never writes an output file or performs actuation:
+This separate preview runs on Python 3.11 or newer from a downloaded zipapp.
+It needs no Git checkout, package installation, or `PYTHONPATH`. Download the
+zipapp, its adjacent checksum file, and the synthetic fixture files into one
+directory. These links follow the current public `main` branch:
+
+- [Zipapp](https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/lumi-eggcracker-observe-first.pyz)
+- [Zipapp SHA-256 file](https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/lumi-eggcracker-observe-first.pyz.sha256)
+- [Benign fixture](https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/benign.json)
+- [Complete-match fixture](https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/complete-match.json)
+- [Partial-match fixture](https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/partial-match.json)
+
+On macOS or Linux, download the files and verify the adjacent checksum with
+`sha256sum`:
+
+```sh
+mkdir -p observe-first-preview && cd observe-first-preview
+curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/lumi-eggcracker-observe-first.pyz
+curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/lumi-eggcracker-observe-first.pyz.sha256
+curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/benign.json
+curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/complete-match.json
+curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first/partial-match.json
+sha256sum -c lumi-eggcracker-observe-first.pyz.sha256
+python3 --version
+python3 lumi-eggcracker-observe-first.pyz benign.json
+python3 lumi-eggcracker-observe-first.pyz complete-match.json
+python3 lumi-eggcracker-observe-first.pyz partial-match.json
+python3 lumi-eggcracker-observe-first.pyz --explain-selection complete-match.json
+```
+
+On Windows PowerShell, run the equivalent commands:
+
+```powershell
+$previewDir = Join-Path (Get-Location) "observe-first-preview"
+New-Item -ItemType Directory -Path $previewDir -Force | Out-Null
+Set-Location $previewDir
+$baseUrl = "https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/observe-first"
+Invoke-WebRequest "$baseUrl/lumi-eggcracker-observe-first.pyz" -OutFile "lumi-eggcracker-observe-first.pyz"
+Invoke-WebRequest "$baseUrl/lumi-eggcracker-observe-first.pyz.sha256" -OutFile "lumi-eggcracker-observe-first.pyz.sha256"
+Invoke-WebRequest "$baseUrl/benign.json" -OutFile "benign.json"
+Invoke-WebRequest "$baseUrl/complete-match.json" -OutFile "complete-match.json"
+Invoke-WebRequest "$baseUrl/partial-match.json" -OutFile "partial-match.json"
+$checksumLine = (Get-Content "lumi-eggcracker-observe-first.pyz.sha256" -Raw).Trim()
+$checksumMatch = [regex]::Match($checksumLine, '^([0-9a-f]{64})  lumi-eggcracker-observe-first\.pyz$')
+if (-not $checksumMatch.Success) { throw "Checksum file format is invalid" }
+$expectedHash = $checksumMatch.Groups[1].Value
+$actualHash = (Get-FileHash "lumi-eggcracker-observe-first.pyz" -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualHash -cne $expectedHash) { throw "Zipapp checksum mismatch" }
+python --version
+python .\lumi-eggcracker-observe-first.pyz .\benign.json
+python .\lumi-eggcracker-observe-first.pyz .\complete-match.json
+python .\lumi-eggcracker-observe-first.pyz .\partial-match.json
+python .\lumi-eggcracker-observe-first.pyz --explain-selection .\complete-match.json
+```
+
+The archive's `SOURCE-MANIFEST.json` records base source commit
+`47b822ca5d1dcc753535a7c2fcb74aece7f9b73d` and SHA-256 values for every
+included source member. The adjacent checksum detects a changed or incomplete
+download; it is not a signature or independent authentication. The preview is
+synthetic, quiescent and offline. It reads one bounded JSON fixture, prints a
+deterministic `WOULD_ACT` or `NO_COMPLETE_MATCH` result, and performs no live
+observation, approval, output-file write, or actuation. The optional
+`--explain-selection` flag prints the inert catalogue-selection explanation.
+This source preview is unreleased, outside signed v1.0.10, and not
+native-qualified. A non-match is not a safety result.
+
+If you already have a source checkout, the same preview can also be run from
+its `src` directory without creating the zipapp:
 
 ```sh
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/benign.json
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/complete-match.json
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first examples/observe-first/partial-match.json
-# Add --explain-selection only when you want the inert profile-selection explanation.
 PYTHONPATH=src python3 -m lumi_eggcracker.observe_first --explain-selection examples/observe-first/complete-match.json
 ```
 
@@ -29,21 +89,16 @@ $env:PYTHONPATH = "src"
 python -m lumi_eggcracker.observe_first examples/observe-first/benign.json
 python -m lumi_eggcracker.observe_first examples/observe-first/complete-match.json
 python -m lumi_eggcracker.observe_first examples/observe-first/partial-match.json
-# Add --explain-selection only when you want the inert profile-selection explanation.
 python -m lumi_eggcracker.observe_first --explain-selection examples/observe-first/complete-match.json
 ```
 
-This source-only preview is synthetic, quiescent and offline by construction.
-The partial fixture reports the catalogue requirements with supplied and missing
-evidence; an unknown or wrong-group identifier is rejected before any normal
-output. This preview is source-only, merged into the maintained main source
-base, unreleased, not part of signed v1.0.10 and not native-qualified.
-The optional selection explanation names complete catalogue profiles and the
-maintained first-complete selection rule only; it does not claim true workload
-or framework identity, topology, provenance, safety, native qualification or
-authorization. Nothing in this source-preview usage claims publication.
-The hosted proof below remains the supported disposable Linux demonstration of
-the native containment mechanism.
+For either entry point, the partial fixture reports catalogue requirements
+with supplied and missing evidence. Unknown or wrong-group identifiers are
+rejected before normal output. The selection explanation names complete
+catalogue profiles and the maintained first-complete selection rule only; it
+does not establish true workload or framework identity, topology, provenance,
+safety, native qualification or authorization. Nothing in this source-preview
+usage claims publication.
 
 ## Start it with GitHub CLI
 
