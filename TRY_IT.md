@@ -129,6 +129,53 @@ does not establish true workload or framework identity, topology, provenance,
 safety, native qualification or authorization. Nothing in this source-preview
 usage claims publication.
 
+## Checkout-free GGUF file-evidence preview (unreleased)
+
+This is a separate Python 3.11+ source-only zipapp for inspecting one explicitly
+selected GGUF file. It needs no Git checkout, package installation, or
+`PYTHONPATH`. Download both files into the same directory from public `main`:
+
+- [GGUF file-observer zipapp](https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/gguf-file/lumi-eggcracker-gguf-file.pyz)
+- [GGUF file-observer SHA-256 file](https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/gguf-file/lumi-eggcracker-gguf-file.pyz.sha256)
+
+On macOS or Linux, download and verify before running. The verification block
+exits without running the archive if the checksum line or downloaded bytes do
+not match:
+
+```sh
+mkdir -p gguf-file-preview && cd gguf-file-preview
+curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/gguf-file/lumi-eggcracker-gguf-file.pyz
+curl -fSLO https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/gguf-file/lumi-eggcracker-gguf-file.pyz.sha256
+python3 -c "import hashlib,pathlib,re,sys; n='lumi-eggcracker-gguf-file.pyz'; t=pathlib.Path(n+'.sha256').read_text(encoding='ascii').strip(); m=re.fullmatch(r'([0-9a-f]{64})  '+re.escape(n),t); a=hashlib.sha256(pathlib.Path(n).read_bytes()).hexdigest(); ok=m is not None and a==m.group(1); print('Zipapp checksum verified' if ok else 'Zipapp checksum mismatch',file=sys.stdout if ok else sys.stderr); raise SystemExit(0 if ok else 1)" || { echo "Checksum verification failed; stop before running the archive." >&2; exit 1; }
+python3 lumi-eggcracker-gguf-file.pyz path/to/model.gguf
+```
+
+On Windows PowerShell, use the equivalent fail-closed sequence:
+
+```powershell
+$previewDir = Join-Path (Get-Location) "gguf-file-preview"
+New-Item -ItemType Directory -Path $previewDir -Force | Out-Null
+Set-Location $previewDir
+$baseUrl = "https://raw.githubusercontent.com/noqt/Lumi-Eggcracker/main/examples/gguf-file"
+Invoke-WebRequest "$baseUrl/lumi-eggcracker-gguf-file.pyz" -OutFile "lumi-eggcracker-gguf-file.pyz"
+Invoke-WebRequest "$baseUrl/lumi-eggcracker-gguf-file.pyz.sha256" -OutFile "lumi-eggcracker-gguf-file.pyz.sha256"
+python -c "import hashlib,pathlib,re,sys; n='lumi-eggcracker-gguf-file.pyz'; t=pathlib.Path(n+'.sha256').read_text(encoding='ascii').strip(); m=re.fullmatch(r'([0-9a-f]{64})  '+re.escape(n),t); a=hashlib.sha256(pathlib.Path(n).read_bytes()).hexdigest(); ok=m is not None and a==m.group(1); print('Zipapp checksum verified' if ok else 'Zipapp checksum mismatch',file=sys.stdout if ok else sys.stderr); raise SystemExit(0 if ok else 1)"
+if ($LASTEXITCODE -ne 0) { throw "Checksum verification failed; stop before running the archive." }
+python .\lumi-eggcracker-gguf-file.pyz path\to\model.gguf
+```
+
+Successful output is `FILE_EVIDENCE_ONLY`. It reports a GGUF version, size
+bucket, and a SHA-256 digest of only the inspected prefix; it is not a full-file
+hash. Runtime and topology evidence remain empty, and file content alone does
+not complete an Eggcracker profile. The observer reads only the selected
+bounded regular file and performs no actuation.
+
+This source-only preview is unreleased and outside signed v1.0.10 and v1.0.11.
+It is not native-qualified and does not establish workload identity,
+provenance, approval, safety, containment, or runtime/topology evidence. The
+adjacent archive checksum detects changed or incomplete download bytes; it is
+not a signature or independent authentication.
+
 ## Inspect one selected GGUF file from a source checkout
 
 With a current source checkout and Python 3.11 or newer, you can ask the
