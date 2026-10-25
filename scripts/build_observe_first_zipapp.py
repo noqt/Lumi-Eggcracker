@@ -144,7 +144,7 @@ def _read_regular_file(path: Path) -> bytes:
 
 def _canonical_json(value: object) -> bytes:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return f"{encoded}\n".encode("utf-8")
+    return f"{encoded}\n".encode()
 
 
 def _source_members() -> dict[str, bytes]:
