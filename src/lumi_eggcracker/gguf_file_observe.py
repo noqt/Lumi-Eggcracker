@@ -156,7 +156,9 @@ def _check_regular(metadata: os.stat_result) -> _StableIdentity:
     if not stat.S_ISREG(metadata.st_mode):
         raise _FileUnavailableFailure("selected path must be a regular file")
     identity = _stable_identity(metadata)
-    if not MIN_FILE_BYTES <= identity.size <= MAX_FILE_BYTES:
+    if identity.size < MIN_FILE_BYTES:
+        raise _NotUsableGgufFailure("selected file is too small to be GGUF")
+    if identity.size > MAX_FILE_BYTES:
         raise _FileUnavailableFailure("selected file size is outside the fixed limit")
     return identity
 
@@ -374,11 +376,13 @@ def observe_file(path: str | os.PathLike[str]) -> dict[str, object]:
         except OSError:
             pass
     if parser_failure is not None:
+        if isinstance(parser_failure, JsonInputError):
+            raise _NotUsableGgufFailure("candidate GGUF is not usable") from parser_failure
         if isinstance(parser_failure, OSError):
             raise _FileUnavailableFailure("selected file cannot be validated") from parser_failure
-        raise _NotUsableGgufFailure("candidate GGUF is not usable") from parser_failure
+        raise _InternalReportFailure("file evidence parser failed") from parser_failure
     if evidence is None:
-        raise _NotUsableGgufFailure("candidate GGUF is not usable")
+        raise _InternalReportFailure("file evidence parser returned no result")
     try:
         return _report(evidence, load_bundled())
     except (
@@ -408,9 +412,14 @@ def _emit_report(report: dict[str, object]) -> None:
     if len(raw) > MAX_OUTPUT_BYTES:
         raise _InternalReportFailure("report exceeds the fixed output limit")
     try:
-        text = raw.decode("ascii")
-        written = sys.stdout.write(text)
-        if written != len(text):
+        expected = len(raw)
+        binary_stdout = getattr(sys.stdout, "buffer", None)
+        if binary_stdout is not None:
+            written = binary_stdout.write(raw)
+        else:
+            text = raw.decode("ascii")
+            written = sys.stdout.write(text)
+        if written != expected:
             raise _InternalReportFailure("report output failed")
     except _InternalReportFailure:
         raise
@@ -450,7 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     except _InternalReportFailure:
         _emit_error(INTERNAL_REPORT_FAILURE)
         return 2
-    except (OSError, TypeError, ValueError, OverflowError):
+    except (OSError, TypeError, ValueError, OverflowError, AttributeError, RuntimeError):
         # Any untyped ordinary failure remains a fixed internal refusal.  No
         # exception text or selected-path data crosses the command boundary.
         _emit_error(INTERNAL_REPORT_FAILURE)

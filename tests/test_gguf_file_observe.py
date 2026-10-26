@@ -261,6 +261,67 @@ class GgufFileObserveRefusalDeltaTests(unittest.TestCase):
 
         self.assertLessEqual(len(stderr.encode("ascii")), observer.MAX_ERROR_BYTES)
 
+    def test_parser_fault_categories_are_typed_and_none_is_internal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "model"
+            path.write_bytes(gguf())
+            for fault in (
+                TypeError("parser detail"),
+                ValueError("parser detail"),
+                OverflowError("parser detail"),
+                AttributeError("parser detail"),
+                RuntimeError("parser detail"),
+            ):
+                with self.subTest(fault=type(fault).__name__), patch.object(
+                    observer, "validate_gguf_fd", side_effect=fault
+                ):
+                    status, stdout, stderr = self._run([str(path)])
+                self.assertEqual(
+                    (2, "", f"{observer.INTERNAL_REPORT_FAILURE}\n"),
+                    (status, stdout, stderr),
+                )
+
+            with patch.object(observer, "validate_gguf_fd", return_value=None):
+                status, stdout, stderr = self._run([str(path)])
+            self.assertEqual(
+                (2, "", f"{observer.INTERNAL_REPORT_FAILURE}\n"),
+                (status, stdout, stderr),
+            )
+
+            with patch.object(observer, "validate_gguf_fd", side_effect=JsonInputError("header")):
+                status, stdout, stderr = self._run([str(path)])
+            self.assertEqual(
+                (2, "", f"{observer.NOT_USABLE_GGUF}\n"),
+                (status, stdout, stderr),
+            )
+
+            with patch.object(observer, "validate_gguf_fd", side_effect=OSError("read detail")):
+                status, stdout, stderr = self._run([str(path)])
+            self.assertEqual(
+                (2, "", f"{observer.FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE}\n"),
+                (status, stdout, stderr),
+            )
+
+    def test_regular_size_boundary_tokens_are_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            short = root / "short"
+            short.write_bytes(b"x" * (observer.MIN_FILE_BYTES - 1))
+            status, stdout, stderr = self._run([str(short)])
+            self.assertEqual(
+                (2, "", f"{observer.NOT_USABLE_GGUF}\n"),
+                (status, stdout, stderr),
+            )
+
+            oversized = root / "oversized"
+            oversized.write_bytes(gguf())
+            with patch.object(observer, "MAX_FILE_BYTES", observer.MIN_FILE_BYTES):
+                status, stdout, stderr = self._run([str(oversized)])
+            self.assertEqual(
+                (2, "", f"{observer.FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE}\n"),
+                (status, stdout, stderr),
+            )
+
     def test_existing_malformed_header_variants_use_not_usable_token(self) -> None:
         invalid = (
             b"GGUF" + b"\0" * (observer.MIN_FILE_BYTES - 4),

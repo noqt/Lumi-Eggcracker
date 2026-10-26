@@ -200,6 +200,10 @@ one fixed ASCII token to stderr: `USAGE`,
 path and exception details are never included. Stdout is empty when refusal
 happens before report output starts; if output has already started and then
 fails, the observer does not claim that partial output was rolled back.
+An initially accessible regular file shorter than the fixed minimum is
+`NOT_USABLE_GGUF`; an oversized selection remains
+`FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE`. Parser faults are categorized only
+after the safe post-state checks, so an evidenced mutation wins.
 
 Successful output reports only facts read from that selected file: the GGUF
 version and content evidence ID, a size bucket, the number of inspected prefix
