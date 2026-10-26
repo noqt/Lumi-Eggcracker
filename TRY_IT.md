@@ -209,6 +209,21 @@ An initially accessible regular file shorter than the fixed minimum is
 `FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE`. Parser faults are categorized only
 after the safe post-state checks, so an evidenced mutation wins.
 
+### Act on a refusal token without sharing file details
+
+Every status `2` result remains a refusal, not job completion.
+
+Copy only one exact recognized refusal token. Never share filename, local path, model bytes, raw stderr, command output, partial stdout or exception text.
+
+A tool commit or archive digest identifies the tool only; it does not identify
+or establish any property of the selected file.
+
+- `USAGE` — Run again with exactly one local file argument. Do not paste or transmit the argument.
+- `FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE` — Do not bypass the refusal. Select only a readable ordinary local file that is not a link/reparse point, directory/device, missing, oversized or otherwise unsupported. The token intentionally collapses these cases and cannot identify the subtype; stop if the distinction cannot be made locally.
+- `NOT_USABLE_GGUF` — Do not treat this as proof of universal invalidity or loader incompatibility. Confirm intended format and, where an independently trusted expected digest exists, verify the full file through an appropriate full-file mechanism before deciding whether to reacquire it. A matching trusted full-file digest establishes byte equality only; it does not establish GGUF usability, loader compatibility, safety, provenance or authentication. The bounded preview cannot authenticate or validate the whole file.
+- `FILE_CHANGED_DURING_OBSERVATION` — Discard the observation. Wait until any download, sync or writer has finished. Then, if permitted, make a stable ordinary-file copy and rerun. Do not act on or share partial output.
+- `INTERNAL_REPORT_FAILURE` — Treat this as a tool/reporting failure, not evidence against the selected file. Stop; retain only the exact token plus the exact tool commit or archive digest for a permissioned support report. Keep the file and path private.
+
 Successful output reports only facts read from that selected file: the GGUF
 version and content evidence ID, a size bucket, the number of inspected prefix
 bytes, and a SHA-256 digest whose scope is explicitly `first_prefix_only`.
