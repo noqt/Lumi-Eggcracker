@@ -44,7 +44,6 @@ USERADD = Path("/usr/sbin/useradd")
 USERDEL = Path("/usr/sbin/userdel")
 GROUPADD = Path("/usr/sbin/groupadd")
 GROUPDEL = Path("/usr/sbin/groupdel")
-GIT = Path("/usr/bin/git")
 CLI = ROOT / "scripts" / "brokered_operator_demo.py"
 
 SERVICE_UID = 1200
@@ -58,6 +57,9 @@ IPC_GROUP_NAME = "eggcracker_qual_ipc"
 QUALIFICATION_WORKFLOW = "brokered recovery native qualification"
 QUALIFICATION_EVENT = "pull_request"
 QUALIFICATION_BRANCH = "codex/eggcracker-recovery-native-20261027-439"
+IDENTITY_DESCRIPTOR_SCHEMA = "lumi-eggcracker.native-recovery-identity.v1"
+MAX_DESCRIPTOR_BYTES = 64 * 1024
+FIXED_QUALIFICATION_UIDS = frozenset((SERVICE_UID, WORKLOAD_UID, PEER_UID))
 
 SOCKET_DIRECTORY_MODE = 0o710
 SOCKET_MODE = 0o660
@@ -262,7 +264,7 @@ def _host_gate() -> None:
         _raise_inconclusive("SYSTEM_PYTHON_REQUIRED")
     if invoked_python != configured_python:
         _raise_inconclusive("SYSTEM_PYTHON_REQUIRED")
-    for tool in (PYTHON, SETPRIV, USERADD, USERDEL, GROUPADD, GROUPDEL, GIT):
+    for tool in (PYTHON, SETPRIV, USERADD, USERDEL, GROUPADD, GROUPDEL):
         if not tool.is_file() or not os.access(tool, os.X_OK):
             _raise_inconclusive("REQUIRED_HOST_COMMAND_MISSING")
     if not CLI.is_file() or CLI.is_symlink():
@@ -311,43 +313,123 @@ def _validate_result_target(raw_path: str) -> tuple[Path, Path, Path]:
     return path, runner_temp_resolved, parent_resolved
 
 
-def _git_value(argument: str, pattern: re.Pattern[str], code: str) -> str:
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            _raise_inconclusive("IDENTITY_DESCRIPTOR_DUPLICATE_KEY")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(_: str) -> Any:
+    _raise_inconclusive("IDENTITY_DESCRIPTOR_JSON_INVALID")
+
+
+def _validate_identity_descriptor(
+    raw_path: str,
+    result_parent: Path,
+    runner_temp: Path,
+) -> dict[str, Any]:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_PATH_INVALID")
     try:
-        completed = subprocess.run(
-            [os.fspath(GIT), "rev-parse", argument],
-            cwd=ROOT,
-            env={
-                "PATH": "/usr/bin:/bin",
-                "LC_ALL": "C",
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-            },
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=5,
+        raw_parent_metadata = path.parent.lstat()
+        descriptor_parent = path.parent.resolve(strict=True)
+        descriptor_resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_PATH_UNAVAILABLE")
+    if stat.S_ISLNK(raw_parent_metadata.st_mode):
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_DIRECTORY_INVALID")
+    if descriptor_parent.parent != runner_temp or descriptor_parent == result_parent:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_DIRECTORY_INVALID")
+    if descriptor_resolved.parent != descriptor_parent:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_PATH_INVALID")
+    runner_metadata = _lstat(runner_temp, "RUNNER_TEMP_UNAVAILABLE")
+    checkout_metadata = _lstat(ROOT, "CHECKOUT_UNAVAILABLE")
+    parent_metadata = _lstat(descriptor_parent, "IDENTITY_DESCRIPTOR_DIRECTORY_UNAVAILABLE")
+    if (
+        stat.S_ISLNK(parent_metadata.st_mode)
+        or not stat.S_ISDIR(parent_metadata.st_mode)
+        or stat.S_IMODE(parent_metadata.st_mode) != 0o700
+        or runner_metadata.st_uid == 0
+        or runner_metadata.st_uid in FIXED_QUALIFICATION_UIDS
+        or checkout_metadata.st_uid != runner_metadata.st_uid
+        or parent_metadata.st_uid != runner_metadata.st_uid
+    ):
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_OWNER_INVALID")
+    try:
+        entries = tuple(descriptor_parent.iterdir())
+    except OSError:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_DIRECTORY_UNREADABLE")
+    if len(entries) != 1 or entries[0].name != path.name:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_DIRECTORY_NOT_FRESH")
+    try:
+        descriptor_lstat = path.lstat()
+    except FileNotFoundError:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_UNAVAILABLE")
+    except OSError:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_UNAVAILABLE")
+    if (
+        stat.S_ISLNK(descriptor_lstat.st_mode)
+        or descriptor_lstat.st_uid != runner_metadata.st_uid
+        or stat.S_IMODE(descriptor_lstat.st_mode) != 0o600
+    ):
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_OWNER_INVALID")
+    try:
+        raw, metadata = _read_regular(
+            path,
+            MAX_DESCRIPTOR_BYTES,
+            "IDENTITY_DESCRIPTOR_INVALID",
+            missing_code="IDENTITY_DESCRIPTOR_UNAVAILABLE",
         )
-    except (OSError, subprocess.TimeoutExpired):
-        _raise_inconclusive(code)
-    if completed.returncode != 0:
-        _raise_inconclusive(code)
+    except AssertionFailure:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_INVALID")
+    if (
+        metadata.st_uid != runner_metadata.st_uid
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+    ):
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_OWNER_INVALID")
     try:
-        value = completed.stdout.decode("ascii").strip()
+        decoded = raw.decode("utf-8", errors="strict")
+        value = json.loads(
+            decoded,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant,
+        )
     except UnicodeDecodeError:
-        _raise_inconclusive(code)
-    if not pattern.fullmatch(value):
-        _raise_inconclusive(code)
-    return value
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_JSON_INVALID")
+    except json.JSONDecodeError:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_JSON_INVALID")
+    if not isinstance(value, dict) or set(value) != {"schema_version", "commit", "tree", "paths"}:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_SHAPE_INVALID")
+    if value.get("schema_version") != IDENTITY_DESCRIPTOR_SCHEMA:
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_SCHEMA_INVALID")
+    commit = value.get("commit")
+    tree = value.get("tree")
+    paths = value.get("paths")
+    if not isinstance(commit, str) or not _HEX40.fullmatch(commit):
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_COMMIT_INVALID")
+    if not isinstance(tree, str) or not _HEX40.fullmatch(tree):
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_TREE_INVALID")
+    if not isinstance(paths, dict) or len(paths) != len(QUALIFICATION_PATHS) or set(paths) != set(QUALIFICATION_PATHS):
+        _raise_inconclusive("IDENTITY_DESCRIPTOR_PATHS_INVALID")
+    for relative in QUALIFICATION_PATHS:
+        digest = paths.get(relative)
+        if not isinstance(digest, str) or not _HEX64.fullmatch(digest):
+            _raise_inconclusive("IDENTITY_DESCRIPTOR_HASH_INVALID")
+    return {"commit": commit, "tree": tree, "paths": dict(paths)}
 
 
-def _candidate_identity() -> dict[str, str]:
-    commit = _git_value("HEAD", _HEX40, "CANDIDATE_COMMIT_UNAVAILABLE")
-    tree = _git_value("HEAD^{tree}", _HEX40, "CANDIDATE_TREE_UNAVAILABLE")
-    return {"commit": commit, "tree": tree}
-
-
-def _read_regular(path: Path, maximum: int, code: str) -> tuple[bytes, os.stat_result]:
+def _read_regular(
+    path: Path,
+    maximum: int,
+    code: str,
+    *,
+    missing_code: str | None = None,
+) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor: int | None = None
     try:
@@ -380,6 +462,8 @@ def _read_regular(path: Path, maximum: int, code: str) -> tuple[bytes, os.stat_r
             _raise_failure(code)
         return b"".join(chunks), after
     except FileNotFoundError:
+        if missing_code is not None:
+            _raise_inconclusive(missing_code)
         _raise_failure(code)
     except OSError:
         _raise_inconclusive(code)
@@ -397,12 +481,62 @@ def _file_hash(relative: str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _assert_checkout_permissions() -> None:
+    runner_temp_raw = os.environ.get("RUNNER_TEMP")
+    if not runner_temp_raw:
+        _raise_inconclusive("RUNNER_TEMP_REQUIRED")
+    try:
+        runner_temp = Path(runner_temp_raw).resolve(strict=True)
+        workspace_boundary = Path(
+            os.path.commonpath((os.fspath(ROOT), os.fspath(runner_temp)))
+        )
+    except (OSError, RuntimeError, ValueError):
+        _raise_inconclusive("RUNNER_TEMP_UNAVAILABLE")
+    if workspace_boundary == workspace_boundary.parent:
+        _raise_inconclusive("CHECKOUT_WORKSPACE_BOUNDARY_INVALID")
+    checked_directories: set[Path] = set()
+    for relative in QUALIFICATION_PATHS:
+        path = ROOT / relative
+        metadata = _lstat(path, "SOURCE_FILE_UNAVAILABLE")
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid in FIXED_QUALIFICATION_UIDS
+            or stat.S_IMODE(metadata.st_mode) & 0o022
+        ):
+            _raise_inconclusive("CHECKOUT_FILE_PERMISSIONS_INVALID")
+        cursor = path.parent
+        while True:
+            if cursor in checked_directories:
+                break
+            directory_metadata = _lstat(cursor, "CHECKOUT_DIRECTORY_UNAVAILABLE")
+            if (
+                stat.S_ISLNK(directory_metadata.st_mode)
+                or not stat.S_ISDIR(directory_metadata.st_mode)
+                or directory_metadata.st_uid in FIXED_QUALIFICATION_UIDS
+                or stat.S_IMODE(directory_metadata.st_mode) & 0o022
+            ):
+                _raise_inconclusive("CHECKOUT_DIRECTORY_PERMISSIONS_INVALID")
+            checked_directories.add(cursor)
+            if cursor == workspace_boundary:
+                break
+            if (
+                workspace_boundary not in cursor.parents
+                and cursor != workspace_boundary
+            ):
+                _raise_inconclusive("CHECKOUT_DIRECTORY_BOUNDARY_INVALID")
+            cursor = cursor.parent
+
+
 def _source_hashes() -> dict[str, str]:
+    _assert_checkout_permissions()
     return {relative: _file_hash(relative) for relative in QUALIFICATION_PATHS}
 
 
-def _validate_source_preimages() -> dict[str, str]:
+def _validate_source_preimages(descriptor_paths: dict[str, str]) -> dict[str, str]:
     values = _source_hashes()
+    if values != descriptor_paths:
+        _raise_failure("SOURCE_DESCRIPTOR_DRIFT")
     for relative, expected in ACCEPTED_438_HASHES.items():
         if values.get(relative) != expected:
             _raise_failure("ACCEPTED_438_SOURCE_DRIFT")
@@ -1561,7 +1695,10 @@ def _setup_store(
     return setup
 
 
-def _run_qualification(result_path: Path) -> tuple[str, str, dict[str, Any]]:
+def _run_qualification(
+    result_path: Path,
+    identity_descriptor_path: Path,
+) -> tuple[str, str, dict[str, Any]]:
     tracker = RunTracker()
     owned: list[OwnedPath] = []
     created: list[ProvisionedIdentity] = []
@@ -1604,6 +1741,19 @@ def _run_qualification(result_path: Path) -> tuple[str, str, dict[str, Any]]:
             "control_plane": ["github_checkout", "github_artifact_upload"],
         },
         "source": {"pre": {}, "post": {}, "accepted_438_unchanged": False},
+        "identity_evidence": {
+            "checkout_owner_git_identity": {
+                "label": "checkout_owner_git_identity",
+                "commit": None,
+                "tree": None,
+                "descriptor_target": "RUNNER_TEMP/brokered-recovery-native-identity/descriptor.json",
+            },
+            "root_eight_file_bytes": {
+                "label": "root_eight_file_bytes",
+                "pre": {},
+                "post": {},
+            },
+        },
         "setup": {},
         "recovery": {},
         "commands": {},
@@ -1613,12 +1763,26 @@ def _run_qualification(result_path: Path) -> tuple[str, str, dict[str, Any]]:
     status = "INCONCLUSIVE"
     reason = "NOT_STARTED"
     pre_hashes: dict[str, str] = {}
+    descriptor_paths: dict[str, str] = {}
     try:
         _host_gate()
-        _validate_result_target(os.fspath(result_path))
-        evidence["candidate"] = _candidate_identity()
-        pre_hashes = _validate_source_preimages()
+        _, runner_temp, result_parent = _validate_result_target(os.fspath(result_path))
+        descriptor = _validate_identity_descriptor(
+            os.fspath(identity_descriptor_path),
+            result_parent,
+            runner_temp,
+        )
+        descriptor_paths = descriptor["paths"]
+        evidence["candidate"] = {
+            "commit": descriptor["commit"],
+            "tree": descriptor["tree"],
+        }
+        evidence["identity_evidence"]["checkout_owner_git_identity"].update(
+            {"commit": descriptor["commit"], "tree": descriptor["tree"]}
+        )
+        pre_hashes = _validate_source_preimages(descriptor_paths)
         evidence["source"]["pre"] = pre_hashes
+        evidence["identity_evidence"]["root_eight_file_bytes"]["pre"] = pre_hashes
         _provision_identities(tracker, created)
         task_root = result_path.parent / "work"
         _prepare_owned_directory(
@@ -1900,8 +2064,11 @@ def _run_qualification(result_path: Path) -> tuple[str, str, dict[str, Any]]:
 
         post_hashes = _source_hashes()
         evidence["source"]["post"] = post_hashes
+        evidence["identity_evidence"]["root_eight_file_bytes"]["post"] = post_hashes
         if post_hashes != pre_hashes:
             _raise_failure("SOURCE_DRIFT_DURING_RUN")
+        if post_hashes != descriptor_paths:
+            _raise_failure("SOURCE_DESCRIPTOR_DRIFT")
         evidence["source"]["accepted_438_unchanged"] = all(
             post_hashes.get(relative) == expected for relative, expected in ACCEPTED_438_HASHES.items()
         )
@@ -1943,9 +2110,13 @@ def _run_qualification(result_path: Path) -> tuple[str, str, dict[str, Any]]:
         try:
             if pre_hashes:
                 evidence["source"]["post"] = _source_hashes()
+                evidence["identity_evidence"]["root_eight_file_bytes"]["post"] = evidence["source"]["post"]
                 if evidence["source"]["post"] != pre_hashes and status != "FAIL":
                     status = "FAIL"
                     reason = "SOURCE_DRIFT_DURING_RUN"
+                if descriptor_paths and evidence["source"]["post"] != descriptor_paths and status != "FAIL":
+                    status = "FAIL"
+                    reason = "SOURCE_DESCRIPTOR_DRIFT"
         # Source post-hashing is evidence; an unexpected read/hash failure
         # must downgrade PASS without exposing the raw exception.
         except Exception:  # noqa: BLE001 - preserve sanitized posthash outcome.
@@ -1960,11 +2131,13 @@ def _run_qualification(result_path: Path) -> tuple[str, str, dict[str, Any]]:
         name: count for name, count in sorted(tracker.command_counts.items())
     }
     fixed_launches = tracker.command_counts.get("setpriv", 0)
-    evidence["identity_evidence"] = {
-        "setpriv_fixed_launches": fixed_launches,
-        "observed_non_root_children": tracker.child_identity_observations,
-        "direct_observation_complete": tracker.child_identity_observations == fixed_launches,
-    }
+    evidence["identity_evidence"].update(
+        {
+            "setpriv_fixed_launches": fixed_launches,
+            "observed_non_root_children": tracker.child_identity_observations,
+            "direct_observation_complete": tracker.child_identity_observations == fixed_launches,
+        }
+    )
     return status, reason, evidence
 
 
@@ -1975,14 +2148,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--state-dir")
     parser.add_argument("--socket")
     parser.add_argument("--requests", type=int)
+    parser.add_argument("--identity-descriptor")
     arguments = parser.parse_args(argv)
     if arguments.service_child:
-        if arguments.result or arguments.state_dir is None or arguments.socket is None or arguments.requests is None:
+        if (
+            arguments.result
+            or arguments.identity_descriptor is not None
+            or arguments.state_dir is None
+            or arguments.socket is None
+            or arguments.requests is None
+        ):
             return 70
         return _service_child(arguments)
-    if arguments.result is None:
+    if arguments.result is None or arguments.identity_descriptor is None:
         return 70
-    if arguments.state_dir is not None or arguments.socket is not None or arguments.requests is not None:
+    if (
+        arguments.state_dir is not None
+        or arguments.socket is not None
+        or arguments.requests is not None
+    ):
         return 70
     result_path = Path(arguments.result)
     try:
@@ -1990,7 +2174,10 @@ def main(argv: list[str] | None = None) -> int:
     except Inconclusive:
         return 2
     try:
-        status, _, evidence = _run_qualification(result_path)
+        status, _, evidence = _run_qualification(
+            result_path,
+            Path(arguments.identity_descriptor),
+        )
         _write_result(result_path, evidence)
     except Inconclusive as error:
         # A valid result target is required before the orchestrator can emit a

@@ -143,25 +143,223 @@ jobs:
               || refuse ACCEPTED_438_SOURCE_DRIFT
           done
 
-          for candidate_path in \
-            scripts/qualify_brokered_recovery.py \
-            .github/workflows/brokered-recovery-qualification.yml
-          do
-            committed_blob="$(git rev-parse "$head_sha:$candidate_path")" \
-              || refuse CANDIDATE_BLOB_UNAVAILABLE
-            working_blob="$(git hash-object "$candidate_path")" \
-              || refuse CANDIDATE_BLOB_UNAVAILABLE
-            test "$committed_blob" = "$working_blob" || refuse CANDIDATE_BLOB_DRIFT
+          identity_child="$RUNNER_TEMP/brokered-recovery-native-identity"
+          result_child="$RUNNER_TEMP/brokered-recovery-native-qualification"
+          test "$identity_child" != "$result_child" || refuse TEMP_CHILD_COLLISION
+          for fresh_child in "$identity_child" "$result_child"; do
+            test ! -e "$fresh_child" && test ! -L "$fresh_child" || refuse TEMP_CHILD_COLLISION
+            mkdir "$fresh_child" || refuse TEMP_CHILD_CREATE_FAILED
+            chmod 0700 "$fresh_child" || refuse TEMP_CHILD_PERMISSION_FAILED
+            test -d "$fresh_child" || refuse TEMP_CHILD_INVALID
+            test -z "$(find "$fresh_child" -mindepth 1 -maxdepth 1 -print -quit)" \
+              || refuse TEMP_CHILD_NOT_FRESH
           done
 
-          fresh_child="$RUNNER_TEMP/brokered-recovery-native-qualification"
-          test ! -e "$fresh_child" && test ! -L "$fresh_child" || refuse TEMP_CHILD_COLLISION
-          mkdir "$fresh_child" || refuse TEMP_CHILD_CREATE_FAILED
-          chmod 0700 "$fresh_child" || refuse TEMP_CHILD_PERMISSION_FAILED
-          test -d "$fresh_child" || refuse TEMP_CHILD_INVALID
-          test -z "$(find "$fresh_child" -mindepth 1 -maxdepth 1 -print -quit)" \
-            || refuse TEMP_CHILD_NOT_FRESH
-          printf 'result_path=%s/result.json\n' "$fresh_child" >> "$GITHUB_OUTPUT"
+          /usr/bin/python3 -I -S - "$head_sha" <<'PY'
+          import hashlib
+          import json
+          import os
+          import stat
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          MAX_BYTES = 8 * 1024 * 1024
+          SCHEMA = "lumi-eggcracker.native-recovery-identity.v1"
+          FIXED_UIDS = {1200, 1201, 1202}
+          HEAD_SHA = sys.argv[1]
+          ROOT = Path.cwd()
+          RUNNER_TEMP = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+          IDENTITY_DIR = RUNNER_TEMP / "brokered-recovery-native-identity"
+          RESULT_DIR = RUNNER_TEMP / "brokered-recovery-native-qualification"
+          DESCRIPTOR = IDENTITY_DIR / "descriptor.json"
+          PATHS = (
+              ".github/workflows/brokered-recovery-qualification.yml",
+              "docs/BROKERED_OPERATOR.md",
+              "scripts/brokered_operator_demo.py",
+              "scripts/qualify_brokered_recovery.py",
+              "src/lumi_eggcracker/brokered/linux_ipc.py",
+              "src/lumi_eggcracker/brokered/operator.py",
+              "tests/test_brokered_linux_ipc.py",
+              "tests/test_brokered_operator.py",
+          )
+          ACCEPTED = {
+              "src/lumi_eggcracker/brokered/operator.py": "d770da780fbb061598f87348a091eeb9bf441d80bb381f8315ad2913f6285647",
+              "src/lumi_eggcracker/brokered/linux_ipc.py": "adb991834fd79506ddcb6a784f51f746c330c557013e09958552370a9e8bb2b9",
+              "scripts/brokered_operator_demo.py": "6b7c8b0fb1ad083f3059ecbd4e1d4cd0bed073845c99ce3d538ec34e4a6e5fe4",
+              "tests/test_brokered_operator.py": "2c4feacdfc873a10f6656b599d9adbb7b9b95dfdba85ebe2f663c4868e32187c",
+              "tests/test_brokered_linux_ipc.py": "35240da865c6f1029162904c04607261f23b7524b183484773f48dfb43ef5245",
+              "docs/BROKERED_OPERATOR.md": "532c45fd0e7c3224bd0927548737772c0db89a7ee7baab3aead5c938d45dc5b0",
+          }
+
+          def refuse():
+              raise SystemExit(1)
+
+          if len(HEAD_SHA) != 40 or any(character not in "0123456789abcdef" for character in HEAD_SHA):
+              refuse()
+          if os.getuid() == 0 or os.getuid() in FIXED_UIDS:
+              refuse()
+          if not hasattr(os, "O_NOFOLLOW"):
+              refuse()
+
+          def check_fresh_directory(path):
+              try:
+                  metadata = os.lstat(path)
+                  entries = tuple(path.iterdir())
+              except OSError:
+                  refuse()
+              if (
+                  stat.S_ISLNK(metadata.st_mode)
+                  or not stat.S_ISDIR(metadata.st_mode)
+                  or metadata.st_uid != os.getuid()
+                  or stat.S_IMODE(metadata.st_mode) != 0o700
+                  or entries
+              ):
+                  refuse()
+
+          if IDENTITY_DIR.parent != RUNNER_TEMP or RESULT_DIR.parent != RUNNER_TEMP:
+              refuse()
+          if IDENTITY_DIR == RESULT_DIR:
+              refuse()
+          check_fresh_directory(IDENTITY_DIR)
+          check_fresh_directory(RESULT_DIR)
+          try:
+              root_metadata = os.lstat(ROOT)
+          except OSError:
+              refuse()
+          if stat.S_ISLNK(root_metadata.st_mode) or root_metadata.st_uid != os.getuid():
+              refuse()
+
+          def read_working(path):
+              descriptor = None
+              try:
+                  descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                  before = os.fstat(descriptor)
+                  if (
+                      not stat.S_ISREG(before.st_mode)
+                      or before.st_nlink != 1
+                      or before.st_size < 0
+                      or before.st_size > MAX_BYTES
+                  ):
+                      refuse()
+                  chunks = []
+                  total = 0
+                  while True:
+                      chunk = os.read(descriptor, min(65536, MAX_BYTES + 1 - total))
+                      if not chunk:
+                          break
+                      total += len(chunk)
+                      if total > MAX_BYTES:
+                          refuse()
+                      chunks.append(chunk)
+                  after = os.fstat(descriptor)
+              except OSError:
+                  refuse()
+              finally:
+                  if descriptor is not None:
+                      os.close(descriptor)
+              if (
+                  (before.st_dev, before.st_ino, before.st_size)
+                  != (after.st_dev, after.st_ino, after.st_size)
+                  or total != after.st_size
+              ):
+                  refuse()
+              return b"".join(chunks)
+
+          def read_committed(relative):
+              try:
+                  completed = subprocess.run(
+                      ["git", "cat-file", "blob", f"{HEAD_SHA}:{relative}"],
+                      cwd=ROOT,
+                      stdin=subprocess.DEVNULL,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL,
+                      check=False,
+                      timeout=10,
+                  )
+              except (OSError, subprocess.TimeoutExpired):
+                  refuse()
+              if completed.returncode != 0 or len(completed.stdout) > MAX_BYTES:
+                  refuse()
+              return completed.stdout
+
+          try:
+              tree = subprocess.run(
+                  ["git", "rev-parse", f"{HEAD_SHA}^{{tree}}"],
+                  cwd=ROOT,
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+                  timeout=10,
+              )
+          except (OSError, subprocess.TimeoutExpired):
+              refuse()
+          tree_value = tree.stdout.decode("ascii", errors="strict").strip()
+          if tree.returncode != 0 or len(tree_value) != 40 or any(character not in "0123456789abcdef" for character in tree_value):
+              refuse()
+
+          paths = {}
+          for relative in PATHS:
+              committed = read_committed(relative)
+              working = read_working(ROOT / relative)
+              committed_hash = hashlib.sha256(committed).hexdigest()
+              working_hash = hashlib.sha256(working).hexdigest()
+              if committed_hash != working_hash:
+                  refuse()
+              if relative in ACCEPTED and committed_hash != ACCEPTED[relative]:
+                  refuse()
+              paths[relative] = committed_hash
+
+          encoded = (
+              json.dumps(
+                  {
+                      "schema_version": SCHEMA,
+                      "commit": HEAD_SHA,
+                      "tree": tree_value,
+                      "paths": paths,
+                  },
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+                  allow_nan=False,
+              )
+              + "\n"
+          ).encode("utf-8")
+          descriptor_fd = None
+          try:
+              descriptor_fd = os.open(
+                  DESCRIPTOR,
+                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                  0o600,
+              )
+              os.fchmod(descriptor_fd, 0o600)
+              view = memoryview(encoded)
+              while view:
+                  written = os.write(descriptor_fd, view)
+                  if written <= 0:
+                      refuse()
+                  view = view[written:]
+              os.fsync(descriptor_fd)
+          except OSError:
+              refuse()
+          finally:
+              if descriptor_fd is not None:
+                  os.close(descriptor_fd)
+          descriptor_metadata = os.lstat(DESCRIPTOR)
+          if (
+              stat.S_ISLNK(descriptor_metadata.st_mode)
+              or not stat.S_ISREG(descriptor_metadata.st_mode)
+              or descriptor_metadata.st_nlink != 1
+              or descriptor_metadata.st_uid != os.getuid()
+              or stat.S_IMODE(descriptor_metadata.st_mode) != 0o600
+          ):
+              refuse()
+          if len(tuple(IDENTITY_DIR.iterdir())) != 1 or len(tuple(RESULT_DIR.iterdir())) != 0:
+              refuse()
+          PY
+          printf 'identity_descriptor=%s/descriptor.json\n' "$identity_child" >> "$GITHUB_OUTPUT"
+          printf 'result_path=%s/result.json\n' "$result_child" >> "$GITHUB_OUTPUT"
           printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
           printf 'BROKERED_RECOVERY_PREFLIGHT=PASS\n'
 
@@ -171,8 +369,9 @@ jobs:
         run: |
           set +e
           result_path="${{ steps.preflight.outputs.result_path }}"
+          identity_descriptor="${{ steps.preflight.outputs.identity_descriptor }}"
           sudo -n --preserve-env=RUNNER_ENVIRONMENT,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_SERVER_URL,GITHUB_EVENT_NAME,GITHUB_BASE_REF,GITHUB_HEAD_REF,GITHUB_WORKFLOW,RUNNER_TEMP /usr/bin/python3 -I -S \
-            scripts/qualify_brokered_recovery.py --result "$result_path"
+            scripts/qualify_brokered_recovery.py --result "$result_path" --identity-descriptor "$identity_descriptor"
           qualification_status=$?
           set -e
           if [[ -f "$result_path" && ! -L "$result_path" ]]; then
