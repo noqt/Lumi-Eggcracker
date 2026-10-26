@@ -33,7 +33,35 @@ MAX_PROFILE_GROUPS = 8
 MAX_GROUP_VALUES = 16
 MAX_LIST_ITEMS = 32
 
-ERROR_TEXT = "file evidence observation refused\n"
+USAGE = "USAGE"
+FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE = "FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE"
+NOT_USABLE_GGUF = "NOT_USABLE_GGUF"
+FILE_CHANGED_DURING_OBSERVATION = "FILE_CHANGED_DURING_OBSERVATION"
+INTERNAL_REPORT_FAILURE = "INTERNAL_REPORT_FAILURE"
+
+
+class _ObservationFailure(JsonInputError):
+    """Typed refusal boundary for the command-line observer."""
+
+    token = INTERNAL_REPORT_FAILURE
+
+
+class _FileUnavailableFailure(_ObservationFailure):
+    token = FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE
+
+
+class _NotUsableGgufFailure(_ObservationFailure):
+    token = NOT_USABLE_GGUF
+
+
+class _FileChangedFailure(_ObservationFailure):
+    token = FILE_CHANGED_DURING_OBSERVATION
+
+
+class _InternalReportFailure(_ObservationFailure):
+    token = INTERNAL_REPORT_FAILURE
+
+
 CONTENT_GROUPS = ("MODEL_CONTENT", "MODEL_RUNTIME", "MODEL_TOPOLOGY")
 LIMITATIONS = (
     "file evidence does not establish runtime or topology",
@@ -83,15 +111,15 @@ def _path_argument(path: str | os.PathLike[str]) -> str | bytes:
     try:
         value = os.fspath(path)
     except (TypeError, ValueError) as error:
-        raise JsonInputError("selected path is invalid") from error
+        raise _FileUnavailableFailure("selected path is invalid") from error
     if not isinstance(value, (str, bytes)) or not value:
-        raise JsonInputError("selected path is invalid")
+        raise _FileUnavailableFailure("selected path is invalid")
     try:
         encoded = os.fsencode(value)
     except (TypeError, UnicodeError) as error:
-        raise JsonInputError("selected path is invalid") from error
+        raise _FileUnavailableFailure("selected path is invalid") from error
     if not encoded or len(encoded) > MAX_PATH_BYTES or b"\0" in encoded:
-        raise JsonInputError("selected path exceeds the fixed limit")
+        raise _FileUnavailableFailure("selected path exceeds the fixed limit")
     return value
 
 
@@ -110,7 +138,7 @@ def _stable_identity(metadata: os.stat_result) -> _StableIdentity:
             int(metadata.st_mode),
         )
     except (AttributeError, TypeError, ValueError, OverflowError) as error:
-        raise JsonInputError("file identity is unavailable") from error
+        raise _FileUnavailableFailure("file identity is unavailable") from error
 
 
 def _change_marker(metadata: os.stat_result) -> _ChangeMarker:
@@ -118,36 +146,38 @@ def _change_marker(metadata: os.stat_result) -> _ChangeMarker:
     try:
         mtime_ns = int(metadata.st_mtime_ns)
     except (AttributeError, TypeError, ValueError, OverflowError) as error:
-        raise JsonInputError("file change marker is unavailable") from error
+        raise _FileUnavailableFailure("file change marker is unavailable") from error
     return _ChangeMarker(identity, mtime_ns)
 
 
 def _check_regular(metadata: os.stat_result) -> _StableIdentity:
     if stat.S_ISLNK(metadata.st_mode) or _is_reparse(metadata):
-        raise JsonInputError("selected path must not be a link or reparse point")
+        raise _FileUnavailableFailure("selected path must not be a link or reparse point")
     if not stat.S_ISREG(metadata.st_mode):
-        raise JsonInputError("selected path must be a regular file")
+        raise _FileUnavailableFailure("selected path must be a regular file")
     identity = _stable_identity(metadata)
     if not MIN_FILE_BYTES <= identity.size <= MAX_FILE_BYTES:
-        raise JsonInputError("selected file size is outside the fixed limit")
+        raise _FileUnavailableFailure("selected file size is outside the fixed limit")
     return identity
 
 
-def _lstat(path: str | bytes) -> os.stat_result:
+def _lstat(path: str | bytes, *, check: bool = True) -> os.stat_result:
     try:
         metadata = os.lstat(path)
     except (OSError, ValueError) as error:
-        raise JsonInputError("selected file cannot be inspected") from error
-    _check_regular(metadata)
+        raise _FileUnavailableFailure("selected file cannot be inspected") from error
+    if check:
+        _check_regular(metadata)
     return metadata
 
 
-def _fstat(descriptor: int) -> os.stat_result:
+def _fstat(descriptor: int, *, check: bool = True) -> os.stat_result:
     try:
         metadata = os.fstat(descriptor)
     except (OSError, ValueError) as error:
-        raise JsonInputError("opened file identity is unavailable") from error
-    _check_regular(metadata)
+        raise _FileUnavailableFailure("opened file identity is unavailable") from error
+    if check:
+        _check_regular(metadata)
     return metadata
 
 
@@ -164,7 +194,7 @@ def _open_selected(path: str | bytes) -> int:
     try:
         return os.open(path, _open_flags())
     except (OSError, ValueError) as error:
-        raise JsonInputError("selected file cannot be opened") from error
+        raise _FileUnavailableFailure("selected file cannot be opened") from error
 
 
 def _version(evidence: ArtifactEvidence) -> int:
@@ -300,28 +330,68 @@ def observe_file(path: str | os.PathLike[str]) -> dict[str, object]:
     path_identity = _stable_identity(path_before)
     path_marker = _change_marker(path_before)
     descriptor = _open_selected(selected)
+    evidence: ArtifactEvidence | None = None
+    parser_failure: Exception | None = None
     try:
         fd_before = _fstat(descriptor)
         if _stable_identity(fd_before) != path_identity:
-            raise JsonInputError("selected path changed while opening")
+            raise _FileChangedFailure("selected path changed while opening")
         fd_marker = _change_marker(fd_before)
-        evidence = validate_gguf_fd(descriptor)
-        fd_after = _fstat(descriptor)
+        try:
+            evidence = validate_gguf_fd(descriptor)
+        except (
+            JsonInputError,
+            OSError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            AttributeError,
+            RuntimeError,
+        ) as error:
+            # Parser results are deliberately held until the existing safe
+            # post-state checks complete.  A parser refusal is not evidence of
+            # a malformed file when the selected object cannot be rechecked.
+            parser_failure = error
+        fd_after = _fstat(descriptor, check=False)
+        fd_after_identity = _stable_identity(fd_after)
         if _change_marker(fd_after) != fd_marker:
-            raise JsonInputError("selected file changed during observation")
-        path_after = _lstat(selected)
-        if _stable_identity(path_after) != path_identity:
-            raise JsonInputError("selected path changed during observation")
+            raise _FileChangedFailure("selected file changed during observation")
+        _check_regular(fd_after)
+        path_after = _lstat(selected, check=False)
+        path_after_identity = _stable_identity(path_after)
+        if path_after_identity != path_identity:
+            raise _FileChangedFailure("selected path changed during observation")
         if _change_marker(path_after) != path_marker:
-            raise JsonInputError("selected file changed during observation")
-        if _stable_identity(fd_after) != _stable_identity(path_after):
-            raise JsonInputError("selected path changed during observation")
+            raise _FileChangedFailure("selected file changed during observation")
+        if _is_reparse(path_after) != _is_reparse(path_before):
+            raise _FileChangedFailure("selected path changed during observation")
+        _check_regular(path_after)
+        if fd_after_identity != path_after_identity:
+            raise _FileChangedFailure("selected path changed during observation")
     finally:
         try:
             os.close(descriptor)
         except OSError:
             pass
-    return _report(evidence, load_bundled())
+    if parser_failure is not None:
+        if isinstance(parser_failure, OSError):
+            raise _FileUnavailableFailure("selected file cannot be validated") from parser_failure
+        raise _NotUsableGgufFailure("candidate GGUF is not usable") from parser_failure
+    if evidence is None:
+        raise _NotUsableGgufFailure("candidate GGUF is not usable")
+    try:
+        return _report(evidence, load_bundled())
+    except (
+        JsonInputError,
+        OSError,
+        TypeError,
+        ValueError,
+        OverflowError,
+        AttributeError,
+        KeyError,
+        RuntimeError,
+    ) as error:
+        raise _InternalReportFailure("file evidence report failed") from error
 
 
 def observe(path: str | os.PathLike[str]) -> dict[str, object]:
@@ -334,19 +404,24 @@ def _emit_report(report: dict[str, object]) -> None:
     try:
         raw = canonical_bytes(report)
     except (TypeError, ValueError, JsonInputError) as error:
-        raise JsonInputError("report encoding failed") from error
+        raise _InternalReportFailure("report encoding failed") from error
     if len(raw) > MAX_OUTPUT_BYTES:
-        raise JsonInputError("report exceeds the fixed output limit")
+        raise _InternalReportFailure("report exceeds the fixed output limit")
     try:
-        sys.stdout.write(raw.decode("ascii"))
-    except (UnicodeError, OSError) as error:
-        raise JsonInputError("report output failed") from error
+        text = raw.decode("ascii")
+        written = sys.stdout.write(text)
+        if written != len(text):
+            raise _InternalReportFailure("report output failed")
+    except _InternalReportFailure:
+        raise
+    except (UnicodeError, OSError, TypeError, ValueError) as error:
+        raise _InternalReportFailure("report output failed") from error
 
 
-def _emit_error() -> None:
-    message = ERROR_TEXT
+def _emit_error(token: str) -> None:
+    message = f"{token}\n"
     if len(message.encode("ascii")) > MAX_ERROR_BYTES:
-        message = "file evidence error\n"
+        message = f"{INTERNAL_REPORT_FAILURE}\n"
     try:
         sys.stderr.write(message)
     except OSError:
@@ -358,16 +433,27 @@ def main(argv: list[str] | None = None) -> int:
 
     arguments = sys.argv[1:] if argv is None else argv
     if not isinstance(arguments, list) or len(arguments) != 1:
-        _emit_error()
+        _emit_error(USAGE)
         return 2
     try:
         report = observe_file(arguments[0])
         _emit_report(report)
+    except _FileUnavailableFailure:
+        _emit_error(FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE)
+        return 2
+    except _NotUsableGgufFailure:
+        _emit_error(NOT_USABLE_GGUF)
+        return 2
+    except _FileChangedFailure:
+        _emit_error(FILE_CHANGED_DURING_OBSERVATION)
+        return 2
+    except _InternalReportFailure:
+        _emit_error(INTERNAL_REPORT_FAILURE)
+        return 2
     except (OSError, TypeError, ValueError, OverflowError):
-        # The command boundary intentionally reveals neither parser details nor
-        # selected-path data.  KeyboardInterrupt/SystemExit remain outside this
-        # ordinary failure path.
-        _emit_error()
+        # Any untyped ordinary failure remains a fixed internal refusal.  No
+        # exception text or selected-path data crosses the command boundary.
+        _emit_error(INTERNAL_REPORT_FAILURE)
         return 2
     return 0
 

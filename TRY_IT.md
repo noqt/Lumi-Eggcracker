@@ -193,6 +193,14 @@ $env:PYTHONPATH = "src"
 python -m lumi_eggcracker.gguf_file_observe path\to\model.gguf
 ```
 
+For this source-checkout observer, a refusal exits with status `2` and writes
+one fixed ASCII token to stderr: `USAGE`,
+`FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE`, `NOT_USABLE_GGUF`,
+`FILE_CHANGED_DURING_OBSERVATION`, or `INTERNAL_REPORT_FAILURE`. The selected
+path and exception details are never included. Stdout is empty when refusal
+happens before report output starts; if output has already started and then
+fails, the observer does not claim that partial output was rolled back.
+
 Successful output reports only facts read from that selected file: the GGUF
 version and content evidence ID, a size bucket, the number of inspected prefix
 bytes, and a SHA-256 digest whose scope is explicitly `first_prefix_only`.

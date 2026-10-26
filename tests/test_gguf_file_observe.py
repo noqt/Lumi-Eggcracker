@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import stat
@@ -224,6 +225,143 @@ class GgufFileObserveTests(unittest.TestCase):
             self.assertEqual("", stdout.getvalue())
             self.assertTrue(stderr.getvalue())
             self.assertLessEqual(len(stderr.getvalue().encode("utf-8")), observer.MAX_ERROR_BYTES)
+
+
+class GgufFileObserveRefusalDeltaTests(unittest.TestCase):
+    def _run(self, arguments: list[object]) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            status = observer.main(arguments)
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_usage_selection_and_parser_tokens_are_fixed(self) -> None:
+        status, stdout, stderr = self._run([])
+        self.assertEqual((2, "", f"{observer.USAGE}\n"), (status, stdout, stderr))
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            status, stdout, stderr = self._run([str(root / "missing")])
+            self.assertEqual(
+                (2, "", f"{observer.FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE}\n"),
+                (status, stdout, stderr),
+            )
+
+            malformed = root / "malformed"
+            malformed.write_bytes(b"x" * observer.MIN_FILE_BYTES)
+            status, stdout, stderr = self._run([str(malformed)])
+            self.assertEqual((2, "", f"{observer.NOT_USABLE_GGUF}\n"), (status, stdout, stderr))
+
+            with patch.object(observer, "validate_gguf_fd", side_effect=OSError("read detail")):
+                status, stdout, stderr = self._run([str(malformed)])
+            self.assertEqual(
+                (2, "", f"{observer.FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE}\n"),
+                (status, stdout, stderr),
+            )
+
+        self.assertLessEqual(len(stderr.encode("ascii")), observer.MAX_ERROR_BYTES)
+
+    def test_existing_malformed_header_variants_use_not_usable_token(self) -> None:
+        invalid = (
+            b"GGUF" + b"\0" * (observer.MIN_FILE_BYTES - 4),
+            b"GGUF" + struct.pack("<IQQ", 1, 1, 0) + b"\0" * 64,
+            gguf(tensors=0),
+            gguf(tensors=10_000_001),
+            gguf(metadata=10_000_001),
+            gguf(tensors=1, metadata=1, padding=0) + b"\0",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for index, body in enumerate(invalid):
+                path = root / str(index)
+                path.write_bytes(body)
+                with self.subTest(index=index):
+                    status, stdout, stderr = self._run([str(path)])
+                    self.assertEqual(
+                        (2, "", f"{observer.NOT_USABLE_GGUF}\n"),
+                        (status, stdout, stderr),
+                    )
+
+    def test_parser_failure_checks_change_before_selecting_not_usable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            path = root / "model"
+            path.write_bytes(gguf())
+
+            def fail_after_change(descriptor: int) -> object:
+                with path.open("ab") as handle:
+                    handle.write(b"x")
+                raise JsonInputError("parser detail includes a path")
+
+            with patch.object(observer, "validate_gguf_fd", fail_after_change):
+                status, stdout, stderr = self._run([str(path)])
+            self.assertEqual(
+                (2, "", f"{observer.FILE_CHANGED_DURING_OBSERVATION}\n"),
+                (status, stdout, stderr),
+            )
+            self.assertNotIn(observer.NOT_USABLE_GGUF, stderr)
+
+            path.write_bytes(gguf())
+            original_lstat = observer.os.lstat
+            calls = 0
+
+            def fail_post_lstat(value: object) -> object:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("post-state details")
+                return original_lstat(value)
+
+            with (
+                patch.object(observer, "validate_gguf_fd", side_effect=JsonInputError("bad")),
+                patch.object(observer.os, "lstat", side_effect=fail_post_lstat),
+            ):
+                status, stdout, stderr = self._run([str(path)])
+            self.assertEqual(
+                (2, "", f"{observer.FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE}\n"),
+                (status, stdout, stderr),
+            )
+            self.assertNotIn(observer.FILE_CHANGED_DURING_OBSERVATION, stderr)
+            self.assertNotIn(observer.NOT_USABLE_GGUF, stderr)
+
+    def test_report_refusal_is_internal_and_partial_stdout_is_not_rolled_back(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "model"
+            path.write_bytes(gguf())
+
+            with patch.object(observer, "_report", side_effect=JsonInputError("report detail")):
+                status, stdout, stderr = self._run([str(path)])
+            self.assertEqual((2, "", f"{observer.INTERNAL_REPORT_FAILURE}\n"), (status, stdout, stderr))
+
+            class PartialWriter(io.StringIO):
+                def write(self, value: str) -> int:
+                    super().write(value[:1])
+                    raise OSError("output detail")
+
+            partial = PartialWriter()
+            stderr = io.StringIO()
+            with patch.object(observer.sys, "stdout", partial), contextlib.redirect_stderr(stderr):
+                status = observer.main([str(path)])
+            self.assertEqual(2, status)
+            self.assertTrue(partial.getvalue())
+            self.assertEqual(f"{observer.INTERNAL_REPORT_FAILURE}\n", stderr.getvalue())
+
+    def test_success_bytes_and_direct_api_inheritance_remain_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "model"
+            path.write_bytes(gguf())
+            status, stdout, stderr = self._run([str(path)])
+            self.assertEqual(0, status)
+            self.assertEqual("", stderr)
+            encoded = stdout.encode("ascii")
+            self.assertEqual(2515, len(encoded))
+            self.assertEqual(
+                "cfd215a8867ee289445b27837c64d3b426834217b3953e629a1206201b142c16",
+                hashlib.sha256(encoded).hexdigest(),
+            )
+
+            with self.assertRaises(JsonInputError):
+                observer.observe_file(path.with_name("missing"))
 
 
 if __name__ == "__main__":
