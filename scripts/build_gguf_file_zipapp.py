@@ -13,7 +13,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_COMMIT = "5e7e6070fa973016f8ef73e44843e2c4cbbb1f06"
+SOURCE_COMMIT = "7b9b1dcc7242c47c64fcec7d493f1aa5bfc158ef"
 MANIFEST_NAME = "SOURCE-MANIFEST.json"
 MANIFEST_SCHEMA = "lumi-eggcracker.gguf-file-source-manifest.v1"
 MAIN_MODULE = (
@@ -62,7 +62,7 @@ SOURCE_INPUTS = (
     (
         "src/lumi_eggcracker/gguf_file_observe.py",
         "lumi_eggcracker/gguf_file_observe.py",
-        "7463a29d883a324b5c05382c2874f175f5bb4aa0",
+        "5118cd45cf9183d59c8a07abe468a4045f42d4a0",
     ),
     (
         "src/lumi_eggcracker/jsonio.py",

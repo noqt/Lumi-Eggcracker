@@ -169,6 +169,10 @@ bucket, and a SHA-256 digest of only the inspected prefix; it is not a full-file
 hash. Runtime and topology evidence remain empty, and file content alone does
 not complete an Eggcracker profile. The observer reads only the selected
 bounded regular file and performs no actuation.
+Refusals from the downloaded archive use the same fixed `rc=2` contract
+described in the source-checkout section: pre-output refusals leave stdout
+empty, and selected paths or exception details are not reported. A failure
+after output has started is not presented as a rollback.
 
 This source-only preview is unreleased and outside signed v1.0.10 and v1.0.11.
 It is not native-qualified and does not establish workload identity,
@@ -192,6 +196,18 @@ On Windows PowerShell, from the source checkout use:
 $env:PYTHONPATH = "src"
 python -m lumi_eggcracker.gguf_file_observe path\to\model.gguf
 ```
+
+For this source-checkout observer, a refusal exits with status `2` and writes
+one fixed ASCII token to stderr: `USAGE`,
+`FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE`, `NOT_USABLE_GGUF`,
+`FILE_CHANGED_DURING_OBSERVATION`, or `INTERNAL_REPORT_FAILURE`. The selected
+path and exception details are never included. Stdout is empty when refusal
+happens before report output starts; if output has already started and then
+fails, the observer does not claim that partial output was rolled back.
+An initially accessible regular file shorter than the fixed minimum is
+`NOT_USABLE_GGUF`; an oversized selection remains
+`FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE`. Parser faults are categorized only
+after the safe post-state checks, so an evidenced mutation wins.
 
 Successful output reports only facts read from that selected file: the GGUF
 version and content evidence ID, a size bucket, the number of inspected prefix
