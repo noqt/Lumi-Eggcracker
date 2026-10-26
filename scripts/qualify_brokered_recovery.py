@@ -255,7 +255,12 @@ def _host_gate() -> None:
         _raise_inconclusive("LINUX_IPC_PRIMITIVE_REQUIRED")
     if not Path("/proc").is_dir():
         _raise_inconclusive("PROC_IDENTITY_REQUIRED")
-    if Path(sys.executable).resolve() != PYTHON:
+    try:
+        configured_python = PYTHON.resolve(strict=True)
+        invoked_python = Path(sys.executable).resolve(strict=True)
+    except (OSError, RuntimeError):
+        _raise_inconclusive("SYSTEM_PYTHON_REQUIRED")
+    if invoked_python != configured_python:
         _raise_inconclusive("SYSTEM_PYTHON_REQUIRED")
     for tool in (PYTHON, SETPRIV, USERADD, USERDEL, GROUPADD, GROUPDEL, GIT):
         if not tool.is_file() or not os.access(tool, os.X_OK):
