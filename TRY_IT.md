@@ -169,6 +169,10 @@ bucket, and a SHA-256 digest of only the inspected prefix; it is not a full-file
 hash. Runtime and topology evidence remain empty, and file content alone does
 not complete an Eggcracker profile. The observer reads only the selected
 bounded regular file and performs no actuation.
+Refusals from the downloaded archive use the same fixed `rc=2` contract
+described in the source-checkout section: pre-output refusals leave stdout
+empty, and selected paths or exception details are not reported. A failure
+after output has started is not presented as a rollback.
 
 This source-only preview is unreleased and outside signed v1.0.10 and v1.0.11.
 It is not native-qualified and does not establish workload identity,

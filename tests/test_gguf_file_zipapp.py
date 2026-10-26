@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ from scripts import build_gguf_file_zipapp as builder
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "scripts" / "build_gguf_file_zipapp.py"
-SOURCE_COMMIT = "5e7e6070fa973016f8ef73e44843e2c4cbbb1f06"
+SOURCE_COMMIT = "7b9b1dcc7242c47c64fcec7d493f1aa5bfc158ef"
 MANIFEST_NAME = "SOURCE-MANIFEST.json"
 MANIFEST_SCHEMA = "lumi-eggcracker.gguf-file-source-manifest.v1"
 MAIN_MODULE = (
@@ -32,7 +33,7 @@ SOURCE_BLOBS = {
     "lumi_eggcracker/detector_catalogue.json": "23d0592f1df359d954f54d057b9a38ac87d85dff",
     "lumi_eggcracker/detectors.py": "3fa79bc6af1295517da4510985d133444c5a962c",
     "lumi_eggcracker/discovery.py": "10cec85df3931c2b4d775484da9e97cc555927a9",
-    "lumi_eggcracker/gguf_file_observe.py": "7463a29d883a324b5c05382c2874f175f5bb4aa0",
+    "lumi_eggcracker/gguf_file_observe.py": "5118cd45cf9183d59c8a07abe468a4045f42d4a0",
     "lumi_eggcracker/jsonio.py": "d09c32d35df2c423aa504f6e178c3820dae765cd",
     "lumi_eggcracker/procfd.py": "1cb27cd57f064eaf9ed1ca0c14146ae46b4191be",
 }
@@ -268,3 +269,100 @@ class GgufFileZipappTests(unittest.TestCase):
         self.assertEqual(nonblock, flags & nonblock)
         fstat.assert_called_once_with(descriptor)
         close.assert_called_once_with(descriptor)
+
+
+class GgufFileZipappRefusalDeltaTests(unittest.TestCase):
+    def _candidate(self) -> Path:
+        value = os.environ.get("GGUF_PACKAGE_CANDIDATE")
+        self.assertIsNotNone(value, "GGUF_PACKAGE_CANDIDATE must name a built archive")
+        candidate = Path(value)
+        self.assertTrue(candidate.is_file())
+        self.assertFalse(candidate.is_relative_to(ROOT))
+        return candidate
+
+    def _scratch(self) -> Path:
+        value = os.environ.get("GGUF_PACKAGE_SCRATCH")
+        self.assertIsNotNone(value, "GGUF_PACKAGE_SCRATCH must name the F443 fixture directory")
+        scratch = Path(value)
+        self.assertTrue(scratch.is_dir())
+        self.assertFalse(scratch.is_relative_to(ROOT))
+        return scratch
+
+    def _run_archive(self, candidate: Path, arguments: list[str]) -> subprocess.CompletedProcess[bytes]:
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        return subprocess.run(
+            [sys.executable, "-B", str(candidate), *arguments],
+            cwd=self._scratch(),
+            env=environment,
+            capture_output=True,
+            check=False,
+        )
+
+    def _assert_refusal(
+        self,
+        result: subprocess.CompletedProcess[bytes],
+        token: str,
+        leaked_path: Path | None = None,
+    ) -> None:
+        self.assertEqual(2, result.returncode)
+        self.assertEqual(b"", result.stdout)
+        self.assertEqual(token.encode("ascii") + os.linesep.encode("ascii"), result.stderr)
+        self.assertLessEqual(len(result.stderr), 128)
+        self.assertTrue(result.stderr.isascii())
+        if leaked_path is not None:
+            encoded_path = os.fsencode(leaked_path)
+            self.assertNotIn(encoded_path, result.stdout + result.stderr)
+
+    def test_packaged_candidate_members_are_canonical_and_pinned(self) -> None:
+        candidate = self._candidate()
+        checksum = Path(f"{candidate}.sha256")
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        self.assertEqual(f"{digest}  {candidate.name}\n", checksum.read_text(encoding="ascii"))
+
+        with zipfile.ZipFile(candidate) as archive:
+            infos = archive.infolist()
+            self.assertEqual(sorted(EXPECTED_MEMBERS), [item.filename for item in infos])
+            self.assertEqual(MAIN_MODULE, archive.read("__main__.py"))
+            for name in SOURCE_BLOBS:
+                source = ROOT / ("LICENSE" if name == "LICENSE" else f"src/{name}")
+                self.assertEqual(source.read_bytes(), archive.read(name))
+            manifest_bytes = archive.read(MANIFEST_NAME)
+            manifest = json.loads(manifest_bytes)
+            self.assertEqual(SOURCE_COMMIT, manifest["base_commit"])
+            self.assertEqual(SOURCE_BLOBS, {item["path"]: item["git_blob"] for item in manifest["source_members"]})
+            self.assertEqual(
+                (json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"),
+                manifest_bytes,
+            )
+
+    def test_packaged_candidate_refusals_and_success_bytes_are_fixed(self) -> None:
+        candidate = self._candidate()
+        scratch = self._scratch()
+        result = self._run_archive(candidate, [])
+        self._assert_refusal(result, "USAGE")
+
+        missing = scratch / "package-delta-missing.gguf"
+        result = self._run_archive(candidate, [str(missing)])
+        self._assert_refusal(result, "FILE_UNAVAILABLE_OR_UNSUPPORTED_TYPE", missing)
+
+        invalid = scratch / "package-delta-invalid.gguf"
+        invalid.write_bytes(b"x" * 25)
+        result = self._run_archive(candidate, [str(invalid)])
+        self._assert_refusal(result, "NOT_USABLE_GGUF", invalid)
+
+        valid = scratch / "package-delta-valid.gguf"
+        valid.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 1, 0) + b"\0" * 64)
+        result = self._run_archive(candidate, [str(valid)])
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(b"", result.stderr)
+        self.assertEqual(2515, len(result.stdout))
+        self.assertEqual(
+            "cfd215a8867ee289445b27837c64d3b426834217b3953e629a1206201b142c16",
+            hashlib.sha256(result.stdout).hexdigest(),
+        )
+        self.assertTrue(result.stdout.isascii())
+        self.assertNotIn(os.fsencode(valid), result.stdout)
+        parsed = json.loads(result.stdout)
+        self.assertEqual("FILE_EVIDENCE_ONLY", parsed["result"])
