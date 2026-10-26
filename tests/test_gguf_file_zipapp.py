@@ -272,21 +272,25 @@ class GgufFileZipappTests(unittest.TestCase):
 
 
 class GgufFileZipappRefusalDeltaTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._archive_temp = tempfile.TemporaryDirectory(prefix="gguf-file-zipapp-archive-")
+        self.addCleanup(self._archive_temp.cleanup)
+        self._fixture_temp = tempfile.TemporaryDirectory(prefix="gguf-file-zipapp-fixtures-")
+        self.addCleanup(self._fixture_temp.cleanup)
+
+        source_archive = ROOT / "examples/gguf-file/lumi-eggcracker-gguf-file.pyz"
+        source_checksum = source_archive.with_name(f"{source_archive.name}.sha256")
+        self._candidate_path = Path(self._archive_temp.name) / source_archive.name
+        self._checksum_path = Path(self._archive_temp.name) / source_checksum.name
+        shutil.copyfile(source_archive, self._candidate_path)
+        shutil.copyfile(source_checksum, self._checksum_path)
+        self._fixture_path = Path(self._fixture_temp.name)
+
     def _candidate(self) -> Path:
-        value = os.environ.get("GGUF_PACKAGE_CANDIDATE")
-        self.assertIsNotNone(value, "GGUF_PACKAGE_CANDIDATE must name a built archive")
-        candidate = Path(value)
-        self.assertTrue(candidate.is_file())
-        self.assertFalse(candidate.is_relative_to(ROOT))
-        return candidate
+        return self._candidate_path
 
     def _scratch(self) -> Path:
-        value = os.environ.get("GGUF_PACKAGE_SCRATCH")
-        self.assertIsNotNone(value, "GGUF_PACKAGE_SCRATCH must name the F443 fixture directory")
-        scratch = Path(value)
-        self.assertTrue(scratch.is_dir())
-        self.assertFalse(scratch.is_relative_to(ROOT))
-        return scratch
+        return self._fixture_path
 
     def _run_archive(self, candidate: Path, arguments: list[str]) -> subprocess.CompletedProcess[bytes]:
         environment = os.environ.copy()
