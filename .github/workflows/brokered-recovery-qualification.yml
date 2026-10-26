@@ -1,0 +1,196 @@
+name: brokered recovery native qualification
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - scripts/qualify_brokered_recovery.py
+      - .github/workflows/brokered-recovery-qualification.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # GitHub checkout is control-plane traffic only; credentials are not
+      # persisted and no product or harness network is used by the job.
+      - name: Check out the exact pull-request head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Preflight the public same-repository candidate
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          refuse() {
+            printf 'BROKERED_RECOVERY_PREFLIGHT=%s\n' "$1" >&2
+            exit 1
+          }
+
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted" || refuse GITHUB_HOSTED_REQUIRED
+          test "${GITHUB_ACTIONS:-}" = "true" || refuse GITHUB_ACTIONS_REQUIRED
+          test "${GITHUB_REPOSITORY:-}" = "noqt/Lumi-Eggcracker" || refuse PUBLIC_REPOSITORY_REQUIRED
+          test "${GITHUB_SERVER_URL:-}" = "https://github.com" || refuse GITHUB_SERVER_REQUIRED
+          test "${GITHUB_EVENT_NAME:-}" = "pull_request" || refuse PULL_REQUEST_REQUIRED
+          test -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || refuse ID_TOKEN_FORBIDDEN
+          test -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || refuse ID_TOKEN_FORBIDDEN
+          test "$(uname -s)" = "Linux" || refuse NATIVE_LINUX_REQUIRED
+          . /etc/os-release || refuse HOST_IDENTITY_UNAVAILABLE
+          test "${ID:-}" = "ubuntu" && test "${VERSION_ID:-}" = "24.04" \
+            || refuse UBUNTU_2404_REQUIRED
+          test -x /usr/bin/python3 || refuse SYSTEM_PYTHON_REQUIRED
+
+          event_values="$(/usr/bin/python3 -I -S - "$GITHUB_EVENT_PATH" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          event = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          pull = event.get("pull_request")
+          if not isinstance(pull, dict):
+              raise SystemExit(1)
+          head = pull.get("head")
+          base = pull.get("base")
+          if not isinstance(head, dict) or not isinstance(base, dict):
+              raise SystemExit(1)
+          head_repo = head.get("repo")
+          base_repo = base.get("repo")
+          if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
+              raise SystemExit(1)
+          values = (
+              head_repo.get("full_name"),
+              base_repo.get("full_name"),
+              head.get("ref"),
+              base.get("ref"),
+              head.get("sha"),
+              base.get("sha"),
+              "1" if head_repo.get("fork") is True else "0",
+              "1" if event.get("repository", {}).get("private") is True else "0",
+          )
+          if any(not isinstance(value, str) or "\n" in value for value in values):
+              raise SystemExit(1)
+          print("\n".join(values))
+          PY
+          )" || refuse EVENT_UNAVAILABLE
+          mapfile -t event_fields <<< "$event_values"
+          test "${#event_fields[@]}" -eq 8 || refuse EVENT_UNAVAILABLE
+          head_repo="${event_fields[0]}"
+          base_repo="${event_fields[1]}"
+          head_ref="${event_fields[2]}"
+          base_ref="${event_fields[3]}"
+          head_sha="${event_fields[4]}"
+          base_sha="${event_fields[5]}"
+          head_is_fork="${event_fields[6]}"
+          repository_is_private="${event_fields[7]}"
+          test "$head_repo" = "noqt/Lumi-Eggcracker" || refuse SAME_REPOSITORY_REQUIRED
+          test "$base_repo" = "noqt/Lumi-Eggcracker" || refuse SAME_REPOSITORY_REQUIRED
+          test "$repository_is_private" = "0" || refuse PUBLIC_REPOSITORY_REQUIRED
+          test "$head_is_fork" = "0" || refuse FORK_REQUIRED_FALSE
+          test "$head_ref" = "codex/eggcracker-recovery-native-20261027-439" \
+            || refuse QUALIFICATION_BRANCH_REQUIRED
+          test "$base_ref" = "main" || refuse MAIN_BASE_REQUIRED
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || refuse HEAD_SHA_INVALID
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || refuse BASE_SHA_INVALID
+
+          checked_out_sha="$(git rev-parse HEAD)" || refuse CHECKOUT_SHA_UNAVAILABLE
+          test "$checked_out_sha" = "$head_sha" || refuse CHECKOUT_HEAD_DRIFT
+          git cat-file -e "$base_sha^{commit}" || refuse BASE_SHA_UNAVAILABLE
+
+          mapfile -t changed_status < <(git diff --no-ext-diff --name-status "$base_sha" "$head_sha")
+          expected_status=(
+            $'A\t.github/workflows/brokered-recovery-qualification.yml'
+            $'M\tdocs/BROKERED_OPERATOR.md'
+            $'M\tscripts/brokered_operator_demo.py'
+            $'A\tscripts/qualify_brokered_recovery.py'
+            $'M\tsrc/lumi_eggcracker/brokered/linux_ipc.py'
+            $'M\tsrc/lumi_eggcracker/brokered/operator.py'
+            $'M\ttests/test_brokered_linux_ipc.py'
+            $'M\ttests/test_brokered_operator.py'
+          )
+          test "${#changed_status[@]}" -eq "${#expected_status[@]}" \
+            || refuse CHANGED_PATHS_UNQUALIFIED
+          for index in "${!expected_status[@]}"; do
+            test "${changed_status[$index]}" = "${expected_status[$index]}" \
+              || refuse CHANGED_PATHS_UNQUALIFIED
+          done
+
+          declare -A accepted_hashes=(
+            [src/lumi_eggcracker/brokered/operator.py]=d770da780fbb061598f87348a091eeb9bf441d80bb381f8315ad2913f6285647
+            [src/lumi_eggcracker/brokered/linux_ipc.py]=adb991834fd79506ddcb6a784f51f746c330c557013e09958552370a9e8bb2b9
+            [scripts/brokered_operator_demo.py]=6b7c8b0fb1ad083f3059ecbd4e1d4cd0bed073845c99ce3d538ec34e4a6e5fe4
+            [tests/test_brokered_operator.py]=2c4feacdfc873a10f6656b599d9adbb7b9b95dfdba85ebe2f663c4868e32187c
+            [tests/test_brokered_linux_ipc.py]=35240da865c6f1029162904c04607261f23b7524b183484773f48dfb43ef5245
+            [docs/BROKERED_OPERATOR.md]=532c45fd0e7c3224bd0927548737772c0db89a7ee7baab3aead5c938d45dc5b0
+          )
+          for source_path in "${!accepted_hashes[@]}"; do
+            test -f "$source_path" || refuse ACCEPTED_438_SOURCE_MISSING
+            read -r actual_hash _ < <(sha256sum "$source_path")
+            test "$actual_hash" = "${accepted_hashes[$source_path]}" \
+              || refuse ACCEPTED_438_SOURCE_DRIFT
+          done
+
+          for candidate_path in \
+            scripts/qualify_brokered_recovery.py \
+            .github/workflows/brokered-recovery-qualification.yml
+          do
+            committed_blob="$(git rev-parse "$head_sha:$candidate_path")" \
+              || refuse CANDIDATE_BLOB_UNAVAILABLE
+            working_blob="$(git hash-object "$candidate_path")" \
+              || refuse CANDIDATE_BLOB_UNAVAILABLE
+            test "$committed_blob" = "$working_blob" || refuse CANDIDATE_BLOB_DRIFT
+          done
+
+          fresh_child="$RUNNER_TEMP/brokered-recovery-native-qualification"
+          test ! -e "$fresh_child" && test ! -L "$fresh_child" || refuse TEMP_CHILD_COLLISION
+          mkdir "$fresh_child" || refuse TEMP_CHILD_CREATE_FAILED
+          chmod 0700 "$fresh_child" || refuse TEMP_CHILD_PERMISSION_FAILED
+          test -d "$fresh_child" || refuse TEMP_CHILD_INVALID
+          test -z "$(find "$fresh_child" -mindepth 1 -maxdepth 1 -print -quit)" \
+            || refuse TEMP_CHILD_NOT_FRESH
+          printf 'result_path=%s/result.json\n' "$fresh_child" >> "$GITHUB_OUTPUT"
+          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
+          printf 'BROKERED_RECOVERY_PREFLIGHT=PASS\n'
+
+      - name: Run the bounded native qualification
+        id: qualify
+        shell: bash
+        run: |
+          set +e
+          result_path="${{ steps.preflight.outputs.result_path }}"
+          sudo -n --preserve-env=RUNNER_ENVIRONMENT,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_SERVER_URL,GITHUB_EVENT_NAME,GITHUB_BASE_REF,GITHUB_HEAD_REF,GITHUB_WORKFLOW,RUNNER_TEMP /usr/bin/python3 -I -S \
+            scripts/qualify_brokered_recovery.py --result "$result_path"
+          qualification_status=$?
+          set -e
+          if [[ -f "$result_path" && ! -L "$result_path" ]]; then
+            result_exists=true
+          else
+            result_exists=false
+          fi
+          printf 'exit_code=%s\n' "$qualification_status" >> "$GITHUB_OUTPUT"
+          printf 'result_exists=%s\n' "$result_exists" >> "$GITHUB_OUTPUT"
+          printf 'result_path=%s\n' "$result_path" >> "$GITHUB_OUTPUT"
+          exit "$qualification_status"
+
+      # Artifact upload is GitHub control-plane traffic and is allowed only
+      # for an exact sanitized result from PASS, FAIL, or INCONCLUSIVE.
+      - name: Upload the sanitized qualification result
+        if: ${{ always() && steps.qualify.outputs.result_exists == 'true' && (steps.qualify.outputs.exit_code == '0' || steps.qualify.outputs.exit_code == '1' || steps.qualify.outputs.exit_code == '2') }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: brokered-recovery-native-qualification
+          path: ${{ steps.qualify.outputs.result_path }}
+          if-no-files-found: error
