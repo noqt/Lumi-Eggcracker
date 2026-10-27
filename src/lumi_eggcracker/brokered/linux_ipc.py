@@ -33,6 +33,7 @@ _SOCKET_MODE = 0o660
 _SOCKET_DIRECTORY_MODE = 0o710
 _DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _SERVICE_SEAL = object()
+_RECOVERY_STATUSES = {"PENDING", "CONFIRMED_APPLIED", "CONFIRMED_NOT_APPLIED"}
 _PROTOCOL_DENIALS = {
     "MALFORMED_INPUT",
     "NON_CANONICAL_INPUT",
@@ -163,6 +164,7 @@ def _parse_request(raw: bytes) -> tuple[dict[str, Any] | None, str | None]:
     common = {"op", "schema_version"}
     fields_by_operation = {
         "submit": common | {"operation_id"},
+        "recover_operation": common | {"operation_id"},
         "dispatch": common | {"queue_id"},
         "get_result": common | {"queue_id"},
     }
@@ -175,7 +177,7 @@ def _parse_request(raw: bytes) -> tuple[dict[str, Any] | None, str | None]:
         return None, "UNKNOWN_FIELDS"
     if set(request) != allowed or request.get("schema_version") != IPC_SCHEMA:
         return None, "MALFORMED_INPUT"
-    if operation == "submit":
+    if operation in {"submit", "recover_operation"}:
         operation_id = request.get("operation_id")
         if not isinstance(operation_id, str) or not _OPERATION_ID.fullmatch(operation_id):
             return None, "MALFORMED_INPUT"
@@ -258,6 +260,12 @@ def _parse_response(raw: bytes) -> dict[str, Any]:
         return response
     if set(response) == {"code", "outcome", "phase", "schema_version"}:
         if (
+            response["phase"] == "recovery"
+            and response["outcome"] == "DENIED"
+            and response["code"] == "NOT_FOUND"
+        ):
+            return response
+        if (
             response["phase"] == "protocol"
             and response["outcome"] == "DENIED"
             and isinstance(response["code"], str)
@@ -282,6 +290,16 @@ def _parse_response(raw: bytes) -> dict[str, Any]:
         and response["code"] == "NOT_FOUND"
         and isinstance(response["queue_id"], str)
         and _HEX32.fullmatch(response["queue_id"])
+    ):
+        return response
+    if (
+        response.get("phase") == "recovery"
+        and response.get("outcome") == "AVAILABLE"
+        and set(response) == {"outcome", "phase", "queue_id", "schema_version", "status"}
+        and isinstance(response["queue_id"], str)
+        and _HEX32.fullmatch(response["queue_id"])
+        and isinstance(response["status"], str)
+        and response["status"] in _RECOVERY_STATUSES
     ):
         return response
     raise BrokeredIPCError("broker response fields are invalid")
@@ -309,6 +327,28 @@ def _receipt_response(receipt: Receipt) -> bytes:
     raw = _canonical_json({"receipt": redacted, "schema_version": IPC_SCHEMA})
     if len(raw) > MAX_IPC_RESPONSE_BYTES:
         raise RuntimeError("broker receipt exceeded its response bound")
+    return raw
+
+
+def _recovery_response(recovery: dict[str, str] | None) -> bytes:
+    if recovery is None:
+        response = {
+            "code": "NOT_FOUND",
+            "outcome": "DENIED",
+            "phase": "recovery",
+            "schema_version": IPC_SCHEMA,
+        }
+    else:
+        response = {
+            "outcome": "AVAILABLE",
+            "phase": "recovery",
+            "queue_id": recovery["queue_id"],
+            "schema_version": IPC_SCHEMA,
+            "status": recovery["status"],
+        }
+    raw = _canonical_json(response)
+    if len(raw) > MAX_IPC_RESPONSE_BYTES:
+        raise RuntimeError("broker recovery response exceeded its response bound")
     return raw
 
 
@@ -630,6 +670,12 @@ class BrokeredLinuxService:
             return _protocol_denial(denial or "MALFORMED_INPUT")
         client = self._operator.client(self._grant)
         operation = request["op"]
+        if operation == "recover_operation":
+            recovery = self._operator._recover_operation_for_run(
+                request["operation_id"],
+                self._grant.run_id,
+            )
+            return _recovery_response(recovery)
         if operation == "submit":
             receipt = client.admit(request["operation_id"])
             return _receipt_response(receipt)
@@ -804,6 +850,19 @@ class BrokeredLinuxClient:
         return self.request_bytes(
             _canonical_json(
                 {"op": "get_result", "queue_id": queue_id, "schema_version": IPC_SCHEMA}
+            )
+        )
+
+    def recover_operation(self, operation_id: str) -> dict[str, Any]:
+        if not isinstance(operation_id, str) or not _OPERATION_ID.fullmatch(operation_id):
+            raise ValueError("operation identifier is invalid")
+        return self.request_bytes(
+            _canonical_json(
+                {
+                    "op": "recover_operation",
+                    "operation_id": operation_id,
+                    "schema_version": IPC_SCHEMA,
+                }
             )
         )
 

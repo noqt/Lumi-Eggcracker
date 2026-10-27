@@ -1,0 +1,395 @@
+name: brokered recovery native qualification
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - scripts/qualify_brokered_recovery.py
+      - .github/workflows/brokered-recovery-qualification.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # GitHub checkout is control-plane traffic only; credentials are not
+      # persisted and no product or harness network is used by the job.
+      - name: Check out the exact pull-request head
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Preflight the public same-repository candidate
+        id: preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          refuse() {
+            printf 'BROKERED_RECOVERY_PREFLIGHT=%s\n' "$1" >&2
+            exit 1
+          }
+
+          test "${RUNNER_ENVIRONMENT:-}" = "github-hosted" || refuse GITHUB_HOSTED_REQUIRED
+          test "${GITHUB_ACTIONS:-}" = "true" || refuse GITHUB_ACTIONS_REQUIRED
+          test "${GITHUB_REPOSITORY:-}" = "noqt/Lumi-Eggcracker" || refuse PUBLIC_REPOSITORY_REQUIRED
+          test "${GITHUB_SERVER_URL:-}" = "https://github.com" || refuse GITHUB_SERVER_REQUIRED
+          test "${GITHUB_EVENT_NAME:-}" = "pull_request" || refuse PULL_REQUEST_REQUIRED
+          test -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || refuse ID_TOKEN_FORBIDDEN
+          test -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" || refuse ID_TOKEN_FORBIDDEN
+          test "$(uname -s)" = "Linux" || refuse NATIVE_LINUX_REQUIRED
+          . /etc/os-release || refuse HOST_IDENTITY_UNAVAILABLE
+          test "${ID:-}" = "ubuntu" && test "${VERSION_ID:-}" = "24.04" \
+            || refuse UBUNTU_2404_REQUIRED
+          test -x /usr/bin/python3 || refuse SYSTEM_PYTHON_REQUIRED
+
+          event_values="$(/usr/bin/python3 -I -S - "$GITHUB_EVENT_PATH" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          event = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          pull = event.get("pull_request")
+          if not isinstance(pull, dict):
+              raise SystemExit(1)
+          head = pull.get("head")
+          base = pull.get("base")
+          if not isinstance(head, dict) or not isinstance(base, dict):
+              raise SystemExit(1)
+          head_repo = head.get("repo")
+          base_repo = base.get("repo")
+          if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
+              raise SystemExit(1)
+          values = (
+              head_repo.get("full_name"),
+              base_repo.get("full_name"),
+              head.get("ref"),
+              base.get("ref"),
+              head.get("sha"),
+              base.get("sha"),
+              "1" if head_repo.get("fork") is True else "0",
+              "1" if event.get("repository", {}).get("private") is True else "0",
+          )
+          if any(not isinstance(value, str) or "\n" in value for value in values):
+              raise SystemExit(1)
+          print("\n".join(values))
+          PY
+          )" || refuse EVENT_UNAVAILABLE
+          mapfile -t event_fields <<< "$event_values"
+          test "${#event_fields[@]}" -eq 8 || refuse EVENT_UNAVAILABLE
+          head_repo="${event_fields[0]}"
+          base_repo="${event_fields[1]}"
+          head_ref="${event_fields[2]}"
+          base_ref="${event_fields[3]}"
+          head_sha="${event_fields[4]}"
+          base_sha="${event_fields[5]}"
+          head_is_fork="${event_fields[6]}"
+          repository_is_private="${event_fields[7]}"
+          test "$head_repo" = "noqt/Lumi-Eggcracker" || refuse SAME_REPOSITORY_REQUIRED
+          test "$base_repo" = "noqt/Lumi-Eggcracker" || refuse SAME_REPOSITORY_REQUIRED
+          test "$repository_is_private" = "0" || refuse PUBLIC_REPOSITORY_REQUIRED
+          test "$head_is_fork" = "0" || refuse FORK_REQUIRED_FALSE
+          test "$head_ref" = "codex/eggcracker-recovery-native-20261027-439" \
+            || refuse QUALIFICATION_BRANCH_REQUIRED
+          test "$base_ref" = "main" || refuse MAIN_BASE_REQUIRED
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || refuse HEAD_SHA_INVALID
+          [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] || refuse BASE_SHA_INVALID
+
+          checked_out_sha="$(git rev-parse HEAD)" || refuse CHECKOUT_SHA_UNAVAILABLE
+          test "$checked_out_sha" = "$head_sha" || refuse CHECKOUT_HEAD_DRIFT
+          git cat-file -e "$base_sha^{commit}" || refuse BASE_SHA_UNAVAILABLE
+
+          mapfile -t changed_status < <(git diff --no-ext-diff --name-status "$base_sha" "$head_sha")
+          expected_status=(
+            $'A\t.github/workflows/brokered-recovery-qualification.yml'
+            $'M\tdocs/BROKERED_OPERATOR.md'
+            $'M\tscripts/brokered_operator_demo.py'
+            $'A\tscripts/qualify_brokered_recovery.py'
+            $'M\tsrc/lumi_eggcracker/brokered/linux_ipc.py'
+            $'M\tsrc/lumi_eggcracker/brokered/operator.py'
+            $'M\ttests/test_brokered_linux_ipc.py'
+            $'M\ttests/test_brokered_operator.py'
+          )
+          test "${#changed_status[@]}" -eq "${#expected_status[@]}" \
+            || refuse CHANGED_PATHS_UNQUALIFIED
+          for index in "${!expected_status[@]}"; do
+            test "${changed_status[$index]}" = "${expected_status[$index]}" \
+              || refuse CHANGED_PATHS_UNQUALIFIED
+          done
+
+          declare -A accepted_hashes=(
+            [src/lumi_eggcracker/brokered/operator.py]=d770da780fbb061598f87348a091eeb9bf441d80bb381f8315ad2913f6285647
+            [src/lumi_eggcracker/brokered/linux_ipc.py]=adb991834fd79506ddcb6a784f51f746c330c557013e09958552370a9e8bb2b9
+            [scripts/brokered_operator_demo.py]=6b7c8b0fb1ad083f3059ecbd4e1d4cd0bed073845c99ce3d538ec34e4a6e5fe4
+            [tests/test_brokered_operator.py]=2c4feacdfc873a10f6656b599d9adbb7b9b95dfdba85ebe2f663c4868e32187c
+            [tests/test_brokered_linux_ipc.py]=35240da865c6f1029162904c04607261f23b7524b183484773f48dfb43ef5245
+            [docs/BROKERED_OPERATOR.md]=532c45fd0e7c3224bd0927548737772c0db89a7ee7baab3aead5c938d45dc5b0
+          )
+          for source_path in "${!accepted_hashes[@]}"; do
+            test -f "$source_path" || refuse ACCEPTED_438_SOURCE_MISSING
+            read -r actual_hash _ < <(sha256sum "$source_path")
+            test "$actual_hash" = "${accepted_hashes[$source_path]}" \
+              || refuse ACCEPTED_438_SOURCE_DRIFT
+          done
+
+          identity_child="$RUNNER_TEMP/brokered-recovery-native-identity"
+          result_child="$RUNNER_TEMP/brokered-recovery-native-qualification"
+          test "$identity_child" != "$result_child" || refuse TEMP_CHILD_COLLISION
+          for fresh_child in "$identity_child" "$result_child"; do
+            test ! -e "$fresh_child" && test ! -L "$fresh_child" || refuse TEMP_CHILD_COLLISION
+            mkdir "$fresh_child" || refuse TEMP_CHILD_CREATE_FAILED
+            chmod 0700 "$fresh_child" || refuse TEMP_CHILD_PERMISSION_FAILED
+            test -d "$fresh_child" || refuse TEMP_CHILD_INVALID
+            test -z "$(find "$fresh_child" -mindepth 1 -maxdepth 1 -print -quit)" \
+              || refuse TEMP_CHILD_NOT_FRESH
+          done
+
+          /usr/bin/python3 -I -S - "$head_sha" <<'PY'
+          import hashlib
+          import json
+          import os
+          import stat
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          MAX_BYTES = 8 * 1024 * 1024
+          SCHEMA = "lumi-eggcracker.native-recovery-identity.v1"
+          FIXED_UIDS = {1200, 1201, 1202}
+          HEAD_SHA = sys.argv[1]
+          ROOT = Path.cwd()
+          RUNNER_TEMP = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+          IDENTITY_DIR = RUNNER_TEMP / "brokered-recovery-native-identity"
+          RESULT_DIR = RUNNER_TEMP / "brokered-recovery-native-qualification"
+          DESCRIPTOR = IDENTITY_DIR / "descriptor.json"
+          PATHS = (
+              ".github/workflows/brokered-recovery-qualification.yml",
+              "docs/BROKERED_OPERATOR.md",
+              "scripts/brokered_operator_demo.py",
+              "scripts/qualify_brokered_recovery.py",
+              "src/lumi_eggcracker/brokered/linux_ipc.py",
+              "src/lumi_eggcracker/brokered/operator.py",
+              "tests/test_brokered_linux_ipc.py",
+              "tests/test_brokered_operator.py",
+          )
+          ACCEPTED = {
+              "src/lumi_eggcracker/brokered/operator.py": "d770da780fbb061598f87348a091eeb9bf441d80bb381f8315ad2913f6285647",
+              "src/lumi_eggcracker/brokered/linux_ipc.py": "adb991834fd79506ddcb6a784f51f746c330c557013e09958552370a9e8bb2b9",
+              "scripts/brokered_operator_demo.py": "6b7c8b0fb1ad083f3059ecbd4e1d4cd0bed073845c99ce3d538ec34e4a6e5fe4",
+              "tests/test_brokered_operator.py": "2c4feacdfc873a10f6656b599d9adbb7b9b95dfdba85ebe2f663c4868e32187c",
+              "tests/test_brokered_linux_ipc.py": "35240da865c6f1029162904c04607261f23b7524b183484773f48dfb43ef5245",
+              "docs/BROKERED_OPERATOR.md": "532c45fd0e7c3224bd0927548737772c0db89a7ee7baab3aead5c938d45dc5b0",
+          }
+
+          def refuse():
+              raise SystemExit(1)
+
+          if len(HEAD_SHA) != 40 or any(character not in "0123456789abcdef" for character in HEAD_SHA):
+              refuse()
+          if os.getuid() == 0 or os.getuid() in FIXED_UIDS:
+              refuse()
+          if not hasattr(os, "O_NOFOLLOW"):
+              refuse()
+
+          def check_fresh_directory(path):
+              try:
+                  metadata = os.lstat(path)
+                  entries = tuple(path.iterdir())
+              except OSError:
+                  refuse()
+              if (
+                  stat.S_ISLNK(metadata.st_mode)
+                  or not stat.S_ISDIR(metadata.st_mode)
+                  or metadata.st_uid != os.getuid()
+                  or stat.S_IMODE(metadata.st_mode) != 0o700
+                  or entries
+              ):
+                  refuse()
+
+          if IDENTITY_DIR.parent != RUNNER_TEMP or RESULT_DIR.parent != RUNNER_TEMP:
+              refuse()
+          if IDENTITY_DIR == RESULT_DIR:
+              refuse()
+          check_fresh_directory(IDENTITY_DIR)
+          check_fresh_directory(RESULT_DIR)
+          try:
+              root_metadata = os.lstat(ROOT)
+          except OSError:
+              refuse()
+          if stat.S_ISLNK(root_metadata.st_mode) or root_metadata.st_uid != os.getuid():
+              refuse()
+
+          def read_working(path):
+              descriptor = None
+              try:
+                  descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                  before = os.fstat(descriptor)
+                  if (
+                      not stat.S_ISREG(before.st_mode)
+                      or before.st_nlink != 1
+                      or before.st_size < 0
+                      or before.st_size > MAX_BYTES
+                  ):
+                      refuse()
+                  chunks = []
+                  total = 0
+                  while True:
+                      chunk = os.read(descriptor, min(65536, MAX_BYTES + 1 - total))
+                      if not chunk:
+                          break
+                      total += len(chunk)
+                      if total > MAX_BYTES:
+                          refuse()
+                      chunks.append(chunk)
+                  after = os.fstat(descriptor)
+              except OSError:
+                  refuse()
+              finally:
+                  if descriptor is not None:
+                      os.close(descriptor)
+              if (
+                  (before.st_dev, before.st_ino, before.st_size)
+                  != (after.st_dev, after.st_ino, after.st_size)
+                  or total != after.st_size
+              ):
+                  refuse()
+              return b"".join(chunks)
+
+          def read_committed(relative):
+              try:
+                  completed = subprocess.run(
+                      ["git", "cat-file", "blob", f"{HEAD_SHA}:{relative}"],
+                      cwd=ROOT,
+                      stdin=subprocess.DEVNULL,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.DEVNULL,
+                      check=False,
+                      timeout=10,
+                  )
+              except (OSError, subprocess.TimeoutExpired):
+                  refuse()
+              if completed.returncode != 0 or len(completed.stdout) > MAX_BYTES:
+                  refuse()
+              return completed.stdout
+
+          try:
+              tree = subprocess.run(
+                  ["git", "rev-parse", f"{HEAD_SHA}^{{tree}}"],
+                  cwd=ROOT,
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.DEVNULL,
+                  check=False,
+                  timeout=10,
+              )
+          except (OSError, subprocess.TimeoutExpired):
+              refuse()
+          tree_value = tree.stdout.decode("ascii", errors="strict").strip()
+          if tree.returncode != 0 or len(tree_value) != 40 or any(character not in "0123456789abcdef" for character in tree_value):
+              refuse()
+
+          paths = {}
+          for relative in PATHS:
+              committed = read_committed(relative)
+              working = read_working(ROOT / relative)
+              committed_hash = hashlib.sha256(committed).hexdigest()
+              working_hash = hashlib.sha256(working).hexdigest()
+              if committed_hash != working_hash:
+                  refuse()
+              if relative in ACCEPTED and committed_hash != ACCEPTED[relative]:
+                  refuse()
+              paths[relative] = committed_hash
+
+          encoded = (
+              json.dumps(
+                  {
+                      "schema_version": SCHEMA,
+                      "commit": HEAD_SHA,
+                      "tree": tree_value,
+                      "paths": paths,
+                  },
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=True,
+                  allow_nan=False,
+              )
+              + "\n"
+          ).encode("utf-8")
+          descriptor_fd = None
+          try:
+              descriptor_fd = os.open(
+                  DESCRIPTOR,
+                  os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                  0o600,
+              )
+              os.fchmod(descriptor_fd, 0o600)
+              view = memoryview(encoded)
+              while view:
+                  written = os.write(descriptor_fd, view)
+                  if written <= 0:
+                      refuse()
+                  view = view[written:]
+              os.fsync(descriptor_fd)
+          except OSError:
+              refuse()
+          finally:
+              if descriptor_fd is not None:
+                  os.close(descriptor_fd)
+          descriptor_metadata = os.lstat(DESCRIPTOR)
+          if (
+              stat.S_ISLNK(descriptor_metadata.st_mode)
+              or not stat.S_ISREG(descriptor_metadata.st_mode)
+              or descriptor_metadata.st_nlink != 1
+              or descriptor_metadata.st_uid != os.getuid()
+              or stat.S_IMODE(descriptor_metadata.st_mode) != 0o600
+          ):
+              refuse()
+          if len(tuple(IDENTITY_DIR.iterdir())) != 1 or len(tuple(RESULT_DIR.iterdir())) != 0:
+              refuse()
+          PY
+          printf 'identity_descriptor=%s/descriptor.json\n' "$identity_child" >> "$GITHUB_OUTPUT"
+          printf 'result_path=%s/result.json\n' "$result_child" >> "$GITHUB_OUTPUT"
+          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
+          printf 'BROKERED_RECOVERY_PREFLIGHT=PASS\n'
+
+      - name: Run the bounded native qualification
+        id: qualify
+        shell: bash
+        run: |
+          set +e
+          result_path="${{ steps.preflight.outputs.result_path }}"
+          identity_descriptor="${{ steps.preflight.outputs.identity_descriptor }}"
+          sudo -n --preserve-env=RUNNER_ENVIRONMENT,GITHUB_ACTIONS,GITHUB_REPOSITORY,GITHUB_SERVER_URL,GITHUB_EVENT_NAME,GITHUB_BASE_REF,GITHUB_HEAD_REF,GITHUB_WORKFLOW,RUNNER_TEMP /usr/bin/python3 -I -S \
+            scripts/qualify_brokered_recovery.py --result "$result_path" --identity-descriptor "$identity_descriptor"
+          qualification_status=$?
+          set -e
+          if [[ -f "$result_path" && ! -L "$result_path" ]]; then
+            result_exists=true
+          else
+            result_exists=false
+          fi
+          printf 'exit_code=%s\n' "$qualification_status" >> "$GITHUB_OUTPUT"
+          printf 'result_exists=%s\n' "$result_exists" >> "$GITHUB_OUTPUT"
+          printf 'result_path=%s\n' "$result_path" >> "$GITHUB_OUTPUT"
+          exit "$qualification_status"
+
+      # Artifact upload is GitHub control-plane traffic and is allowed only
+      # for an exact sanitized result from PASS, FAIL, or INCONCLUSIVE.
+      - name: Upload the sanitized qualification result
+        if: ${{ always() && steps.qualify.outputs.result_exists == 'true' && (steps.qualify.outputs.exit_code == '0' || steps.qualify.outputs.exit_code == '1' || steps.qualify.outputs.exit_code == '2') }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: brokered-recovery-native-qualification
+          path: ${{ steps.qualify.outputs.result_path }}
+          if-no-files-found: error
