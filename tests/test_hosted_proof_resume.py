@@ -21,6 +21,13 @@ from lumi_eggcracker import hosted_proof as proof
 ROOT = Path(__file__).resolve().parents[1]
 URL = "https://github.com/operator/Lumi-Eggcracker/actions/runs/123"
 HEAD = "a" * 40
+BROKERED_PACKAGE = "src/lumi_eggcracker/brokered"
+BROKERED_MEMBERS = (
+    "__init__.py",
+    "compare_detection_receipts.py",
+    "linux_ipc.py",
+    "operator.py",
+)
 
 
 def output(step: str, value: str) -> str:
@@ -54,6 +61,15 @@ class PublicRun:
         self.tree = {"truncated": False, "tree": [
             {"path": path, "mode": "040000", "type": "tree"}
             for path in ("src", "src/lumi_eggcracker", "scripts")
+        ] + [
+            {"path": BROKERED_PACKAGE, "mode": "040000", "type": "tree", "sha": "b" * 40},
+            *[
+                {
+                    "path": f"{BROKERED_PACKAGE}/{name}", "mode": "100644",
+                    "type": "blob", "sha": f"{index:040x}",
+                }
+                for index, name in enumerate(BROKERED_MEMBERS, start=1)
+            ],
         ] + [
             {"path": path, "mode": "100644", "type": "blob", "sha": sha}
             for path, sha in proof.REVIEWED_PROBE_BLOBS.items()
@@ -207,6 +223,59 @@ class ResumeTests(unittest.TestCase):
             variants.append(tree)
         for tree in variants:
             with self.subTest(tree=tree):
+                run = PublicRun()
+                run.tree = tree
+                with self.assertRaises(proof.HostedProofError):
+                    proof.resume_hosted_proof(URL, runner=run)
+                self.assertFalse(any("--log" in command for command in run.commands))
+
+    def test_brokered_package_layout_is_exact_before_logs(self):
+        baseline = PublicRun().tree
+        variants = []
+
+        def entry_at(tree, path):
+            return next(entry for entry in tree["tree"] if entry["path"] == path)
+
+        tree = copy.deepcopy(baseline)
+        entry_at(tree, BROKERED_PACKAGE)["mode"] = "100644"
+        variants.append(("package tree has blob mode", tree))
+
+        tree = copy.deepcopy(baseline)
+        entry_at(tree, BROKERED_PACKAGE)["type"] = "blob"
+        variants.append(("package path is a blob", tree))
+
+        member_path = f"{BROKERED_PACKAGE}/linux_ipc.py"
+        tree = copy.deepcopy(baseline)
+        entry_at(tree, member_path)["mode"] = "120000"
+        variants.append(("member is a symlink", tree))
+
+        tree = copy.deepcopy(baseline)
+        entry_at(tree, member_path)["type"] = "tree"
+        variants.append(("member path is a tree", tree))
+
+        tree = copy.deepcopy(baseline)
+        entry_at(tree, member_path)["sha"] = "malformed"
+        variants.append(("member has malformed object identity", tree))
+
+        for missing_path in (BROKERED_PACKAGE, f"{BROKERED_PACKAGE}/operator.py"):
+            tree = copy.deepcopy(baseline)
+            tree["tree"] = [entry for entry in tree["tree"] if entry["path"] != missing_path]
+            variants.append((f"missing {missing_path}", tree))
+
+        tree = copy.deepcopy(baseline)
+        tree["tree"].append({
+            "path": f"{BROKERED_PACKAGE}/extra.py", "mode": "100644",
+            "type": "blob", "sha": "e" * 40,
+        })
+        variants.append(("extra nested module", tree))
+
+        tree = copy.deepcopy(baseline)
+        duplicate = copy.deepcopy(entry_at(tree, member_path))
+        tree["tree"].append(duplicate)
+        variants.append(("duplicate nested member", tree))
+
+        for label, tree in variants:
+            with self.subTest(layout=label):
                 run = PublicRun()
                 run.tree = tree
                 with self.assertRaises(proof.HostedProofError):
