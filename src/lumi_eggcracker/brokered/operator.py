@@ -1219,6 +1219,42 @@ class BrokeredOperator:
         """Check a result handle without disclosing another run's queue state."""
         return self._result_for_run(queue_id, run_id) is not None
 
+    def _recover_operation_for_run(
+        self,
+        operation_id: str,
+        run_id: str,
+    ) -> dict[str, str] | None:
+        """Return the bounded recovery handle for one existing service run."""
+        if (
+            not isinstance(operation_id, str)
+            or not _OPERATION_ID.fullmatch(operation_id)
+            or not isinstance(run_id, str)
+            or not _HEX32.fullmatch(run_id)
+        ):
+            return None
+        with self._locked():
+            state = self._read_state()
+            if run_id not in state.runs:
+                return None
+            queued = next(
+                (
+                    item
+                    for item in state.queues.values()
+                    if item.run_id == run_id and item.operation_id == operation_id
+                ),
+                None,
+            )
+            if queued is None:
+                return None
+            status = {
+                "QUEUED": "PENDING",
+                "APPLIED": "CONFIRMED_APPLIED",
+                "REJECTED": "CONFIRMED_NOT_APPLIED",
+            }.get(queued.status)
+            if status is None:
+                raise BrokeredStoreError("durable queue status is invalid")
+            return {"queue_id": queued.queue_id, "status": status}
+
     def _result_for_run(self, queue_id: str, run_id: str) -> dict[str, Any] | None:
         """Return only the durably applied result owned by this service run."""
         if (

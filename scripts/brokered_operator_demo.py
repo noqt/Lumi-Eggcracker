@@ -248,11 +248,13 @@ def linux_ipc_demo(arguments: argparse.Namespace) -> int:
             _show("trusted_stop_request", service.request_stop())
         return 0
 
-    if arguments.linux_ipc in {"submit", "dispatch", "result", "run"}:
+    if arguments.linux_ipc in {"submit", "dispatch", "result", "recover", "run"}:
         if arguments.socket is None or arguments.service_uid is None:
             raise SystemExit(f"{arguments.linux_ipc} requires --socket and --service-uid")
         if arguments.linux_ipc == "run" and arguments.operation_id is None:
             raise SystemExit("run requires --operation-id")
+        if arguments.linux_ipc == "recover" and arguments.operation_id is None:
+            raise SystemExit("recover requires --operation-id")
         if arguments.linux_ipc == "run":
             try:
                 client = BrokeredLinuxClient(arguments.socket, service_uid=arguments.service_uid)
@@ -265,6 +267,8 @@ def linux_ipc_demo(arguments: argparse.Namespace) -> int:
             if arguments.operation_id is None:
                 raise SystemExit("submit requires --operation-id")
             _show("submission", client.submit(arguments.operation_id))
+        elif arguments.linux_ipc == "recover":
+            _show("recovery", client.recover_operation(arguments.operation_id))
         else:
             if arguments.queue_id is None:
                 raise SystemExit(f"{arguments.linux_ipc} requires --queue-id")
@@ -303,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--linux-ipc",
-        choices=("serve", "submit", "dispatch", "result", "run", "stop", "snapshot"),
+        choices=("serve", "submit", "dispatch", "result", "recover", "run", "stop", "snapshot"),
         help="run one side of the Linux authenticated local-IPC demonstration",
     )
     parser.add_argument("--state-dir")

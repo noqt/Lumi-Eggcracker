@@ -52,6 +52,64 @@ class BrokeredOperatorTests(unittest.TestCase):
         self.assertEqual("operation-1", json.loads(client.request_bytes("operation-1"))["operation_id"])
         self.assertEqual(grant.run_id, applied.run_id)
 
+    def test_operation_recovery_maps_statuses_without_durable_mutation(self) -> None:
+        grant, client = self.grant_and_client()
+        pending = client.admit("recover-pending")
+        applied = client.admit("recover-applied")
+        self.operator.dispatch(applied.queue_id)
+        rejected = client.admit("recover-rejected")
+        with patch.object(
+            implementation.time,
+            "time_ns",
+            return_value=grant.expires_at_ms * 1_000_000,
+        ):
+            self.assertEqual("EXPIRED", self.operator.dispatch(rejected.queue_id).code)
+
+        journal = self.state_dir / implementation.JOURNAL_NAME
+        before_journal = journal.read_bytes()
+        with self.operator._locked():
+            before_record_count = self.operator._read_state().record_count
+        before_effects = self.operator.world_snapshot().protected_effects
+        expected = (
+            ("recover-pending", pending.queue_id, "PENDING"),
+            ("recover-applied", applied.queue_id, "CONFIRMED_APPLIED"),
+            ("recover-rejected", rejected.queue_id, "CONFIRMED_NOT_APPLIED"),
+        )
+        for operation_id, queue_id, status in expected:
+            with self.subTest(operation_id=operation_id):
+                self.assertEqual(
+                    {"queue_id": queue_id, "status": status},
+                    self.operator._recover_operation_for_run(operation_id, grant.run_id),
+                )
+        self.assertEqual(before_journal, journal.read_bytes())
+        with self.operator._locked():
+            self.assertEqual(before_record_count, self.operator._read_state().record_count)
+        self.assertEqual(before_effects, self.operator.world_snapshot().protected_effects)
+
+    def test_operation_recovery_requires_both_run_and_operation_and_survives_reopen(self) -> None:
+        grant, client = self.grant_and_client()
+        queued = client.admit("recover-owned")
+        other_grant, other_client = self.grant_and_client()
+        other_client.admit("recover-other-run")
+        unknown = self.operator._recover_operation_for_run("recover-missing", grant.run_id)
+        cross_run = self.operator._recover_operation_for_run("recover-other-run", grant.run_id)
+        self.assertIsNone(unknown)
+        self.assertEqual(unknown, cross_run)
+        self.assertEqual(
+            {"queue_id": queued.queue_id, "status": "PENDING"},
+            self.operator._recover_operation_for_run("recover-owned", grant.run_id),
+        )
+
+        _, reopened = BrokeredOperator.open(self.state_dir)
+        self.assertEqual(
+            {"queue_id": queued.queue_id, "status": "PENDING"},
+            reopened._recover_operation_for_run("recover-owned", grant.run_id),
+        )
+        self.assertIsNone(
+            reopened._recover_operation_for_run("recover-other-run", grant.run_id)
+        )
+        self.assertNotEqual(grant.run_id, other_grant.run_id)
+
     def test_parser_rejects_duplicate_unknown_boolean_malformed_oversized_and_noncanonical(self) -> None:
         _, client = self.grant_and_client()
         valid = client.request_bytes("strict-input")

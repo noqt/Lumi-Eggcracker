@@ -100,6 +100,189 @@ class BrokeredLinuxProtocolTests(unittest.TestCase):
         self.assertEqual("PEER_IDENTITY", result["code"])
         self.assertEqual(0, self.operator.world_snapshot().protected_effects)
 
+    def test_recover_operation_maps_queue_statuses_without_mutation(self) -> None:
+        pending = self.receipt(
+            self.response(self.request("submit", operation_id="ipc-recover-pending"))
+        )
+        applied = self.receipt(
+            self.response(self.request("submit", operation_id="ipc-recover-applied"))
+        )
+        self.receipt(self.response(self.request("dispatch", queue_id=applied["queue_id"])))
+        rejected = self.receipt(
+            self.response(self.request("submit", operation_id="ipc-recover-rejected"))
+        )
+        with mock.patch.object(
+            brokered_operator.time,
+            "time_ns",
+            return_value=self.grant.expires_at_ms * 1_000_000,
+        ):
+            self.assertEqual(
+                "EXPIRED",
+                self.receipt(
+                    self.response(self.request("dispatch", queue_id=rejected["queue_id"]))
+                )["code"],
+            )
+
+        journal = Path(self.temporary.name) / "state" / brokered_operator.JOURNAL_NAME
+        before_journal = journal.read_bytes()
+        before_effects = self.operator.world_snapshot().protected_effects
+        expected = (
+            ("ipc-recover-pending", pending["queue_id"], "PENDING"),
+            ("ipc-recover-applied", applied["queue_id"], "CONFIRMED_APPLIED"),
+            ("ipc-recover-rejected", rejected["queue_id"], "CONFIRMED_NOT_APPLIED"),
+        )
+        for operation_id, queue_id, status in expected:
+            with self.subTest(operation_id=operation_id):
+                response = self.response(
+                    self.request("recover_operation", operation_id=operation_id)
+                )
+                self.assertEqual(
+                    {"outcome", "phase", "queue_id", "schema_version", "status"},
+                    set(response),
+                )
+                self.assertEqual("AVAILABLE", response["outcome"])
+                self.assertEqual("recovery", response["phase"])
+                self.assertEqual(queue_id, response["queue_id"])
+                self.assertEqual(status, response["status"])
+                self.assertNotIn("run_id", response)
+                self.assertNotIn("operation_id", response)
+                self.assertNotIn("capability", response)
+                self.assertNotIn("request", response)
+                self.assertNotIn("payload", response)
+                self.assertNotIn("path", response)
+                self.assertNotIn("dataset", response)
+        self.assertEqual(before_journal, journal.read_bytes())
+        self.assertEqual(before_effects, self.operator.world_snapshot().protected_effects)
+
+    def test_recover_operation_unknown_and_cross_run_are_identical_not_found(self) -> None:
+        other_grant = self.operator._register_run()
+        other_client = self.operator.client(other_grant)
+        other_client.admit("ipc-recover-other-run")
+        unknown = self.service.handle_packet(
+            self.workload_uid,
+            self.request("recover_operation", operation_id="ipc-recover-unknown"),
+        )
+        cross_run = self.service.handle_packet(
+            self.workload_uid,
+            self.request("recover_operation", operation_id="ipc-recover-other-run"),
+        )
+        self.assertEqual(unknown, cross_run)
+        self.assertEqual(
+            {
+                "code": "NOT_FOUND",
+                "outcome": "DENIED",
+                "phase": "recovery",
+                "schema_version": linux_ipc.IPC_SCHEMA,
+            },
+            linux_ipc._parse_response(unknown),
+        )
+        self.assertLessEqual(len(unknown), linux_ipc.MAX_IPC_RESPONSE_BYTES)
+
+    def test_recover_operation_request_and_response_fields_are_closed(self) -> None:
+        request, denial = linux_ipc._parse_request(
+            self.request("recover_operation", operation_id="closed-recovery")
+        )
+        self.assertIsNone(denial)
+        self.assertEqual(
+            {"op", "operation_id", "schema_version"},
+            set(request or {}),
+        )
+        unknown = self.request(
+            "recover_operation",
+            operation_id="closed-recovery",
+            queue_id="a" * 32,
+        )
+        self.assertEqual("UNKNOWN_FIELDS", self.response(unknown)["code"])
+        malformed = self.request("recover_operation", operation_id=True)
+        self.assertEqual("MALFORMED_INPUT", self.response(malformed)["code"])
+        valid = canonical(
+            {
+                "outcome": "AVAILABLE",
+                "phase": "recovery",
+                "queue_id": "a" * 32,
+                "schema_version": linux_ipc.IPC_SCHEMA,
+                "status": "PENDING",
+            }
+        )
+        self.assertEqual(valid, canonical(linux_ipc._parse_response(valid)))
+        with self.assertRaises(linux_ipc.BrokeredIPCError):
+            linux_ipc._parse_response(
+                canonical(
+                    {
+                        "outcome": "AVAILABLE",
+                        "phase": "recovery",
+                        "queue_id": "a" * 32,
+                        "path": "/private/state",
+                        "schema_version": linux_ipc.IPC_SCHEMA,
+                        "status": "PENDING",
+                    }
+                )
+            )
+
+    def test_linux_client_recover_operation_sends_only_operation_id(self) -> None:
+        socket_path = Path(self.temporary.name) / "brokered-recovery.sock"
+        client = linux_ipc.BrokeredLinuxClient(
+            socket_path,
+            service_uid=self.service_uid,
+        )
+        expected = {
+            "outcome": "DENIED",
+            "phase": "recovery",
+            "code": "NOT_FOUND",
+            "schema_version": linux_ipc.IPC_SCHEMA,
+        }
+        with mock.patch.object(client, "request_bytes", return_value=expected) as request:
+            self.assertEqual(expected, client.recover_operation("client-recovery"))
+        request.assert_called_once_with(
+            canonical(
+                {
+                    "op": "recover_operation",
+                    "operation_id": "client-recovery",
+                    "schema_version": linux_ipc.IPC_SCHEMA,
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            client.recover_operation("bad operation id")
+
+    def test_recover_operation_bad_peer_malformed_and_corrupt_state_fail_closed(self) -> None:
+        self.assertEqual(
+            "PEER_IDENTITY",
+            self.response(
+                self.request("recover_operation", operation_id="bad-peer"),
+                peer_uid=self.workload_uid + 1,
+            )["code"],
+        )
+        self.assertEqual(
+            "MALFORMED_INPUT",
+            self.response(b"not-json")["code"],
+        )
+        journal = Path(self.temporary.name) / "state" / brokered_operator.JOURNAL_NAME
+        journal.write_bytes(b"not-a-journal\n")
+        with self.assertRaises(brokered_operator.BrokeredStoreError):
+            self.service.handle_packet(
+                self.workload_uid,
+                self.request("recover_operation", operation_id="corrupt-journal"),
+            )
+
+        self.operator, self.grant = BrokeredOperator._open_or_bootstrap_service(
+            Path(self.temporary.name) / "state-witness"
+        )
+        self.service = linux_ipc.BrokeredLinuxService._for_trusted_test(
+            self.operator,
+            self.grant,
+            workload_uid=self.workload_uid,
+            workload_gid=24681,
+            service_uid=self.service_uid,
+        )
+        witness = Path(self.temporary.name) / "state-witness" / brokered_operator.WITNESS_NAME
+        witness.write_bytes(b"not-a-witness\n")
+        with self.assertRaises(brokered_operator.BrokeredStoreError):
+            self.service.handle_packet(
+                self.workload_uid,
+                self.request("recover_operation", operation_id="corrupt-witness"),
+            )
+
     def test_service_only_construction_and_fixed_result_workflow(self) -> None:
         with self.assertRaises(PermissionError):
             linux_ipc.BrokeredLinuxService(
@@ -162,6 +345,74 @@ class BrokeredLinuxProtocolTests(unittest.TestCase):
         )
         self.assertEqual("AVAILABLE", after_reopen["outcome"])
         self.assertEqual(1, reopened.world_snapshot().protected_effects)
+        recovered_after_reopen = linux_ipc._parse_response(
+            reopened_service.handle_packet(
+                self.workload_uid,
+                self.request("recover_operation", operation_id="research-batch-1"),
+            )
+        )
+        self.assertEqual(queue_id, recovered_after_reopen["queue_id"])
+        self.assertEqual("CONFIRMED_APPLIED", recovered_after_reopen["status"])
+
+    def test_lost_submit_output_recovers_by_operation_after_service_reopen(self) -> None:
+        def fresh_client(service: linux_ipc.BrokeredLinuxService) -> linux_ipc.BrokeredLinuxClient:
+            client = linux_ipc.BrokeredLinuxClient(
+                Path(self.temporary.name) / "recovery-client.sock",
+                service_uid=self.service_uid,
+            )
+
+            def route(raw: bytes) -> dict[str, object]:
+                return linux_ipc._parse_response(
+                    service.handle_packet(self.workload_uid, raw)
+                )
+
+            client.request_bytes = route  # type: ignore[method-assign]
+            return client
+
+        operation_id = "lost-submit-output"
+        fresh_client(self.service).submit(operation_id)
+        journal = Path(self.temporary.name) / "state" / brokered_operator.JOURNAL_NAME
+        before_recovery_journal = journal.read_bytes()
+
+        _, reopened = BrokeredOperator.open(Path(self.temporary.name) / "state")
+        resumed_grant = reopened._service_run_grant()
+        reopened_service = linux_ipc.BrokeredLinuxService._for_trusted_test(
+            reopened,
+            resumed_grant,
+            workload_uid=self.workload_uid,
+            workload_gid=24681,
+            service_uid=self.service_uid,
+        )
+        recovered = fresh_client(reopened_service).recover_operation(operation_id)
+        self.assertEqual(
+            {"outcome", "phase", "queue_id", "schema_version", "status"},
+            set(recovered),
+        )
+        self.assertEqual("AVAILABLE", recovered["outcome"])
+        self.assertEqual("recovery", recovered["phase"])
+        self.assertEqual(linux_ipc.IPC_SCHEMA, recovered["schema_version"])
+        self.assertEqual("PENDING", recovered["status"])
+        recovered_queue_id = recovered["queue_id"]
+        self.assertIsInstance(recovered_queue_id, str)
+        self.assertNotIn("run_id", recovered)
+        self.assertNotIn("operation_id", recovered)
+        self.assertNotIn("capability", recovered)
+        self.assertNotIn("request", recovered)
+        self.assertNotIn("payload", recovered)
+        self.assertNotIn("path", recovered)
+        self.assertNotIn("dataset", recovered)
+        self.assertEqual(before_recovery_journal, journal.read_bytes())
+        self.assertEqual(0, reopened.world_snapshot().protected_effects)
+
+        self.assertEqual(
+            "NOT_FOUND",
+            fresh_client(reopened_service).get_result(recovered_queue_id)["code"],
+        )
+        dispatched = fresh_client(reopened_service).dispatch(recovered_queue_id)
+        self.assertEqual("EFFECT_APPLIED", dispatched["receipt"]["code"])
+        applied = fresh_client(reopened_service).recover_operation(operation_id)
+        self.assertEqual(recovered_queue_id, applied["queue_id"])
+        self.assertEqual("CONFIRMED_APPLIED", applied["status"])
 
     def test_stop_fence_stale_queue_and_single_run_survive_reopen(self) -> None:
         completed = self.receipt(
@@ -325,6 +576,58 @@ class BrokeredLinuxOneShotCLITests(unittest.TestCase):
         ):
             status = brokered_operator_demo.main(arguments)
         return status, calls, standard_output.getvalue(), standard_error.getvalue(), constructor
+
+    def test_recover_cli_uses_only_a_client_and_does_not_bootstrap(self) -> None:
+        calls: list[str] = []
+
+        class FakeClient:
+            queue_id = "a" * 32
+
+            def recover_operation(self, operation_id: str) -> dict[str, object]:
+                calls.append(operation_id)
+                return {
+                    "outcome": "AVAILABLE",
+                    "phase": "recovery",
+                    "queue_id": self.queue_id,
+                    "schema_version": linux_ipc.IPC_SCHEMA,
+                    "status": "PENDING",
+                }
+
+        standard_output = io.StringIO()
+        standard_error = io.StringIO()
+        arguments = [
+            "--linux-ipc",
+            "recover",
+            "--socket",
+            "/tmp/fake-broker.sock",
+            "--service-uid",
+            "1200",
+            "--operation-id",
+            "cli-recover-1",
+        ]
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch.object(brokered_operator_demo.os, "geteuid", return_value=1201, create=True),
+            mock.patch.object(
+                linux_ipc,
+                "BrokeredLinuxClient",
+                side_effect=lambda *args, **kwargs: FakeClient(),
+            ) as constructor,
+            mock.patch.object(
+                brokered_operator_demo.BrokeredOperator,
+                "bootstrap",
+                side_effect=AssertionError("recover must not bootstrap"),
+            ) as bootstrap,
+            contextlib.redirect_stdout(standard_output),
+            contextlib.redirect_stderr(standard_error),
+        ):
+            status = brokered_operator_demo.main(arguments)
+        self.assertEqual(0, status)
+        self.assertEqual(["cli-recover-1"], calls)
+        constructor.assert_called_once_with("/tmp/fake-broker.sock", service_uid=1200)
+        bootstrap.assert_not_called()
+        self.assertEqual("", standard_error.getvalue())
+        self.assertIn('"status":"PENDING"', standard_output.getvalue())
 
     def successful_responses(self) -> dict[str, object]:
         return {

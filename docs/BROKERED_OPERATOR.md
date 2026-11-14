@@ -115,6 +115,12 @@ capability, filesystem path, or work payload:
   bounded aggregate report atomically with the applied queue/effect. Reopen
   replays and verifies that result, so it remains retrievable without exposing
   the private input or trusting workload input or an arbitrary output path.
+- `recover_operation` accepts exactly the operation ID and performs a bounded,
+  read-only lookup against the existing authenticated service run. It returns
+  only the original queue ID and one status: `PENDING` for a queued item,
+  `CONFIRMED_APPLIED` for an applied item, or `CONFIRMED_NOT_APPLIED` for a
+  rejected item. Unknown and cross-run operation IDs receive the same bounded
+  `NOT_FOUND` response.
 
 IPC messages are canonical UTF-8 JSON with one trailing newline, duplicate
 keys and unknown fields rejected, and exact operation-specific fields enforced
@@ -123,8 +129,8 @@ report to 1024 bytes. A rejected peer is denied before parsing or effect. There
 is no generic callback, URL, arbitrary file target, shell, network action,
 secret access, process kill, reset, or resume operation. The default
 `scripts/brokered_operator_demo.py` remains the portable demo. Its `--linux-ipc`
-modes expose service, submit, dispatch, result, run, trusted stop, and snapshot
-commands for use under the separately provisioned service and workload
+modes expose service, submit, dispatch, result, recover, run, trusted stop, and
+snapshot commands for use under the separately provisioned service and workload
 identities. For example, run `serve` as the service UID and client commands as
 the workload UID. The one-shot `run` mode performs admission, dispatch, and
 bounded result retrieval in order, then prints one JSON outcome containing all
@@ -146,8 +152,26 @@ has been validated, then `CONFIRMED_APPLIED`. `UNKNOWN` does not establish
 that no effect occurred; `CONFIRMED_APPLIED` describes only the synthetic
 broker receipt.
 
-For manual recovery, begin with the side-effect-free result lookup for the
-validated queue ID:
+When output was lost and the queue ID is no longer available, begin with the
+side-effect-free operation recovery lookup. It talks only to an already running
+authenticated service; it does not bootstrap a store, register a run, submit,
+dispatch, replay, or execute a command:
+
+```sh
+python scripts/brokered_operator_demo.py --linux-ipc recover \
+  --socket /run/eggcracker-brokered/operator.sock --service-uid 1200 \
+  --operation-id OPERATION_ID
+```
+
+Use the returned queue ID for the existing result and dispatch logic. A
+`CONFIRMED_APPLIED` status should be followed by the side-effect-free result
+lookup; `PENDING` can be inspected with that lookup and then handled with the
+existing dispatch command if the operator decides to continue; and
+`CONFIRMED_NOT_APPLIED` confirms that the durable item was rejected. The
+recovery lookup itself changes no journal, queue, dataset, or synthetic effect.
+
+When the queue ID is already known, begin with the side-effect-free result
+lookup:
 
 ```sh
 python scripts/brokered_operator_demo.py --linux-ipc result \
