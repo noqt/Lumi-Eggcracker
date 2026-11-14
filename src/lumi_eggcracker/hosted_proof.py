@@ -57,6 +57,15 @@ REVIEWED_PROBE_BLOBS = {
     "src/lumi_eggcracker/discovery.py": "10cec85df3931c2b4d775484da9e97cc555927a9",
     "src/lumi_eggcracker/jsonio.py": "d09c32d35df2c423aa504f6e178c3820dae765cd",
 }
+# This maintained package is outside the probe import closure, so constrain its
+# complete layout without pinning its blob contents.
+MAINTAINED_BROKERED_LAYOUT = {
+    "src/lumi_eggcracker/brokered": ("040000", "tree"),
+    "src/lumi_eggcracker/brokered/__init__.py": ("100644", "blob"),
+    "src/lumi_eggcracker/brokered/compare_detection_receipts.py": ("100644", "blob"),
+    "src/lumi_eggcracker/brokered/linux_ipc.py": ("100644", "blob"),
+    "src/lumi_eggcracker/brokered/operator.py": ("100644", "blob"),
+}
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 Sleeper = Callable[[float], None]
@@ -311,15 +320,28 @@ def _resume_source(runner: Runner, repository: str, head: str) -> None:
         if path in {"src", "src/lumi_eggcracker", "scripts"}:
             if entry.get("mode") != "040000" or entry.get("type") != "tree":
                 raise HostedProofError("Run-source import roots are not regular trees.")
-        elif path.startswith("src/") and (
-            not re.fullmatch(r"src/lumi_eggcracker/[A-Za-z_][A-Za-z_0-9]*\.(py|json)", path)
-            or entry.get("mode") not in {"100644", "100755"}
-            or entry.get("type") != "blob"
-        ):
-            # A flat package containing only ordinary .py/.json files cannot
-            # shadow the pinned modules with packages, pyc or native extensions.
-            raise HostedProofError("Run-source contains unreviewed import paths.")
-    if not {"src", "src/lumi_eggcracker", "scripts"}.issubset(found):
+        elif path.startswith("src/"):
+            expected_layout = MAINTAINED_BROKERED_LAYOUT.get(path)
+            if expected_layout is not None:
+                if (
+                    (entry.get("mode"), entry.get("type")) != expected_layout
+                    or not isinstance(entry.get("sha"), str)
+                    or re.fullmatch(r"[0-9a-f]{40}", entry["sha"]) is None
+                ):
+                    raise HostedProofError("Run-source brokered package layout is invalid.")
+            elif path.startswith("src/lumi_eggcracker/brokered/") or (
+                not re.fullmatch(r"src/lumi_eggcracker/[A-Za-z_][A-Za-z_0-9]*\.(py|json)", path)
+                or entry.get("mode") not in {"100644", "100755"}
+                or entry.get("type") != "blob"
+            ):
+                # Only the exact maintained brokered package may be nested;
+                # other paths cannot shadow pinned modules with packages, pyc
+                # or native extensions.
+                raise HostedProofError("Run-source contains unreviewed import paths.")
+    required_paths = {"src", "src/lumi_eggcracker", "scripts"} | set(
+        MAINTAINED_BROKERED_LAYOUT
+    )
+    if not required_paths.issubset(found):
         raise HostedProofError("Run-source import roots are missing.")
     for path, expected in REVIEWED_PROBE_BLOBS.items():
         entry = found.get(path, {})
