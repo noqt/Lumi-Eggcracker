@@ -21,10 +21,11 @@ Maintained by [noqt](https://github.com/noqt), which builds open-source software
 
 ## The kill switch outside the sandbox
 
-Lumi Eggcracker is an AI kill tool.
-
-If a local AI workload is running when it shouldn't be, Eggcracker is built to
-kill it and everything it started, then leave a receipt showing what happened.
+Lumi Eggcracker is an AI workload containment tool. On a complete unapproved
+match, it captures the related observed component and descendants into an exact
+containment cgroup, kills that captured hierarchy, and records that the captured
+cgroup was empty. The receipt does not establish that processes which escaped
+before observation or were never observed were terminated.
 
 Eggcracker started after [OpenAI disclosed](https://openai.com/index/hugging-face-model-evaluation-security-incident/)
 that AI agents in a cybersecurity test broke out of their intended environment
